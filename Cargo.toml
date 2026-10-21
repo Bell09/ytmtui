@@ -1,0 +1,32 @@
+[package]
+name = "ytmtui"
+version = "0.1.0"
+edition = "2021"
+description = "A full-featured YouTube Music TUI client written in Rust"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Bell09/ytmtui"
+keywords = ["youtube-music", "tui", "music", "cli"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["json", "gzip", "deflate", "brotli"] }
+unicode-width = "0.1"
+anyhow = "1.0"
+image = "0.25"
+zbus = "5"
+directories = "5.0"
+urlencoding = "2.1"
+rand = "0.8"
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc", "block-padding"] }
+pbkdf2 = { version = "0.12", features = ["hmac"] }
+sha1 = "0.10"
+lofty = "0.25.4"
