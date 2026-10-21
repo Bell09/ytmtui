@@ -2,6 +2,15 @@
 
 A lightning-fast YouTube Music TUI client written in Rust.
 
+## Screenshots
+
+<p align="center">
+  <img src="assets/screenshots/all-i-wanted.png" width="49%" alt="ytmtui library with the All I Wanted playlist and synced lyrics">
+  <img src="assets/screenshots/billie-eilish.png" width="49%" alt="Billie Eilish playlist with synced lyrics">
+  <img src="assets/screenshots/birds-of-a-feather.png" width="49%" alt="BIRDS OF A FEATHER playing with synced lyrics">
+  <img src="assets/screenshots/your-anxiety-buddy.png" width="49%" alt="Your Anxiety Buddy playlist with synced lyrics">
+</p>
+
 ## Install
 
 ### Arch Linux (AUR)
