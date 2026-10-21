@@ -85,8 +85,17 @@ Only have the `cookie` value? Paste that instead — the wizard fills in the res
 | `n` / `p` | Next / previous track |
 | `/` | Focus the search bar at the top of the window (type, then `Enter` to search) |
 | `Tab` / `Shift+Tab` | Cycle search filters (Top, Songs, Albums, …) |
-| `PageDown` / `PageUp` | Scroll the Library detail pane |
 | `Esc` | Back (out of a collection, or from search to the library) |
+| `z` | Open the queue (`Esc` leaves it) |
+| `d` | Download the highlighted song as MP3 with embedded cover art (on the Queue page: delete the selected row) |
+| `o` | Toggle offline mode (local music folder ↔ account library) |
+| `h` | Like/unlike the current song |
+| `l` | Toggle the lyrics pane |
+| `X` / `Z` | Queue the highlighted track to play next / append it |
+| `J` / `K` | Move the selected queue item down / up |
+| `Ctrl+R` | Cycle repeat mode |
+| `Ctrl+S` | Toggle shuffle |
+| `PageDown` / `PageUp` | Scroll the lyrics pane if open, otherwise the Library detail pane |
 | `q` | Quit |
 
 ## Views
