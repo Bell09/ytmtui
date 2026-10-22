@@ -8,16 +8,16 @@ pub struct Track {
     pub album: Option<String>,
     pub duration: Option<String>,
     pub thumbnail_url: Option<String>,
-
-    /// Like state carried by the row's menu button. `Some(true)` when the
-    /// account has the song liked, `Some(false)` when it's explicitly not,
-    /// `None` when the field is missing because the source of the
-    /// response didn't say (search rows, offline files, public fallback).
+    /// Like state carried by the row's menu button: `Some(true)` when the
+    /// account has the song liked, `Some(false)` when not, `None` when the
+    /// response didn't say (search rows, offline fallbacks).
     #[serde(default)]
     pub like: Option<bool>,
-
-    /// Whether a local offline copy exists. Stamped by the offline
-    /// registry when tracks are loaded; never serialised from the API.
+    /// Whether a copy of this track sits in the local music folder, drawn as
+    /// a check mark. Stamped from the download registry whenever a list is
+    /// stored and re-stamped the moment a download lands, so an online row
+    /// lights up without a re-navigation. Local scans set it directly: every
+    /// file they report is, by definition, already offline.
     #[serde(default)]
     pub downloaded: bool,
 }
