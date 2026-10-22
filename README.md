@@ -2,7 +2,7 @@
 
 # ♬♫♪ ytmtui
 
-**YouTube Music in your terminal — synced lyrics, keyboard-driven, mpv backend.**
+**A minimal, lightning-fast YouTube Music TUI written in Rust—featuring an mpv backend, download songs, synced lyrics, offline mode, and keyboard-driven controls..**
 
 Linux · Free-tier supported
 
