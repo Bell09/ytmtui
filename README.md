@@ -1,16 +1,53 @@
+<div align="center">
+
 # ytmtui
 
-A minimal, lightning-fast YouTube Music terminal player written in Rust. Lightweight and keyboard-driven.
+**A minimal, lightning-fast YouTube Music terminal player**  
+written in Rust · lightweight · keyboard-driven
+
+<br>
+
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[![AUR](https://img.shields.io/aur/version/ytmtui?style=flat-square&logo=archlinux&label=AUR)](https://aur.archlinux.org/packages/ytmtui)
+
+<br>
+
+![ytmtui — All I Wanted](assets/screenshots/all-i-wanted.png)
+
+</div>
+
+---
+
+## Features
+
+| | |
+| :--- | :--- |
+| **Terminal UI** | Built with `ratatui` + `crossterm` — chrome-free, hairlines & whitespace only |
+| **Auth wizard** | `ytmtui setup` auto-detects your browser and extracts cookies |
+| **Innertube search** | Signed-in search with Top / Songs / Albums / Artists / Playlists filters |
+| **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
+| **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, buffering state |
+| **Extras** | Synced lyrics, queue, offline mode, like/unlike, MP3 download with cover art |
+
+---
 
 ## Screenshots
 
-![ytmtui library with the All I Wanted playlist and synced lyrics](assets/screenshots/all-i-wanted.png)
+<div align="center">
 
-![Billie Eilish playlist with synced lyrics](assets/screenshots/billie-eilish.png)
+| | |
+| :---: | :---: |
+| ![Billie Eilish](assets/screenshots/billie-eilish.png) | ![Birds of a Feather](assets/screenshots/birds-of-a-feather.png) |
+| *Billie Eilish playlist + lyrics* | *BIRDS OF A FEATHER playing* |
 
-![BIRDS OF A FEATHER playing with synced lyrics](assets/screenshots/birds-of-a-feather.png)
+![Your Anxiety Buddy](assets/screenshots/your-anxiety-buddy.png)
 
-![Your Anxiety Buddy playlist with synced lyrics](assets/screenshots/your-anxiety-buddy.png)
+*Your Anxiety Buddy — full library view*
+
+</div>
+
+---
 
 ## Install
 
@@ -28,49 +65,54 @@ yay -S ytmtui
 git clone https://github.com/Bell09/ytmtui.git
 cd ytmtui
 cargo build --release
+# binary lands in target/release/ytmtui
 ```
 
-## Features
+---
 
-- **Terminal UI** built with `ratatui` + `crossterm`.
-- **Interactive authentication wizard** (`ytmtui setup`).
-- **YouTube Music (Innertube) search** when signed in; public search fallback otherwise. Search results can be filtered by **Top / Songs / Albums / Artists / playlists**, and albums, artists and playlists are directly openable.
-- **Your library** — a master–detail browser of your playlists, subscribed artists and channels, with a lazy track preview. Open any entry (playlists open their full track list; artists open their top songs) and play a track.
-- **Simple keyboard navigation** (arrows, `Enter`, `n`/`p`), a real-time progress bar, buffering state, true pause/resume (via `mpv`'s IPC socket), and an `mpv` playback backend.
+## Quick start
+
+```bash
+ytmtui setup              # interactive auth wizard (auto-detects browser)
+ytmtui                    # launch the TUI
+```
+
+<details>
+<summary><strong>Setup options</strong></summary>
+
+```bash
+ytmtui setup --manual          # skip browser detection, paste headers
+ytmtui setup --browser firefox # force a specific browser
+```
+
+</details>
+
+---
 
 ## Setup & Authentication
 
-```bash
-ytmtui setup              # interactive wizard (auto-detects your browser)
-ytmtui setup --manual     # skip browser detection, paste headers directly
-ytmtui setup --browser firefox
-```
+The wizard walks you through signing in:
 
-The wizard:
+1. Shows the **YouTube Music Authentication** banner
+2. If already authenticated, asks whether to re-authenticate
+3. Auto-detects a signed-in browser and extracts cookies (falls back to manual paste)
+4. Identifies the account and lets you pick between multiple Google accounts
+5. Verifies credentials against YouTube Music
 
-1. Shows the `YouTube Music Authentication` banner.
-2. If already authenticated, asks whether to re-authenticate.
-3. Auto-detects a signed-in browser and extracts cookies; on failure it
-   falls back to the manual header paste.
-4. Identifies the account and lets you pick between multiple Google accounts.
-5. Verifies credentials against YouTube Music and reports the result.
-
-Credentials are stored in `~/.config/ytmtui/auth.json`.
+Credentials live in `~/.config/ytmtui/auth.json`.
 
 ### Browser auto-extraction
 
-Supported browsers (detected in this order): `helium`, `chrome`, `chromium`,
-`brave`, `firefox`, `zen`, `edge`, `vivaldi`, `opera`.
+Supported browsers (checked in order):
 
-- **Firefox family** (Firefox, Zen): reads `cookies.sqlite` directly.
-- **Chromium family** (Chrome, Chromium, Brave, Edge, Vivaldi, Opera, Helium):
-  reads the `Cookies` database and decrypts values with AES-128-CBC, using the
-  "Chrome Safe Storage" secret from the login keyring (`secret-tool`) when
-  available, or Chrome's Linux fallback. Native (flatpak/snap) paths are
-  handled too.
+`helium` · `chrome` · `chromium` · `brave` · `firefox` · `zen` · `edge` · `vivaldi` · `opera`
 
-Browsers are read via a private copy of the database, so a running browser
-never blocks extraction.
+| Family | Method |
+| :--- | :--- |
+| **Firefox / Zen** | Reads `cookies.sqlite` directly |
+| **Chromium family** | Decrypts the Cookies DB with AES-128-CBC using the login keyring (`secret-tool`) or Chrome’s Linux fallback |
+
+Databases are copied privately, so a running browser never blocks extraction. Flatpak / snap paths are handled too.
 
 ### Manual header paste
 
@@ -78,85 +120,79 @@ never blocks extraction.
 ytmtui setup --manual
 ```
 
-1. Open <https://music.youtube.com>, press **F12** → **Network**, and refresh.
-2. Click any `/browse` request, then right-click **Request Headers** → **Copy**.
-3. Paste into the wizard, then press **Enter** on a blank line.
+1. Open [music.youtube.com](https://music.youtube.com) → **F12** → **Network** → refresh
+2. Click any `/browse` request → right-click **Request Headers** → **Copy**
+3. Paste into the wizard, then press **Enter** on a blank line
 
-Only have the `cookie` value? Paste that instead — the wizard fills in the rest.
+Only have the `cookie` value? Paste that — the wizard fills in the rest.
+
+---
 
 ## Keybindings
 
 | Key | Action |
 | :--- | :--- |
-| `Up` / `Down` | Move within the current list |
-| `Left` / `Right` | Seek ∓10s (only acts while a track is playing or paused) |
-| `Enter` | Play the selected track or open the selected collection |
-| `Space` | Toggle play/pause |
+| `↑` / `↓` | Move within the current list |
+| `←` / `→` | Seek ∓10 s (while playing / paused) |
+| `Enter` | Play selected track or open collection |
+| `Space` | Toggle play / pause |
 | `n` / `p` | Next / previous track |
-| `/` | Focus the search bar at the top of the window (type, then `Enter` to search) |
-| `Tab` / `Shift+Tab` | Cycle search filters (Top, Songs, Albums, …) |
-| `Esc` | Back (out of a collection, or from search to the library) |
-| `Esc` | Open the queue (`Esc` leaves it) |
-| `d` | Download the highlighted song as MP3 with embedded cover art (on the Queue page: delete the selected row) |
-| `o` | Toggle offline mode (local music folder ↔ account library) |
-| `h` | Like/unlike the current song |
-| `l` | Toggle the lyrics pane |
-| `X` / `Z` | Queue the highlighted track to play next / append it |
-| `Up` / `Down` | Move the selected queue item down / up arrow key |
+| `/` | Focus search bar |
+| `Tab` / `⇧Tab` | Cycle search filters |
+| `Esc` | Back / open queue |
+| `d` | Download highlighted song as MP3 (or delete in queue) |
+| `o` | Toggle offline mode |
+| `h` | Like / unlike current song |
+| `l` | Toggle lyrics pane |
+| `X` / `Z` | Queue next / append to queue |
 | `Ctrl+R` | Cycle repeat mode |
 | `Ctrl+S` | Toggle shuffle |
-| `PageDown` / `PageUp` | Scroll the lyrics pane if open, otherwise the Library detail pane |
+| `PgUp` / `PgDn` | Scroll lyrics or detail pane |
 | `q` | Quit |
+
+---
 
 ## Views
 
-The window is chrome-free — no box borders, just hairlines, whitespace and
-right-aligned metadata (colour comes from your pywal palette). It opens on the
-library:
+The window is deliberately chrome-free — no box borders, just hairlines, whitespace and right-aligned metadata. Colour comes from your **pywal** palette.
 
-- **Header** — the app name and your signed-in account, the search prompt, and
-  a hairline. Press `/` to focus the search line, type a query and press
-  `Enter` for authenticated Innertube results; `Tab` / `Shift+Tab` switches
-  between the **Top**, **Songs**, **Albums**, **Artists** and playlist
-  filters. `Esc` returns to the library.
-- **Playlist sidebar** — always visible on the left: your library's playlists,
-  albums, artists and channels as compact rows (kind glyph, name, right-aligned
-  track count). `Up`/`Down` moves the `▌` cursor and the detail view follows;
-  `Enter` opens the selection as a full track list.
-- **Detail / results** — the right pane shows the highlighted entry's title,
-  meta line and lazily-fetched track list (cached; `PageUp`/`PageDown` scrolls
-  long lists), the search results, or the tracks of an opened collection — with
-  `Esc` going back.
-- **Selection line** — the focused item's full name behind a `▌` cursor.
-- **Playback** — indicator, track and time over a full-width progress bar that
-  only advances while actually playing. `Left`/`Right` seek ±10s, `n`/`p` skip,
-  `Space` pauses.
-- **Footer** — the status message on the left, a compact keybinding cheat-sheet
-  on the right.
+- **Header** — app name, signed-in account, search prompt  
+  Press `/` to search · `Tab` / `⇧Tab` switches **Top · Songs · Albums · Artists · Playlists**
+- **Playlist sidebar** — always-visible library of playlists, albums, artists & channels  
+  `↑`/`↓` moves the `▌` cursor · `Enter` opens the selection
+- **Detail / results** — title, meta line and lazily-fetched track list (cached)
+- **Playback bar** — indicator, track, time and a full-width progress bar that only advances while playing
+- **Footer** — status message + compact keybinding cheat-sheet
+
+---
 
 ## Theming
 
-Colors are taken from your **pywal** palette at startup
-(`$XDG_CACHE_HOME/wal/colors.json`, falling back to the `colors` file). The
-accent colour marks whatever is active — the `▌` cursors, the progress bar,
-the playing indicator and the current search filter — while everything
-secondary (meta lines, counts, hairlines, status text) is dimmed. If no pywal
-palette is found, a built-in fallback theme is used. Set a new wallpaper with
-`wal` and restart `ytmtui` to pick up the new colors.
+Colors are taken from your **pywal** palette at startup:
 
-## Command-line helpers
+```
+$XDG_CACHE_HOME/wal/colors.json   # preferred
+$XDG_CACHE_HOME/wal/colors        # fallback
+```
 
-Aside from the TUI, the binary exposes a few non-interactive commands:
+The accent colour marks everything active — the `▌` cursors, progress bar, playing indicator and current search filter. Secondary text (meta, counts, hairlines, status) is dimmed. No pywal palette found → a built-in fallback is used.
+
+Set a new wallpaper with `wal` and restart `ytmtui` to pick up the new colours.
+
+---
+
+## CLI helpers
 
 ```bash
 ytmtui status            # show the signed-in account
 ytmtui playlists         # list library playlists, artists and channels
 ytmtui liked             # list liked songs
-ytmtui tracks <id>       # list tracks of a playlist/album/artist (VLPL…, VLLM, MPREb…)
+ytmtui tracks <id>       # list tracks of a playlist / album / artist
+                         # (VLPL…, VLLM…, MPREb…)
 ```
 
-## Running
+---
 
-```bash
-cargo run --release
-```
+## License
+
+MIT © [Bell09](https://github.com/Bell09)
