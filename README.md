@@ -39,11 +39,8 @@ written in Rust · lightweight · keyboard-driven
 | | |
 | :---: | :---: |
 | ![Billie Eilish](assets/screenshots/billie-eilish.png) | ![Birds of a Feather](assets/screenshots/birds-of-a-feather.png) |
-| *Billie Eilish playlist + lyrics* | *BIRDS OF A FEATHER playing* |
 
 ![Your Anxiety Buddy](assets/screenshots/your-anxiety-buddy.png)
-
-*Your Anxiety Buddy — full library view*
 
 </div>
 
