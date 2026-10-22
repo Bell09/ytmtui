@@ -9,9 +9,15 @@ pub struct Track {
     pub duration: Option<String>,
     pub thumbnail_url: Option<String>,
 
+    /// Like state carried by the row's menu button. `Some(true)` when the
+    /// account has the song liked, `Some(false)` when it's explicitly not,
+    /// `None` when the field is missing because the source of the
+    /// response didn't say (search rows, offline files, public fallback).
     #[serde(default)]
     pub like: Option<bool>,
 
+    /// Whether a local offline copy exists. Stamped by the offline
+    /// registry when tracks are loaded; never serialised from the API.
     #[serde(default)]
     pub downloaded: bool,
 }
@@ -34,6 +40,7 @@ pub struct Playlist {
 }
 
 impl Playlist {
+    /// Human-readable label for the entry's kind.
     pub fn kind_label(&self) -> &'static str {
         match self.kind {
             PlaylistKind::Playlist => "Playlist",
@@ -44,6 +51,8 @@ impl Playlist {
     }
 }
 
+/// One row in a search result: either a playable song or an openable
+/// collection (album / artist / playlist).
 #[derive(Debug, Clone)]
 pub enum SearchHit {
     Track(Track),
