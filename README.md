@@ -1,6 +1,6 @@
 <div align="center">
 
-# ▶︎ ytmtui
+# ˖ ݁♬⋆ ytmtui
 
 **YouTube Music in your terminal — synced lyrics, keyboard-driven, mpv backend.**
 
