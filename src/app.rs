@@ -130,10 +130,10 @@ pub struct App {
     pub elapsed_secs: u64,
     pub playback_duration_secs: u64,
     pub buffering_timer: Option<Instant>,
-    /// Colour theme (pywal-derived, reloaded live when the wallpaper
-    /// changes the palette file).
+    /// Colour theme (from pywal, wallust or matugen, reloaded live when the
+    /// wallpaper tool rewrites its palette).
     pub theme: crate::theme::Theme,
-    /// The pywal file the theme came from and the mtime we last read it
+    /// The palette file the theme came from and the mtime we last read it
     /// at — the whole live-reload state. A `stat()` per tick (~1µs) is
     /// enough to notice a wallpaper change; the palette is only re-parsed
     /// when the mtime actually moves.
@@ -225,11 +225,13 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let api = YtmApi::new();
-        // The pywal palette, plus the file it came from and that file's
+        // The detected palette, plus the file it came from and that file's
         // mtime — together these let `poll_theme` notice a wallpaper
         // change and repaint without re-reading the palette every tick.
-        let theme = crate::theme::Theme::load();
-        let theme_src = crate::theme::Theme::source_file();
+        let (theme, theme_src) = match crate::theme::Theme::load_with_source() {
+            Some((theme, path)) => (theme, Some(path)),
+            None => (crate::theme::Theme::fallback(), None),
+        };
         let theme_mtime = theme_src
             .as_ref()
             .and_then(|p| std::fs::metadata(p).ok())
@@ -508,29 +510,43 @@ impl App {
         self.sync_ipc();
     }
 
-    /// Repaint from pywal when the wallpaper changes the palette file.
+    /// Repaint when a wallpaper tool rewrites one of its palette files.
     ///
-    /// One `stat()` per tick (the loop runs at 10Hz) is enough to notice a
-    /// change; the palette is only re-parsed when the mtime actually moves.
-    /// pywal rewrites the file in place, so a read racing the write sees a
-    /// half-written palette — that parse fails, we keep the colours we
-    /// have, and the next tick retries against the finished file.
+    /// The newest valid palette wins, so switching from pywal to wallust or
+    /// matugen also repaints. One `stat()` per candidate per tick (the loop
+    /// runs at 10Hz) is enough to notice a change; successful parses are
+    /// cached by mtime. If a writer is truncating the newest file, it is
+    /// skipped until the write lands and the current colours stay on screen.
     fn poll_theme(&mut self) {
-        let path = match crate::theme::Theme::source_file() {
-            Some(path) => path,
-            // No palette right now. Only drop back to the terminal's own
-            // colours if we never had a pywal one to begin with.
-            None => {
-                if self.theme_src.is_some() {
-                    self.theme_src = None;
-                    self.theme_mtime = None;
-                    self.theme = crate::theme::Theme::fallback();
-                }
-                return;
+        // No theming tool at all: drop back to the terminal's own colours.
+        let Some(latest) = crate::theme::Theme::latest_file() else {
+            if self.theme_src.is_some() {
+                self.theme_src = None;
+                self.theme_mtime = None;
+                self.theme = crate::theme::Theme::fallback();
             }
+            return;
         };
-        // If we can't even stat it, leave the watched state alone and try
-        // again next tick rather than latching on a missing mtime.
+
+        let Some(path) = crate::theme::Theme::source_file() else {
+            // A palette exists but none parses yet: a writer is probably
+            // mid-update. Keep the last good theme unless its file is gone.
+            if self.theme_src.as_ref().is_some_and(|src| !src.exists()) {
+                self.theme_src = None;
+                self.theme_mtime = None;
+                self.theme = crate::theme::Theme::fallback();
+            }
+            return;
+        };
+
+        // If our current file is still the newest but is temporarily
+        // unparsable, don't fall back to an older wallpaper palette.
+        if self.theme_src.as_ref() == Some(&latest) && latest != path {
+            return;
+        }
+
+        // If we can't stat it, leave the watched state alone and try again
+        // next tick rather than latching on a missing mtime.
         let Ok(meta) = std::fs::metadata(&path) else {
             return;
         };
@@ -538,14 +554,9 @@ impl App {
         if self.theme_src.as_ref() == Some(&path) && self.theme_mtime == mtime {
             return;
         }
-        // Only latch the mtime once we've actually got a theme. A failed
-        // parse means pywal is mid-write, and the finished write may share
-        // its mtime — latching here would make it look already-seen and the
-        // repaint would never happen. A permanently broken file just costs
-        // one small parse per tick.
-        if let Some(theme) = crate::theme::Theme::reload_from(&path)
-            .or_else(crate::theme::Theme::reload_pywal)
-        {
+        // Only latch the path/mtime once the palette parsed. A failed read
+        // means the writer is still going; the next tick retries.
+        if let Some(theme) = crate::theme::Theme::reload_from(&path) {
             self.theme = theme;
             self.theme_src = Some(path);
             self.theme_mtime = mtime;

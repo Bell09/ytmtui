@@ -156,7 +156,7 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 
 ## 🖼️ Views
 
-The window is deliberately chrome-free — no box borders, just hairlines, whitespace and right-aligned metadata. Colour comes from your **pywal** palette.
+The window is deliberately chrome-free — no box borders, just hairlines, whitespace and right-aligned metadata. Colour comes from your **wallpaper** palette.
 
 - 📌 **Header** — app name, signed-in account, search prompt  
   Press `/` to search · `Tab` / `⇧Tab` switches **Top · Songs · Albums · Artists · Playlists**
@@ -170,16 +170,13 @@ The window is deliberately chrome-free — no box borders, just hairlines, white
 
 ## 🎨 Theming
 
-Colors are taken from your **pywal** palette at startup:
+Colors are detected from the newest palette written by **pywal**, **wallust** or **matugen**:
 
-```
-$XDG_CACHE_HOME/wal/colors.json   # preferred
-$XDG_CACHE_HOME/wal/colors        # fallback
-```
+- **pywal** — `$XDG_CACHE_HOME/wal/colors.json` (or the `colors` file)
+- **wallust** — `$XDG_CACHE_HOME/wallust/colors.json` (or `wallust/colors`), plus JSON `target`/`dst` outputs declared in `~/.config/wallust/wallust.toml`
+- **matugen** — `colors.json` in its cache/config/data directories, plus JSON `output_path` outputs declared in `~/.config/matugen/config.toml`
 
-The accent colour marks everything active — the `▌` cursors, progress bar, playing indicator and current search filter. Secondary text (meta, counts, hairlines, status) is dimmed. No pywal palette found → a built-in fallback is used.
-
-Set a new wallpaper with `wal` and restart `ytmtui` to pick up the new colours.
+Matugen's Material role JSON (flat or nested) and base16 JSON are supported. The accent colour marks everything active — the `▌` cursors, progress bar, playing indicator and current search filter. Secondary text (meta, counts, hairlines, status) is dimmed. The palette is watched live, so a wallpaper change repaints without a restart; no palette found → a built-in fallback is used.
 
 ---
 
