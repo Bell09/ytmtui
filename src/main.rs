@@ -42,6 +42,8 @@ fn print_help() {
     println!("  ytmtui queue clear           Clear the queue");
 }
 
+/// Run a fire-and-forget bridge action against the running TUI (friendly
+/// message, exit code 1 on failure).
 fn bridge_action(command: &str, args: Option<serde_json::Value>) {
     match ipc::request(command, args) {
         Ok(resp) if resp["ok"] == true => {}
@@ -65,8 +67,8 @@ fn bridge_offline() -> ! {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-
-
+    // `--json` is accepted anywhere in the argv, so both
+    // `ytmtui --json queue` and `ytmtui queue --json` work.
     let json_output = env::args().any(|a| a == "--json");
     let args: Vec<String> = env::args().filter(|a| a != "--json").collect();
 
@@ -162,6 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return Ok(());
             }
+            // The widget bridge: query or steer the running TUI's queue.
             "queue" => {
                 if args.iter().any(|a| a == "clear") {
                     bridge_action("queue_clear", None);
@@ -220,25 +223,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-
+    // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-
+    // Create app state instantly
     let mut app = App::new();
 
-
+    // Load the library so the sidebar has playlist data, then show the
+    // detail of the first entry.
     app.load_library().await;
     app.sync_preview();
 
-
+    // Main event loop
     while !app.should_quit {
         app.update();
         terminal.draw(|f| ui::draw(f, &mut app))?;
-
+        // Kitty album art travels as escape bytes written after the frame
+        // (the image floats above the cells ratatui keeps drawing).
         if !app.art_output.is_empty() {
             let mut out = io::stdout();
             let _ = out.write_all(&app.art_output);
@@ -248,13 +253,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-
+                // Global hotkeys
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     app.should_quit = true;
                     break;
                 }
 
-
+                // Text-entry mode captures all keys.
                 if app.input_mode == InputMode::Search {
                     match key.code {
                         KeyCode::Enter => {
@@ -277,35 +282,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 match key.code {
-
+                    // Quit.
                     KeyCode::Char('q') => {
                         app.should_quit = true;
                     }
-
+                    // Move within the current list.
                     KeyCode::Down => app.next(),
                     KeyCode::Up => app.previous(),
-
+                    // Seek ±10s (only acts while music is playing or paused).
                     KeyCode::Left => app.seek_relative(-10),
                     KeyCode::Right => app.seek_relative(10),
-
+                    // Skip through the queue.
                     KeyCode::Char('n') => app.play_next(),
                     KeyCode::Char('p') => app.play_previous(),
-
+                    // Play/pause.
                     KeyCode::Char(' ') => app.toggle_play(),
-
+                    // The queue page: `z` opens it, Esc leaves it.
                     KeyCode::Char('z') => app.open_queue(),
-
+                    // Offline mode: the local music folder instead of the
+                    // account's library. Press again to go back online.
                     KeyCode::Char('o') => app.toggle_offline().await,
-
+                    // Queue the highlighted track:
+                    // X plays it next, Z appends it.
                     KeyCode::Char('X') => app.queue_focused_next(),
                     KeyCode::Char('Z') => {
                         if let Some(t) = app.selected_track() {
                             app.queue_append(t);
                         }
                     }
-
+                    // Queue page operations.
                     KeyCode::Char('d') => {
-
+                        // On the queue `d` deletes the row — its long-standing
+                        // meaning. Anywhere else a song is highlighted, `d`
+                        // saves it for offline and marks it with a check.
                         if app.current_page == Page::Queue {
                             app.queue_remove_selected();
                         } else {
@@ -314,27 +323,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     KeyCode::Char('J') => app.queue_move(true),
                     KeyCode::Char('K') => app.queue_move(false),
-
+                    // Like the current song — the heart in the playback
+                    // bar fills in (the like toggle, on `h`).
                     KeyCode::Char('h') => app.toggle_like(),
-
+                    // Toggle the lyrics pane on the right.
                     KeyCode::Char('l') => app.toggle_lyrics(),
-
+                    // Repeat / shuffle.
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.cycle_repeat()
                     }
                     KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.toggle_shuffle()
                     }
-
+                    // Play the selected track or open the selected collection.
                     KeyCode::Enter => app.activate_selected().await,
-
+                    // Cycle the search filters (search page only).
                     KeyCode::Tab if app.current_page == Page::Search => {
                         app.cycle_search_filter(true).await;
                     }
                     KeyCode::BackTab if app.current_page == Page::Search => {
                         app.cycle_search_filter(false).await;
                     }
-
+                    // Scroll the lyrics pane while it's open, otherwise the
+                    // Library detail pane.
                     KeyCode::PageDown => {
                         if app.lyrics_open {
                             app.scroll_lyrics(10);
@@ -349,7 +360,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.scroll_details(-1);
                         }
                     }
-
+                    // Back from a collection; from search, back to the library.
                     KeyCode::Esc => {
                         if app.current_page == Page::Playlist {
                             app.current_page = app.playlist_return_page;
@@ -364,7 +375,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.sync_preview();
                         }
                     }
-
+                    // Focus the search bar.
                     KeyCode::Char('/') => {
                         app.current_page = Page::Search;
                         app.input_mode = InputMode::Search;
@@ -376,7 +387,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-
+    // Remove any inline album art, then restore the terminal.
     if app.art_kitty_sent.is_some() {
         let mut out = io::stdout();
         let _ = out.write_all(&crate::art::kitty_cleanup());
