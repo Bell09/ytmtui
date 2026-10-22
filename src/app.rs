@@ -930,16 +930,36 @@ impl App {
         let dir = self.music_dir.clone();
         let tx = self.dl_tx.clone();
         let ptx = self.dl_pct_tx.clone();
+        let api = self.api.clone();
+        let lyrics_id = id.clone();
+        let title = track.title.clone();
+        let artist = track.artist.clone();
+        let duration = parse_duration(&track.duration);
         self.dl_progress.insert(id.clone(), 0);
         self.status_message = format!("Downloading '{}'…", track.title);
         tokio::spawn(async move {
+            // Fetch lyrics while yt-dlp works. The audio still reports back
+            // the moment it lands; the `.lrc` sidecar follows as soon as
+            // both halves finish, so lyrics never delay the ✓.
+            let lyrics = tokio::spawn(async move {
+                crate::lyrics::fetch_for_track(&api, &lyrics_id, &title, &artist, duration).await
+            });
             let pid = id.clone();
             let result = crate::offline::download(&url, &dir, &track, move |pct| {
                 let _ = ptx.send((pid.clone(), pct));
             })
             .await
             .map_err(|e| e.to_string());
+            let audio = result.as_ref().ok().map(|entry| PathBuf::from(&entry.path));
             let _ = tx.send((id, result));
+            match audio {
+                Some(path) => {
+                    if let Ok(Ok(Some(lyrics))) = lyrics.await {
+                        let _ = crate::lyrics::write_sidecar(&path, &lyrics);
+                    }
+                }
+                None => lyrics.abort(),
+            }
         });
     }
 

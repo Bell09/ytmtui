@@ -33,7 +33,7 @@ Linux · Free-tier supported
 | 🔍 **Innertube search** | Signed-in search with Top / Songs / Albums / Artists / Playlists filters |
 | 📚 **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
 | ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, buffering state |
-| 💫 **Extras** | Synced lyrics, queue, offline mode, like/unlike, MP3 download with cover art |
+| 💫 **Extras** | Synced lyrics, queue, offline mode, like/unlike, MP3 download with cover art and `.lrc` lyrics |
 
 ---
 
@@ -142,7 +142,7 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 | `/` | Focus search bar |
 | `Tab` / `⇧Tab` | Cycle search filters |
 | `Esc` | Back / open queue |
-| `d` | Download highlighted song as MP3 (or delete in queue) |
+| `d` | Download highlighted song as MP3 with cover art and synced `.lrc` (or delete in queue) |
 | `o` | Toggle offline mode |
 | `h` | Like / unlike current song |
 | `l` | Toggle lyrics pane |
