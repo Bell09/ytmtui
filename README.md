@@ -1,6 +1,6 @@
 <div align="center">
 
-# ytmtui
+# 🎵 ytmtui
 
 **A minimal, lightning-fast YouTube Music terminal player**  
 written in Rust · lightweight · keyboard-driven
@@ -19,20 +19,20 @@ written in Rust · lightweight · keyboard-driven
 
 ---
 
-## Features
+## ✨ Features
 
 | | |
 | :--- | :--- |
-| **Terminal UI** | Built with `ratatui` + `crossterm` — chrome-free, hairlines & whitespace only |
-| **Auth wizard** | `ytmtui setup` auto-detects your browser and extracts cookies |
-| **Innertube search** | Signed-in search with Top / Songs / Albums / Artists / Playlists filters |
-| **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
-| **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, buffering state |
-| **Extras** | Synced lyrics, queue, offline mode, like/unlike, MP3 download with cover art |
+| 🖥️ **Terminal UI** | Built with `ratatui` + `crossterm` — chrome-free, hairlines & whitespace only |
+| 🔐 **Auth wizard** | `ytmtui setup` auto-detects your browser and extracts cookies |
+| 🔍 **Innertube search** | Signed-in search with Top / Songs / Albums / Artists / Playlists filters |
+| 📚 **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
+| ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, buffering state |
+| 💫 **Extras** | Synced lyrics, queue, offline mode, like/unlike, MP3 download with cover art |
 
 ---
 
-## Screenshots
+## 📸 Screenshots
 
 <div align="center">
 
@@ -49,7 +49,7 @@ written in Rust · lightweight · keyboard-driven
 
 ---
 
-## Install
+## 📦 Install
 
 ### Arch Linux (AUR)
 
@@ -70,7 +70,7 @@ cargo build --release
 
 ---
 
-## Quick start
+## 🚀 Quick start
 
 ```bash
 ytmtui setup              # interactive auth wizard (auto-detects browser)
@@ -78,7 +78,7 @@ ytmtui                    # launch the TUI
 ```
 
 <details>
-<summary><strong>Setup options</strong></summary>
+<summary><strong>⚙️ Setup options</strong></summary>
 
 ```bash
 ytmtui setup --manual          # skip browser detection, paste headers
@@ -89,7 +89,7 @@ ytmtui setup --browser firefox # force a specific browser
 
 ---
 
-## Setup & Authentication
+## 🔑 Setup & Authentication
 
 The wizard walks you through signing in:
 
@@ -101,7 +101,7 @@ The wizard walks you through signing in:
 
 Credentials live in `~/.config/ytmtui/auth.json`.
 
-### Browser auto-extraction
+### 🌐 Browser auto-extraction
 
 Supported browsers (checked in order):
 
@@ -109,12 +109,12 @@ Supported browsers (checked in order):
 
 | Family | Method |
 | :--- | :--- |
-| **Firefox / Zen** | Reads `cookies.sqlite` directly |
-| **Chromium family** | Decrypts the Cookies DB with AES-128-CBC using the login keyring (`secret-tool`) or Chrome’s Linux fallback |
+| 🦊 **Firefox / Zen** | Reads `cookies.sqlite` directly |
+| 🧭 **Chromium family** | Decrypts the Cookies DB with AES-128-CBC using the login keyring (`secret-tool`) or Chrome’s Linux fallback |
 
 Databases are copied privately, so a running browser never blocks extraction. Flatpak / snap paths are handled too.
 
-### Manual header paste
+### 📋 Manual header paste
 
 ```bash
 ytmtui setup --manual
@@ -128,7 +128,7 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 
 ---
 
-## Keybindings
+## ⌨️ Keybindings
 
 | Key | Action |
 | :--- | :--- |
@@ -152,21 +152,21 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 
 ---
 
-## Views
+## 🖼️ Views
 
 The window is deliberately chrome-free — no box borders, just hairlines, whitespace and right-aligned metadata. Colour comes from your **pywal** palette.
 
-- **Header** — app name, signed-in account, search prompt  
+- 📌 **Header** — app name, signed-in account, search prompt  
   Press `/` to search · `Tab` / `⇧Tab` switches **Top · Songs · Albums · Artists · Playlists**
-- **Playlist sidebar** — always-visible library of playlists, albums, artists & channels  
+- 📂 **Playlist sidebar** — always-visible library of playlists, albums, artists & channels  
   `↑`/`↓` moves the `▌` cursor · `Enter` opens the selection
-- **Detail / results** — title, meta line and lazily-fetched track list (cached)
-- **Playback bar** — indicator, track, time and a full-width progress bar that only advances while playing
-- **Footer** — status message + compact keybinding cheat-sheet
+- 📄 **Detail / results** — title, meta line and lazily-fetched track list (cached)
+- 🎚️ **Playback bar** — indicator, track, time and a full-width progress bar that only advances while playing
+- ℹ️ **Footer** — status message + compact keybinding cheat-sheet
 
 ---
 
-## Theming
+## 🎨 Theming
 
 Colors are taken from your **pywal** palette at startup:
 
@@ -181,7 +181,7 @@ Set a new wallpaper with `wal` and restart `ytmtui` to pick up the new colours.
 
 ---
 
-## CLI helpers
+## 🛠️ CLI helpers
 
 ```bash
 ytmtui status            # show the signed-in account
@@ -193,6 +193,6 @@ ytmtui tracks <id>       # list tracks of a playlist / album / artist
 
 ---
 
-## License
+## 📄 License
 
 MIT © [Bell09](https://github.com/Bell09)
