@@ -1,6 +1,6 @@
 # ytmtui
 
-A lightning-fast YouTube Music TUI client written in Rust.
+lightning-fast terminal-based YouTube Music player written in Rust.
 
 ## Screenshots
 
