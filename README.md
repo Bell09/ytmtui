@@ -43,9 +43,9 @@ Linux · Free-tier supported
 
 | | |
 | :---: | :---: |
-| ![Your Anxiety Buddy](assets/screenshots/your-anxiety-buddy.png) | ![Birds of a Feather](assets/screenshots/birds-of-a-feather.png) |
+| ![Your Anxiety Buddy](assets/screenshots/your-anxiety-buddy.png) | ![Billie Eilish](assets/screenshots/billie-eilish.png) |
 
-![Billie Eilish](assets/screenshots/billie-eilish.png)
+![Birds of a Feather](assets/screenshots/birds-of-a-feather.png)
 
 </div>
 
