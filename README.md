@@ -1,19 +1,24 @@
 <div align="center">
 
-# 🎵 ytmtui
+# ▶︎ ytmtui
 
-**A minimal, lightning-fast YouTube Music terminal player**  
-written in Rust · lightweight · keyboard-driven
+**YouTube Music in your terminal — synced lyrics, keyboard-driven, mpv backend.**
 
-<br>
-
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![AUR](https://img.shields.io/aur/version/ytmtui?style=flat-square&logo=archlinux&label=AUR)](https://aur.archlinux.org/packages/ytmtui)
+Linux · Free-tier supported
 
 <br>
 
-![ytmtui — All I Wanted](assets/screenshots/all-i-wanted.png)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
+[![AUR](https://img.shields.io/badge/AUR-ytmtui-1793D1?style=for-the-badge&logo=archlinux&logoColor=white)](https://aur.archlinux.org/packages/ytmtui)
+
+<br>
+
+[`INSTALL`](#-install) · [`QUICK START`](#-quick-start) · [`KEYBINDINGS`](#️-keybindings) · [`THEMING`](#-theming) · [`LICENSE`](#-license)
+
+<br>
+
+![ytmtui](assets/screenshots/all-i-wanted.png)
 
 </div>
 
@@ -38,9 +43,10 @@ written in Rust · lightweight · keyboard-driven
 
 | | |
 | :---: | :---: |
-| ![Billie Eilish](assets/screenshots/billie-eilish.png) | ![Birds of a Feather](assets/screenshots/your-anxiety-buddy.png) |
+| ![Billie Eilish](assets/screenshots/billie-eilish.png) | ![Birds of a Feather](assets/screenshots/birds-of-a-feather.png) |
 
-![Your Anxiety Buddy](assets/screenshots/birds-of-a-feather.png)
+![Your Anxiety Buddy](assets/screenshots/your-anxiety-buddy.png)
+
 </div>
 
 ---
