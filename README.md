@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://tmpfiles.org/dl/1792818779.39c67544310f2454/wUA4Uq1Lr5gc/image.png" alt="YTMTUI logo" width="420">
+**ytmtui** 
 
 **A minimal, lightning-fast YouTube Music TUI written in Rust**  
 featuring an **mpv** backend · download songs · synced lyrics · offline mode · keyboard-driven controls
