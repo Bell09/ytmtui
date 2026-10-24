@@ -18,7 +18,7 @@
 <a href="#-install"><img src="https://img.shields.io/badge/INSTALL-FF0033?style=for-the-badge" alt="INSTALL"/></a>
 <a href="#-quick-start"><img src="https://img.shields.io/badge/QUICK_START-FF3366?style=for-the-badge" alt="QUICK START"/></a>
 <a href="#%EF%B8%8F-keybindings"><img src="https://img.shields.io/badge/KEYBINDINGS-FF6699?style=for-the-badge" alt="KEYBINDINGS"/></a>
-<a href="#-theming"><img src="https://img.shields.io/badge/THEMING-C084FC?style=for-the-badge" alt="THEMING"/></a>
+<a href="#-theming"><img src="https://img.shields.io/badge/THEMING-22C55E?style=for-the-badge" alt="THEMING"/></a>
 <a href="#-license"><img src="https://img.shields.io/badge/LICENSE-6366F1?style=for-the-badge" alt="LICENSE"/></a>
 
 <br>
