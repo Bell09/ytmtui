@@ -1,12 +1,13 @@
 <div align="center">
 
 ```
-██╗   ██╗████████╗███╗   ███╗████████╗██╗   ██╗██╗
-╚██╗ ██╔╝╚══██╔══╝████╗ ████║╚══██╔══╝██║   ██║██║
- ╚████╔╝    ██║   ██╔████╔██║   ██║   ██║   ██║██║
-  ╚██╔╝     ██║   ██║╚██╔╝██║   ██║   ██║   ██║██║
-   ██║      ██║   ██║ ╚═╝ ██║   ██║   ╚██████╔╝██║
-   ╚═╝      ╚═╝   ╚═╝     ╚═╝   ╚═╝    ╚═════╝ ╚═╝
+─── ♫ ────────────────────────────────────────── 🎵 ───
+   ████╗  ████╗ ████████╗ █████╗  █████╗ ████████╗ ████╗  ████╗ ████╗
+  ─╚████╗████╔╝─╚══██╔══╝─██████╗██████║─╚══██╔══╝─████║──████║─████║─
+    ╚███████╔╝     ██║    █████╔█████╔█║    ██║    ████║  ████║ ████║
+  ───╚█████╔╝──────██║────████║╚██╔╝█║█║────██║────████║──████║─╚═══╝─
+      █████║       ██║    ████║ ╚═╝ █║█║    ██║    ╚████████╔╝ ████╗
+  ─── ╚════╝ ───── ╚═╝ ── ╚═══╝ ─── ╚═╝ ─── ╚═╝ ─── ╚══════╝ ─ ╚═══╝ ─
 ```
 
 **A minimal, lightning-fast YouTube Music TUI written in Rust**  
@@ -44,7 +45,7 @@ featuring an **mpv** backend · download songs · synced lyrics · offline mode 
 | 🔐 **Auth wizard** | `ytmtui setup` auto-detects your browser and extracts cookies |
 | 🔍 **Innertube search** | Signed-in search with Top / Songs / Albums / Artists / Playlists filters |
 | 📚 **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
-| ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, buffering state |
+| ▶️ **Playback** | Real--time progress bar, true pause/resume via `mpv` IPC, buffering state |
 | 💫 **Extras** | Synced lyrics, queue, offline mode, like/unlike, MP3 download with cover art and `.lrc` lyrics |
 
 ---
@@ -114,7 +115,6 @@ sudo pacman -S yt-dlp ffmpeg
 
 | Crate | Purpose |
 | :--- | :--- |
-
 | `ratatui` + `crossterm` | Terminal UI |
 | `tokio` | Async runtime |
 | `reqwest` | HTTP / Innertube API |
@@ -227,7 +227,7 @@ The window is deliberately chrome-free — no box borders, just hairlines, white
 Colors are detected from the newest palette written by **pywal**, **wallust** or **matugen**:
 
 - **pywal** — `$XDG_CACHE_HOME/wal/colors.json` (or the `colors` file)
-- **wallust** — `$XDG_CACHE_HOME/wallust/colors.json` (or `wallust/colors`), plus JSON `target`/`dst` outputs declared in `~/.config/wallust/wallust.toml`
+- **wallust** — `$XDG_CACHE_HOME/wallust/colors.json` (or `wallust/colors`), plus JSON `target`/`dst` outputs interproutputs declared in `~/.config/wallust/wallust.toml`
 - **matugen** — `colors.json` in its cache/config/data directories, plus JSON `output_path` outputs declared in `~/.config/matugen/config.toml`
 
 Matugen's Material role JSON (flat or nested) and base16 JSON are supported. The accent colour marks everything active — the `▌` cursors, progress bar, playing indicator and current search filter. Secondary text (meta, counts, hairlines, status) is dimmed. The palette is watched live, so a wallpaper change repaints without a restart; no palette found → a built-in fallback is used.
