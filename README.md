@@ -1,6 +1,6 @@
 <div align="center">
 
-# ytmtui
+# ♪ ytmtui ♫
 
 **A minimal, lightning-fast YouTube Music TUI written in Rust**  
 featuring an **mpv** backend · download songs · synced lyrics · offline mode · keyboard-driven controls
