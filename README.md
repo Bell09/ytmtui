@@ -2,19 +2,20 @@
 
 # ♬♫♪ ytmtui
 
-**A minimal, lightning-fast YouTube Music TUI written in Rust—featuring an mpv backend, download songs, synced lyrics, offline mode, and keyboard-driven controls..**
-
-Linux · Free-tier supported
+**A minimal, lightning-fast YouTube Music TUI written in Rust**  
+featuring an **mpv** backend · download songs · synced lyrics · offline mode · keyboard-driven controls
 
 <br>
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.75%2B-DEA584?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![mpv](https://img.shields.io/badge/mpv-backend-5C2D91?style=for-the-badge&logo=mpv&logoColor=white)](https://mpv.io/)
+[![License](https://img.shields.io/badge/License-MIT-22C55E?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
 [![AUR](https://img.shields.io/badge/AUR-ytmtui-1793D1?style=for-the-badge&logo=archlinux&logoColor=white)](https://aur.archlinux.org/packages/ytmtui)
+[![Linux](https://img.shields.io/badge/Linux-only-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/Bell09/ytmtui)
 
 <br>
 
-[`INSTALL`](#-install) · [`QUICK START`](#-quick-start) · [`KEYBINDINGS`](#️-keybindings) · [`THEMING`](#-theming) · [`LICENSE`](#-license)
+`INSTALL` · `QUICK START` · `KEYBINDINGS` · `THEMING` · `LICENSE`
 
 <br>
 
