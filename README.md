@@ -77,6 +77,47 @@ cargo build --release
 
 ---
 
+## 📋 Dependencies
+
+### Runtime (required)
+
+| Dependency | Purpose |
+| :--- | :--- |
+| **mpv** | Playback backend (controlled via IPC) |
+| **Rust** ≥ 1.75 | Only needed when building from source |
+
+Install on Arch:
+
+```bash
+sudo pacman -S mpv
+```
+
+### Optional (recommended)
+
+| Dependency | Purpose |
+| :--- | :--- |
+| **yt-dlp** | Better stream extraction / fallback |
+| **ffmpeg** | Used when downloading songs as MP3 |
+
+```bash
+sudo pacman -S yt-dlp ffmpeg
+```
+
+### Rust crates (main)
+
+| Crate | Purpose |
+| :--- | :--- |
+| `ratatui` + `crossterm` | Terminal UI |
+| `tokio` | Async runtime |
+| `reqwest` | HTTP / Innertube API |
+| `serde` / `serde_json` | Serialization |
+| `rusqlite` | Local offline database |
+| `lofty` | Audio metadata & cover art |
+| `zbus` | MPRIS support |
+| `image` | Cover art processing |
+
+---
+
 ## 🚀 Quick start
 
 ```bash
