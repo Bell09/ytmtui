@@ -2,16 +2,22 @@
 
 # <span style="color:#FF0033">♬♫♪</span> ytmtui
 
-**A minimal, lightning-fast YouTube Music TUI written in Rust—featuring an mpv backend, download songs, synced lyrics, offline mode, and keyboard-driven controls.**
+**A minimal, lightning-fast YouTube Music TUI written in Rust**  
+*mpv backend · synced lyrics · offline mode · wallpaper themes*
 
-<a href="#"><img src="https://img.shields.io/badge/Linux-0A0A0A?style=flat-square&logo=linux&logoColor=FCC624" alt="Linux"/></a>
-<a href="#"><img src="https://img.shields.io/badge/Free--tier_supported-22C55E?style=flat-square" alt="Free-tier supported"/></a>
+<br>
+
+<img src="https://img.shields.io/badge/Linux-0A0A0A?style=flat-square&logo=linux&logoColor=FCC624" alt="Linux"/>
+<img src="https://img.shields.io/badge/Free--tier-22C55E?style=flat-square" alt="Free-tier"/>
+<img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"/>
+<img src="https://img.shields.io/badge/mpv-6C3483?style=flat-square" alt="mpv"/>
 
 <br>
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 [![AUR](https://img.shields.io/badge/AUR-ytmtui-1793D1?style=for-the-badge&logo=archlinux&logoColor=white)](https://aur.archlinux.org/packages/ytmtui)
+[![Stars](https://img.shields.io/github/stars/Bell09/ytmtui?style=for-the-badge&logo=github&color=FF0033)](https://github.com/Bell09/ytmtui/stargazers)
 
 <br>
 
@@ -23,7 +29,7 @@
 
 <br>
 
-![ytmtui](assets/screenshots/all-i-wanted.png)
+<img src="assets/screenshots/all-i-wanted.png" alt="ytmtui — library with synced lyrics" width="90%"/>
 
 </div>
 
@@ -46,11 +52,11 @@
 
 <div align="center">
 
-| | |
+| Your Anxiety Buddy | Billie Eilish |
 | :---: | :---: |
-| ![Your Anxiety Buddy](assets/screenshots/your-anxiety-buddy.png) | ![Billie Eilish](assets/screenshots/billie-eilish.png) |
+| <img src="assets/screenshots/your-anxiety-buddy.png" width="420"/> | <img src="assets/screenshots/billie-eilish.png" width="420"/> |
 
-![Birds of a Feather](assets/screenshots/birds-of-a-feather.png)
+<img src="assets/screenshots/birds-of-a-feather.png" width="720" alt="Birds of a Feather"/>
 
 </div>
 
@@ -91,23 +97,25 @@ cargo build --release
 | [`ffmpeg`](https://ffmpeg.org/) | Used by yt-dlp for audio conversion & thumbnail embedding |
 | `libsecret` / `secret-tool` | Chromium-family cookie decryption during `ytmtui setup` |
 
-**Arch Linux**
+<details>
+<summary><strong>Package managers</strong></summary>
 
+**Arch Linux**
 ```bash
 sudo pacman -S mpv yt-dlp ffmpeg libsecret
 ```
 
 **Debian / Ubuntu**
-
 ```bash
 sudo apt install mpv yt-dlp ffmpeg libsecret-tools
 ```
 
 **Fedora**
-
 ```bash
 sudo dnf install mpv yt-dlp ffmpeg libsecret
 ```
+
+</details>
 
 ---
 
@@ -231,6 +239,14 @@ ytmtui tracks <id>       # list tracks of a playlist / album / artist
 
 ---
 
+<div align="center">
+
 ## 📄 License
 
 MIT © [Bell09](https://github.com/Bell09)
+
+<br>
+
+<span style="color:#FF0033">♬</span> <span style="color:#22C55E">♫</span> <span style="color:#6366F1">♪</span>
+
+</div>
