@@ -15,7 +15,11 @@ featuring an **mpv** backend · download songs · synced lyrics · offline mode 
 
 <br>
 
-`INSTALL` · `QUICK START` · `KEYBINDINGS` · `THEMING` · `LICENSE`
+[![INSTALL](https://img.shields.io/badge/INSTALL-FF6B6B?style=for-the-badge)](#-install)
+[![QUICK START](https://img.shields.io/badge/QUICK%20START-4ECDC4?style=for-the-badge)](#-quick-start)
+[![KEYBINDINGS](https://img.shields.io/badge/KEYBINDINGS-FFE66D?style=for-the-badge)](#%EF%B8%8F-keybindings)
+[![THEMING](https://img.shields.io/badge/THEMING-A78BFA?style=for-the-badge)](#-theming)
+[![LICENSE](https://img.shields.io/badge/LICENSE-F472B6?style=for-the-badge)](#-license)
 
 <br>
 
