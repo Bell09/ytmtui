@@ -1,6 +1,13 @@
 <div align="center">
 
-# ♬♫♪ ytmtui
+```
+██╗   ██╗████████╗███╗   ███╗████████╗██╗   ██╗██╗
+╚██╗ ██╔╝╚══██╔══╝████╗ ████║╚══██╔══╝██║   ██║██║
+ ╚████╔╝    ██║   ██╔████╔██║   ██║   ██║   ██║██║
+  ╚██╔╝     ██║   ██║╚██╔╝██║   ██║   ██║   ██║██║
+   ██║      ██║   ██║ ╚═╝ ██║   ██║   ╚██████╔╝██║
+   ╚═╝      ╚═╝   ╚═╝     ╚═╝   ╚═╝    ╚═════╝ ╚═╝
+```
 
 **A minimal, lightning-fast YouTube Music TUI written in Rust**  
 featuring an **mpv** backend · download songs · synced lyrics · offline mode · keyboard-driven controls
@@ -107,6 +114,7 @@ sudo pacman -S yt-dlp ffmpeg
 
 | Crate | Purpose |
 | :--- | :--- |
+
 | `ratatui` + `crossterm` | Terminal UI |
 | `tokio` | Async runtime |
 | `reqwest` | HTTP / Innertube API |
