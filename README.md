@@ -7,19 +7,19 @@ featuring an **mpv** backend · download songs · synced lyrics · offline mode 
 
 <br>
 
-[![Rust](https://img.shields.io/badge/Rust-1.75%2B-DEA584?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![mpv](https://img.shields.io/badge/mpv-backend-5C2D91?style=for-the-badge&logo=mpv&logoColor=white)](https://mpv.io/)
-[![License](https://img.shields.io/badge/License-MIT-22C55E?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
-[![AUR](https://img.shields.io/badge/AUR-ytmtui-1793D1?style=for-the-badge&logo=archlinux&logoColor=white)](https://aur.archlinux.org/packages/ytmtui)
-[![Linux](https://img.shields.io/badge/Linux-only-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/Bell09/ytmtui)
+[![Rust](https://img.shields.io/badge/Rust-1.75%2B-0d1117?style=for-the-badge&logo=rust&logoColor=22c55e&labelColor=161b22)](https://www.rust-lang.org/)
+[![mpv](https://img.shields.io/badge/mpv-backend-0d1117?style=for-the-badge&logo=mpv&logoColor=4ade80&labelColor=161b22)](https://mpv.io/)
+[![License](https://img.shields.io/badge/License-MIT-0d1117?style=for-the-badge&logo=opensourceinitiative&logoColor=22c55e&labelColor=161b22)](LICENSE)
+[![AUR](https://img.shields.io/badge/AUR-ytmtui-0d1117?style=for-the-badge&logo=archlinux&logoColor=4ade80&labelColor=161b22)](https://aur.archlinux.org/packages/ytmtui)
+[![Linux](https://img.shields.io/badge/Linux-only-0d1117?style=for-the-badge&logo=linux&logoColor=22c55e&labelColor=161b22)](https://github.com/Bell09/ytmtui)
 
 <br>
 
-[![INSTALL](https://img.shields.io/badge/INSTALL-FF6B6B?style=for-the-badge)](#-install)
-[![QUICK START](https://img.shields.io/badge/QUICK%20START-4ECDC4?style=for-the-badge)](#-quick-start)
-[![KEYBINDINGS](https://img.shields.io/badge/KEYBINDINGS-FFE66D?style=for-the-badge)](#%EF%B8%8F-keybindings)
-[![THEMING](https://img.shields.io/badge/THEMING-A78BFA?style=for-the-badge)](#-theming)
-[![LICENSE](https://img.shields.io/badge/LICENSE-F472B6?style=for-the-badge)](#-license)
+[![INSTALL](https://img.shields.io/badge/INSTALL-22c55e?style=for-the-badge&labelColor=0d1117&color=22c55e)](#-install)
+[![QUICK%20START](https://img.shields.io/badge/QUICK%20START-4ade80?style=for-the-badge&labelColor=0d1117&color=4ade80)](#-quick-start)
+[![KEYBINDINGS](https://img.shields.io/badge/KEYBINDINGS-86efac?style=for-the-badge&labelColor=0d1117&color=86efac)](#%EF%B8%8F-keybindings)
+[![THEMING](https://img.shields.io/badge/THEMING-bbf7d0?style=for-the-badge&labelColor=0d1117&color=bbf7d0)](#-theming)
+[![LICENSE](https://img.shields.io/badge/LICENSE-dcfce7?style=for-the-badge&labelColor=0d1117&color=dcfce7)](#-license)
 
 <br>
 
@@ -222,7 +222,7 @@ Colors are detected from the newest palette written by **pywal**, **wallust** or
 - **wallust** — `$XDG_CACHE_HOME/wallust/colors.json` (or `wallust/colors`), plus JSON `target`/`dst` outputs declared in `~/.config/wallust/wallust.toml`
 - **matugen** — `colors.json` in its cache/config/data directories, plus JSON `output_path` outputs declared in `~/.config/matugen/config.toml`
 
-Matugen's Material role JSON (flat or nested) and base16 JSON are supported. The accent colour marks everything active — the `▌` cursors, progress bar, playing indicator and current search filter. Secondary text (meta, counts, hairlines, status) is dimmed. The palette is watched live, so a wallpaper change repaints without a restart; no palette found → a built-in fallback is used.
+Matugen's Material role JSON (flat or nested) and base16 JSON are supported. The accent colour marks everything active — the `▌` cursors, progress bar, playing indicator and current search filter. Secondary text (meta, counts, hairlines, status) is dimmed. The palette is watched live, so a wallpaper change repaints without a restart; no palette found → a built-in **green** fallback is used.
 
 ---
 
