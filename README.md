@@ -2,104 +2,251 @@
 
 # <span style="color:#FF0033">♬♫♪</span> ytmtui
 
-**YouTube Music TUI** · Rust · mpv · lyrics · offline
-
-<img src="https://img.shields.io/badge/Linux-0A0A0A?style=flat-square&logo=linux&logoColor=FCC624"/>
-<img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white"/>
-<img src="https://img.shields.io/badge/mpv-6C3483?style=flat-square"/>
-<img src="https://img.shields.io/badge/MIT-6366F1?style=flat-square"/>
-<img src="https://img.shields.io/badge/AUR-1793D1?style=flat-square&logo=archlinux&logoColor=white"/>
+**A minimal, lightning-fast YouTube Music TUI written in Rust**  
+*mpv backend · synced lyrics · offline mode · wallpaper themes*
 
 <br>
 
-<a href="#-install"><img src="https://img.shields.io/badge/install-FF0033?style=flat-square"/></a>
-<a href="#-usage"><img src="https://img.shields.io/badge/usage-FF3366?style=flat-square"/></a>
-<a href="#-keys"><img src="https://img.shields.io/badge/keys-FF6699?style=flat-square"/></a>
-<a href="#-theme"><img src="https://img.shields.io/badge/theme-22C55E?style=flat-square"/></a>
+<img src="https://img.shields.io/badge/Linux-0A0A0A?style=flat-square&logo=linux&logoColor=FCC624" alt="Linux"/>
+<img src="https://img.shields.io/badge/Free--tier-22C55E?style=flat-square" alt="Free-tier"/>
+<img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust"/>
+<img src="https://img.shields.io/badge/mpv-6C3483?style=flat-square" alt="mpv"/>
 
 <br>
 
-<img src="assets/screenshots/all-i-wanted.png" width="85%"/>
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
+[![AUR](https://img.shields.io/badge/AUR-ytmtui-1793D1?style=for-the-badge&logo=archlinux&logoColor=white)](https://aur.archlinux.org/packages/ytmtui)
+[![Stars](https://img.shields.io/github/stars/Bell09/ytmtui?style=for-the-badge&logo=github&color=FF0033)](https://github.com/Bell09/ytmtui/stargazers)
+
+<br>
+
+<a href="#-install"><img src="https://img.shields.io/badge/INSTALL-FF0033?style=for-the-badge" alt="INSTALL"/></a>
+<a href="#-quick-start"><img src="https://img.shields.io/badge/QUICK_START-FF3366?style=for-the-badge" alt="QUICK START"/></a>
+<a href="#%EF%B8%8F-keybindings"><img src="https://img.shields.io/badge/KEYBINDINGS-FF6699?style=for-the-badge" alt="KEYBINDINGS"/></a>
+<a href="#-theming"><img src="https://img.shields.io/badge/THEMING-22C55E?style=for-the-badge" alt="THEMING"/></a>
+<a href="#-license"><img src="https://img.shields.io/badge/LICENSE-6366F1?style=for-the-badge" alt="LICENSE"/></a>
+
+<br>
+
+<img src="assets/screenshots/all-i-wanted.png" alt="ytmtui — library with synced lyrics" width="90%"/>
 
 </div>
 
 ---
 
-### features
+## ✨ Features
 
 | | |
-|---|---|
-| <span style="color:#FF0033">▌</span> **tui** | `ratatui` · chrome-free · hairlines only |
-| <span style="color:#FF3366">▌</span> **auth** | browser cookie extract · manual paste |
-| <span style="color:#FF6699">▌</span> **search** | innertube · songs · albums · artists · playlists |
-| <span style="color:#C084FC">▌</span> **library** | playlists · artists · channels · lazy tracks |
-| <span style="color:#6366F1">▌</span> **play** | mpv ipc · pause/resume · seek · queue |
-| <span style="color:#22C55E">▌</span> **extra** | lyrics · offline · download mp3 · like |
+| :--- | :--- |
+| 🖥️ **Terminal UI** | Built with `ratatui` + `crossterm` — chrome-free, hairlines & whitespace only |
+| 🔐 **Auth wizard** | `ytmtui setup` auto-detects your browser and extracts cookies |
+| 🔍 **Innertube search** | Signed-in search with Top / Songs / Albums / Artists / Playlists filters |
+| 📚 **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
+| ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, buffering state |
+| 💫 **Extras** | Synced lyrics, queue, offline mode, like/unlike, MP3 download with cover art and `.lrc` lyrics |
 
 ---
 
-### install
+## 📸 Screenshots
+
+<div align="center">
+
+| Your Anxiety Buddy | Billie Eilish |
+| :---: | :---: |
+| <img src="assets/screenshots/your-anxiety-buddy.png" width="420"/> | <img src="assets/screenshots/billie-eilish.png" width="420"/> |
+
+<img src="assets/screenshots/birds-of-a-feather.png" width="720" alt="Birds of a Feather"/>
+
+</div>
+
+---
+
+## 📦 Install
+
+### Arch Linux (AUR)
 
 ```bash
-# aur
 paru -S ytmtui
-
-# source
-git clone https://github.com/Bell09/ytmtui && cd ytmtui
-cargo build --release
+# or
+yay -S ytmtui
 ```
 
-**deps** — `mpv` required · `yt-dlp` `ffmpeg` `libsecret` optional
+### From source
 
 ```bash
-# arch
+git clone https://github.com/Bell09/ytmtui.git
+cd ytmtui
+cargo build --release
+# binary lands in target/release/ytmtui
+```
+
+### Dependencies
+
+**Required**
+
+| Package | Purpose |
+| :--- | :--- |
+| [`mpv`](https://mpv.io/) | Playback backend (audio via IPC socket) |
+
+**Optional (recommended)**
+
+| Package | Purpose |
+| :--- | :--- |
+| [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) | Download songs as MP3 (`d` key) |
+| [`ffmpeg`](https://ffmpeg.org/) | Used by yt-dlp for audio conversion & thumbnail embedding |
+| `libsecret` / `secret-tool` | Chromium-family cookie decryption during `ytmtui setup` |
+
+<details>
+<summary><strong>Package managers</strong></summary>
+
+**Arch Linux**
+```bash
 sudo pacman -S mpv yt-dlp ffmpeg libsecret
-# debian
+```
+
+**Debian / Ubuntu**
+```bash
 sudo apt install mpv yt-dlp ffmpeg libsecret-tools
-# fedora
+```
+
+**Fedora**
+```bash
 sudo dnf install mpv yt-dlp ffmpeg libsecret
 ```
 
+</details>
+
 ---
 
-### usage
+## 🚀 Quick start
 
 ```bash
-ytmtui setup          # auth wizard
-ytmtui                # launch
-ytmtui setup --manual # paste headers
+ytmtui setup              # interactive auth wizard (auto-detects browser)
+ytmtui                    # launch the TUI
 ```
 
-creds → `~/.config/ytmtui/auth.json`
+<details>
+<summary><strong>⚙️ Setup options</strong></summary>
+
+```bash
+ytmtui setup --manual          # skip browser detection, paste headers
+ytmtui setup --browser firefox # force a specific browser
+```
+
+</details>
 
 ---
 
-### keys
+## 🔑 Setup & Authentication
 
-| | | | |
-|---|---|---|---|
-| `↑↓` move | `enter` play/open | `space` pause | `n`/`p` next/prev |
-| `←→` seek | `/` search | `tab` filter | `esc` back/queue |
-| `d` download | `o` offline | `h` like | `l` lyrics |
-| `x`/`z` queue | `ctrl+r` repeat | `ctrl+s` shuffle | `q` quit |
+The wizard walks you through signing in:
+
+1. Shows the **YouTube Music Authentication** banner
+2. If already authenticated, asks whether to re-authenticate
+3. Auto-detects a signed-in browser and extracts cookies (falls back to manual paste)
+4. Identifies the account and lets you pick between multiple Google accounts
+5. Verifies credentials against YouTube Music
+
+Credentials live in `~/.config/ytmtui/auth.json`.
+
+### 🌐 Browser auto-extraction
+
+Supported browsers (checked in order):
+
+`helium` · `chrome` · `chromium` · `brave` · `firefox` · `zen` · `edge` · `vivaldi` · `opera`
+
+| Family | Method |
+| :--- | :--- |
+| 🦊 **Firefox / Zen** | Reads `cookies.sqlite` directly |
+| 🧭 **Chromium family** | Decrypts the Cookies DB with AES-128-CBC using the login keyring (`secret-tool`) or Chrome’s Linux fallback |
+
+Databases are copied privately, so a running browser never blocks extraction. Flatpak / snap paths are handled too.
+
+### 📋 Manual header paste
+
+```bash
+ytmtui setup --manual
+```
+
+1. Open [music.youtube.com](https://music.youtube.com) → **F12** → **Network** → refresh
+2. Click any `/browse` request → right-click **Request Headers** → **Copy**
+3. Paste into the wizard, then press **Enter** on a blank line
+
+Only have the `cookie` value? Paste that — the wizard fills in the rest.
 
 ---
 
-### theme
+## ⌨️ Keybindings
 
-picks up **pywal** · **wallust** · **matugen** live. accent from wallpaper. no palette → fallback.
+| Key | Action |
+| :--- | :--- |
+| `↑` / `↓` | Move within the current list |
+| `←` / `→` | Seek ∓10 s (while playing / paused) |
+| `Enter` | Play selected track or open collection |
+| `Space` | Toggle play / pause |
+| `n` / `p` | Next / previous track |
+| `/` | Focus search bar |
+| `Tab` / `⇧Tab` | Cycle search filters |
+| `Esc` | Back / open queue |
+| `d` | Download highlighted song as MP3 with cover art and synced `.lrc` (or delete in queue) |
+| `o` | Toggle offline mode |
+| `h` | Like / unlike current song |
+| `l` | Toggle lyrics pane |
+| `X` / `Z` | Queue next / append to queue |
+| `Ctrl+R` | Cycle repeat mode |
+| `Ctrl+S` | Toggle shuffle |
+| `PgUp` / `PgDn` | Scroll lyrics or detail pane |
+| `q` | Quit |
+
+---
+
+## 🖼️ Views
+
+The window is deliberately chrome-free — no box borders, just hairlines, whitespace and right-aligned metadata. Colour comes from your **wallpaper** palette.
+
+- 📌 **Header** — app name, signed-in account, search prompt  
+  Press `/` to search · `Tab` / `⇧Tab` switches **Top · Songs · Albums · Artists · Playlists**
+- 📂 **Playlist sidebar** — always-visible library of playlists, albums, artists & channels  
+  `↑`/`↓` moves the `▌` cursor · `Enter` opens the selection
+- 📄 **Detail / results** — title, meta line and lazily-fetched track list (cached)
+- 🎚️ **Playback bar** — indicator, track, time and a full-width progress bar that only advances while playing
+- ℹ️ **Footer** — status message + compact keybinding cheat-sheet
+
+---
+
+## 🎨 Theming
+
+Colors are detected from the newest palette written by **pywal**, **wallust** or **matugen**:
+
+- **pywal** — `$XDG_CACHE_HOME/wal/colors.json` (or the `colors` file)
+- **wallust** — `$XDG_CACHE_HOME/wallust/colors.json` (or `wallust/colors`), plus JSON `target`/`dst` outputs declared in `~/.config/wallust/wallust.toml`
+- **matugen** — `colors.json` in its cache/config/data directories, plus JSON `output_path` outputs declared in `~/.config/matugen/config.toml`
+
+Matugen's Material role JSON (flat or nested) and base16 JSON are supported. The accent colour marks everything active — the `▌` cursors, progress bar, playing indicator and current search filter. Secondary text (meta, counts, hairlines, status) is dimmed. The palette is watched live, so a wallpaper change repaints without a restart; no palette found → a built-in fallback is used.
+
+---
+
+## 🛠️ CLI helpers
+
+```bash
+ytmtui status            # show the signed-in account
+ytmtui playlists         # list library playlists, artists and channels
+ytmtui liked             # list liked songs
+ytmtui tracks <id>       # list tracks of a playlist / album / artist
+                         # (VLPL…, VLLM…, MPREb…)
+```
 
 ---
 
 <div align="center">
 
-<img src="assets/screenshots/your-anxiety-buddy.png" width="32%"/>
-<img src="assets/screenshots/billie-eilish.png" width="32%"/>
-<img src="assets/screenshots/birds-of-a-feather.png" width="32%"/>
+## 📄 License
 
-<br><br>
+MIT © [Bell09](https://github.com/Bell09)
 
-MIT © [Bell09](https://github.com/Bell09)  
+<br>
+
 <span style="color:#FF0033">♬</span> <span style="color:#22C55E">♫</span> <span style="color:#6366F1">♪</span>
 
 </div>
