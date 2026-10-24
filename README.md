@@ -64,7 +64,7 @@ yay -S ytmtui
 ### From source
 
 ```bash
-ggit clone https://github.com/Bell09/ytmtui.git
+git clone https://github.com/Bell09/ytmtui.git
 cd ytmtui
 cargo build --release
 # binary lands in target/release/ytmtui
