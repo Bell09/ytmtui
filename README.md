@@ -1,7 +1,7 @@
 <div align="center">
 
 ```
-─── ♫ ────────────────────────────────────────── 🎵 ───
+─── ♫ ────────────────────────────────────────── 🎵 ──────
    ████╗  ████╗ ████████╗ █████╗  █████╗ ████████╗ ████╗  ████╗ ████╗
   ─╚████╗████╔╝─╚══██╔══╝─██████╗██████║─╚══██╔══╝─████║──████║─████║─
     ╚███████╔╝     ██║    █████╔█████╔█║    ██║    ████║  ████║ ████║
@@ -23,7 +23,7 @@ featuring an **mpv** backend · download songs · synced lyrics · offline mode 
 
 <br>
 
-[![INSTALL](https://img.shields.io/badge/INSTALL-FF6B6B?style=for-=for-the-badge)](#-install)
+[![INSTALL](https://img.shields.io/badge/INSTALL-FF6B6B?style=for-the-badge)](#-install)
 [![QUICK START](https://img.shields.io/badge/QUICK%20START-4ECDC4?style=for-the-badge)](#-quick-start)
 [![KEYBINDINGS](https://img.shields.io/badge/KEYBINDINGS-FFE66D?style=for-the-badge)](#%EF%B8%8F-keybindings)
 [![THEMING](https://img.shields.io/badge/THEMING-A78BFA?style=for-the-badge)](#-theming)
@@ -115,7 +115,7 @@ sudo pacman -S yt-dlp ffmpeg
 
 | Crate | Purpose |
 | :--- | :--- |
-| `ratatui` + `crossterm` | Terminal UI |
+| `ratatui` + `cros` | Terminal UI |
 | `tokio` | Async runtime |
 | `reqwest` | HTTP / Innertube API |
 | `serde` / `serde_json` | Serialization |
@@ -145,7 +145,7 @@ ytmtui setup --browser firefox # force a specific browser
 
 ---
 
-## 🔑 Setup & Authentication
+## 🔑 Setup & Authentication Authentication
 
 The wizard walks you through signing in:
 
@@ -214,7 +214,7 @@ The window is deliberately chrome-free — no box borders, just hairlines, white
 
 - 📌 **Header** — app name, signed-in account, search prompt  
   Press `/` to search · `Tab` / `⇧Tab` switches **Top · Songs · Albums · Artists · Playlists**
--n- 📂 **Playlist sidebar** — always-visible library of playlists, albums, artists & channels  
+- 📂 **Playlist sidebar** — always-visible library of playlists, albums, artists & channels  
   `↑`/`↓` moves the `▌` cursor · `Enter` opens the selection
 - 📄 **Detail / results** — title, meta line and lazily-fetched track list (cached)
 - 🎚️ **Playback bar** — indicator, track, time and a full-width progress bar that only advances while playing
