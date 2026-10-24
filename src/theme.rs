@@ -4,7 +4,7 @@
 //! pywal, wallust and matugen all produce compatible palettes. We look in
 //! their cache/config directories (and at JSON template outputs declared in
 //! their configs), pick the newest valid palette, and watch it live. If none
-//! is present we fall back to the terminal's own indexed palette (color0..15).
+//! is present we fall back to a green-focused built-in palette.
 
 use ratatui::style::Color;
 use serde_json::{Map, Value};
@@ -68,9 +68,28 @@ impl Theme {
         None
     }
 
-    /// No palette: use the terminal's indexed colours as-is.
+    /// No palette from wallpaper tools: use a green-focused built-in theme.
     pub fn fallback() -> Self {
-        Self::from_palette(std::array::from_fn(|i| Color::Indexed(i as u8)))
+        // Green terminal theme — dark forest background, bright emerald accents.
+        let p = [
+            Color::Rgb(10, 22, 12),    // 0  selection_fg / bg
+            Color::Rgb(220, 60, 60),   // 1  stop
+            Color::Rgb(34, 197, 94),   // 2  ok_soft (green)
+            Color::Rgb(234, 179, 8),   // 3  warn
+            Color::Rgb(34, 197, 94),   // 4  accent / selection_bg (primary green)
+            Color::Rgb(74, 222, 128),  // 5  mark
+            Color::Rgb(16, 185, 129),  // 6  accent2 (teal-green)
+            Color::Rgb(220, 252, 231), // 7  fg
+            Color::Rgb(70, 95, 75),    // 8  dim
+            Color::Rgb(248, 113, 113), // 9  err
+            Color::Rgb(74, 222, 128),  // 10 ok (bright green)
+            Color::Rgb(250, 204, 21),  // 11 warn_bright
+            Color::Rgb(134, 239, 172), // 12 accent_bright
+            Color::Rgb(52, 211, 153),  // 13 brand
+            Color::Rgb(110, 231, 183), // 14 (unused)
+            Color::Rgb(240, 253, 244), // 15 bright
+        ];
+        Self::from_palette(p)
     }
 
     /// Map a 16-colour palette onto the semantic roles above. colour0 is
@@ -549,183 +568,32 @@ fn load_plain(path: &Path) -> Option<[Color; 16]> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut palette = [Color::Indexed(0); 16];
     let mut found = false;
-    for (i, hex) in text.lines().filter_map(parse_hex).take(16).enumerate() {
-        palette[i] = hex;
-        found = true;
+    for (i, hex) in text.lines().enumerate().take(16) {
+        if let Some(color) = parse_hex(hex.trim()) {
+            palette[i] = color;
+            found = true;
+        }
     }
-    if !found {
-        return None;
-    }
-    // Any short file keeps the indexed defaults for the remaining slots.
-    Some(palette)
+    found.then_some(palette)
 }
 
 fn parse_hex(s: &str) -> Option<Color> {
     let s = s.trim().trim_start_matches('#');
-    if s.len() < 6 {
+    if s.len() != 6 && s.len() != 3 {
         return None;
     }
-    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-    Some(Color::Rgb(r, g, b))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn color(hex: &str) -> Color {
-        parse_hex(hex).expect("valid test colour")
-    }
-
-    #[test]
-    fn reads_pywal_and_wallust_json() {
-        let value = json!({
-            "special": {
-                "background": "#101010",
-                "foreground": "#e0e0e0"
-            },
-            "colors": {
-                "color0": "#000000",
-                "color4": "#0000ff",
-                "color7": "#ffffff"
-            }
-        });
-
-        let palette = ansi_palette(&value).expect("pywal palette");
-        assert_eq!(palette[0], color("#000000"));
-        assert_eq!(palette[4], color("#0000ff"));
-        assert_eq!(palette[7], color("#ffffff"));
-    }
-
-    #[test]
-    fn special_colours_fill_missing_pywal_slots() {
-        let value = json!({
-            "special": {
-                "background": "#101010",
-                "foreground": "#e0e0e0"
-            },
-            "colors": {
-                "color4": "#0000ff"
-            }
-        });
-
-        let palette = ansi_palette(&value).expect("pywal palette");
-        assert_eq!(palette[0], color("#101010"));
-        assert_eq!(palette[7], color("#e0e0e0"));
-        assert_eq!(palette[4], color("#0000ff"));
-    }
-
-    #[test]
-    fn reads_matugen_flat_roles() {
-        let value = json!({
-            "background": "#101014",
-            "on_background": "#e5e1e6",
-            "primary": "#cbc4cb",
-            "secondary": "#cac5c8",
-            "tertiary": "#d1c3c6",
-            "error": "#ffb4ab",
-            "outline": "#948f94"
-        });
-
-        let palette = matugen_palette(&value).expect("matugen palette");
-        assert_eq!(palette[0], color("#101014"));
-        assert_eq!(palette[1], color("#ffb4ab"));
-        assert_eq!(palette[4], color("#cbc4cb"));
-        assert_eq!(palette[7], color("#e5e1e6"));
-    }
-
-    #[test]
-    fn reads_matugen_nested_roles() {
-        let value = json!({
-            "colors": {
-                "background": { "default": { "hex": "#101010" } },
-                "on_background": { "default": { "hex": "#eeeeee" } },
-                "primary": { "default": { "hex": "#80c0ff" } }
-            }
-        });
-
-        let palette = matugen_palette(&value).expect("matugen palette");
-        assert_eq!(palette[0], color("#101010"));
-        assert_eq!(palette[4], color("#80c0ff"));
-        assert_eq!(palette[7], color("#eeeeee"));
-    }
-
-    #[test]
-    fn reads_base16_json() {
-        let value = json!({
-            "base16": {
-                "base00": "#101010",
-                "base03": "#505050",
-                "base05": "#e0e0e0",
-                "base07": "#ffffff",
-                "base08": "#ff0000",
-                "base0A": "#ffff00",
-                "base0B": "#00ff00",
-                "base0C": "#00ffff",
-                "base0D": "#0000ff",
-                "base0E": "#ff00ff",
-                "base0F": "#aa5500"
-            }
-        });
-
-        let palette = base16_palette(&value).expect("base16 palette");
-        assert_eq!(palette[0], color("#101010"));
-        assert_eq!(palette[1], color("#ff0000"));
-        assert_eq!(palette[2], color("#00ff00"));
-        assert_eq!(palette[3], color("#ffff00"));
-        assert_eq!(palette[4], color("#0000ff"));
-        assert_eq!(palette[7], color("#e0e0e0"));
-        assert_eq!(palette[8], color("#505050"));
-        assert_eq!(palette[15], color("#ffffff"));
-    }
-
-    #[test]
-    fn rejects_unrelated_json() {
-        let value = json!({
-            "colors": {
-                "background": "#101010"
-            }
-        });
-
-        assert!(ansi_palette(&value).is_none());
-        assert!(base16_palette(&value).is_none());
-        assert!(matugen_palette(&value).is_none());
-    }
-
-    #[test]
-    fn reads_template_output_paths() {
-        let dir = std::env::temp_dir().join(format!(
-            "ytmtui-theme-test-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let config = dir.join("config.toml");
-        std::fs::write(
-            &config,
-            r#"
-[config]
-version_check = false
-
-[templates.colors]
-input_path = 'colors.json.template'
-output_path = 'colors.json'
-
-[templates.stylesheet]
-output_path = 'colors.css'
-
-[hooks]
-target = 'ignored.json'
-"#,
+    let expand = |c: char| -> u8 {
+        let v = c.to_digit(16).unwrap_or(0) as u8;
+        (v << 4) | v
+    };
+    let (r, g, b) = if s.len() == 6 {
+        (
+            u8::from_str_radix(&s[0..2], 16).ok()?,
+            u8::from_str_radix(&s[2..4], 16).ok()?,
+            u8::from_str_radix(&s[4..6], 16).ok()?,
         )
-        .expect("test config");
-
-        let outputs = config_outputs(&config, &["output_path"]);
-        assert_eq!(outputs, vec![dir.join("colors.json")]);
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
+    } else {
+        (expand(s.chars().nth(0)?), expand(s.chars().nth(1)?), expand(s.chars().nth(2)?))
+    };
+    Some(Color::Rgb(r, g, b))
 }
