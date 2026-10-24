@@ -61,8 +61,8 @@ featuring an **mpv** backend · download songs · synced lyrics · offline mode 
 ### Arch Linux (AUR)
 
 ```bash
+# Arch / CachyOS / Manjaro (AUR)
 paru -S ytmtui
-# or
 yay -S ytmtui
 ```
 
