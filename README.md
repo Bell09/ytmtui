@@ -3,7 +3,7 @@
 # ♪ ytmtui ♫
 
 **A minimal, lightning-fast YouTube Music TUI written in Rust**  
-featuring an **mpv** backend · download songs · synced lyrics · offline mode · straight forward keybindings
+featuring an **mpv** backend · download songs with Embedded album art + lyrics · synced lyrics · offline mode · straight forward keybindings
 
 <br>
 
