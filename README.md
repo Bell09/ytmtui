@@ -1,10 +1,11 @@
 <div align="center">
 
-# ♬♫♪ ytmtui
+# <span style="color:#FF0033">♬♫♪</span> ytmtui
 
-**A minimal, lightning-fast YouTube Music TUI written in Rust—featuring an mpv backend, download songs, synced lyrics, offline mode, and keyboard-driven controls..**
+**A minimal, lightning-fast YouTube Music TUI written in Rust—featuring an mpv backend, download songs, synced lyrics, offline mode, and keyboard-driven controls.**
 
-Linux · Free-tier supported
+<a href="#"><img src="https://img.shields.io/badge/Linux-0A0A0A?style=flat-square&logo=linux&logoColor=FCC624" alt="Linux"/></a>
+<a href="#"><img src="https://img.shields.io/badge/Free--tier_supported-22C55E?style=flat-square" alt="Free-tier supported"/></a>
 
 <br>
 
@@ -14,7 +15,11 @@ Linux · Free-tier supported
 
 <br>
 
-[`INSTALL`](#-install) · [`QUICK START`](#-quick-start) · [`KEYBINDINGS`](#️-keybindings) · [`THEMING`](#-theming) · [`LICENSE`](#-license)
+<a href="#-install"><img src="https://img.shields.io/badge/INSTALL-FF0033?style=for-the-badge" alt="INSTALL"/></a>
+<a href="#-quick-start"><img src="https://img.shields.io/badge/QUICK_START-FF3366?style=for-the-badge" alt="QUICK START"/></a>
+<a href="#%EF%B8%8F-keybindings"><img src="https://img.shields.io/badge/KEYBINDINGS-FF6699?style=for-the-badge" alt="KEYBINDINGS"/></a>
+<a href="#-theming"><img src="https://img.shields.io/badge/THEMING-C084FC?style=for-the-badge" alt="THEMING"/></a>
+<a href="#-license"><img src="https://img.shields.io/badge/LICENSE-6366F1?style=for-the-badge" alt="LICENSE"/></a>
 
 <br>
 
