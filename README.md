@@ -70,6 +70,40 @@ cargo build --release
 # binary lands in target/release/ytmtui
 ```
 
+### Dependencies
+
+**Required**
+
+| Package | Purpose |
+| :--- | :--- |
+| [`mpv`](https://mpv.io/) | Playback backend (audio via IPC socket) |
+
+**Optional (recommended)**
+
+| Package | Purpose |
+| :--- | :--- |
+| [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) | Download songs as MP3 (`d` key) |
+| [`ffmpeg`](https://ffmpeg.org/) | Used by yt-dlp for audio conversion & thumbnail embedding |
+| `libsecret` / `secret-tool` | Chromium-family cookie decryption during `ytmtui setup` |
+
+**Arch Linux**
+
+```bash
+sudo pacman -S mpv yt-dlp ffmpeg libsecret
+```
+
+**Debian / Ubuntu**
+
+```bash
+sudo apt install mpv yt-dlp ffmpeg libsecret-tools
+```
+
+**Fedora**
+
+```bash
+sudo dnf install mpv yt-dlp ffmpeg libsecret
+```
+
 ---
 
 ## 🚀 Quick start
