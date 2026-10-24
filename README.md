@@ -23,7 +23,7 @@ featuring an **mpv** backend · download songs · synced lyrics · offline mode 
 
 <br>
 
-[![INSTALL](https://img.shields.io/badge/INSTALL-FF6B6B?style=for-the-badge)](#-install)
+[![INSTALL](https://img.shields.io/badge/INSTALL-FF6B6B?style=for-=for-the-badge)](#-install)
 [![QUICK START](https://img.shields.io/badge/QUICK%20START-4ECDC4?style=for-the-badge)](#-quick-start)
 [![KEYBINDINGS](https://img.shields.io/badge/KEYBINDINGS-FFE66D?style=for-the-badge)](#%EF%B8%8F-keybindings)
 [![THEMING](https://img.shields.io/badge/THEMING-A78BFA?style=for-the-badge)](#-theming)
@@ -45,7 +45,7 @@ featuring an **mpv** backend · download songs · synced lyrics · offline mode 
 | 🔐 **Auth wizard** | `ytmtui setup` auto-detects your browser and extracts cookies |
 | 🔍 **Innertube search** | Signed-in search with Top / Songs / Albums / Artists / Playlists filters |
 | 📚 **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
-| ▶️ **Playback** | Real--time progress bar, true pause/resume via `mpv` IPC, buffering state |
+| ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, buffering state |
 | 💫 **Extras** | Synced lyrics, queue, offline mode, like/unlike, MP3 download with cover art and `.lrc` lyrics |
 
 ---
@@ -214,7 +214,7 @@ The window is deliberately chrome-free — no box borders, just hairlines, white
 
 - 📌 **Header** — app name, signed-in account, search prompt  
   Press `/` to search · `Tab` / `⇧Tab` switches **Top · Songs · Albums · Artists · Playlists**
-- 📂 **Playlist sidebar** — always-visible library of playlists, albums, artists & channels  
+-n- 📂 **Playlist sidebar** — always-visible library of playlists, albums, artists & channels  
   `↑`/`↓` moves the `▌` cursor · `Enter` opens the selection
 - 📄 **Detail / results** — title, meta line and lazily-fetched track list (cached)
 - 🎚️ **Playback bar** — indicator, track, time and a full-width progress bar that only advances while playing
@@ -227,7 +227,7 @@ The window is deliberately chrome-free — no box borders, just hairlines, white
 Colors are detected from the newest palette written by **pywal**, **wallust** or **matugen**:
 
 - **pywal** — `$XDG_CACHE_HOME/wal/colors.json` (or the `colors` file)
-- **wallust** — `$XDG_CACHE_HOME/wallust/colors.json` (or `wallust/colors`), plus JSON `target`/`dst` outputs interproutputs declared in `~/.config/wallust/wallust.toml`
+- **wallust** — `$XDG_CACHE_HOME/wallust/colors.json` (or `wallust/colors`), plus JSON `target`/`dst` outputs declared in `~/.config/wallust/wallust.toml`
 - **matugen** — `colors.json` in its cache/config/data directories, plus JSON `output_path` outputs declared in `~/.config/matugen/config.toml`
 
 Matugen's Material role JSON (flat or nested) and base16 JSON are supported. The accent colour marks everything active — the `▌` cursors, progress bar, playing indicator and current search filter. Secondary text (meta, counts, hairlines, status) is dimmed. The palette is watched live, so a wallpaper change repaints without a restart; no palette found → a built-in fallback is used.
