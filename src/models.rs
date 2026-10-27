@@ -20,6 +20,13 @@ pub struct Track {
     /// file they report is, by definition, already offline.
     #[serde(default)]
     pub downloaded: bool,
+    /// The row's playlist membership token (`setVideoId`), parsed off the
+    /// row's own "remove from playlist" menu entry. YouTube's modern
+    /// `browse/edit_playlist` removal is addressed with it, not the video
+    /// id — server tracks without it (search rows, offline copies) can't
+    /// be removed and the caller must say so.
+    #[serde(default)]
+    pub set_video_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

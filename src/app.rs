@@ -376,9 +376,22 @@ impl App {
             tokio::spawn(async move {
                 while let Some((playlist_id, playlist_name, track, index)) = rm_cmd_rx.recv().await {
                     let result = if playlist_id == LIKED_PLAYLIST {
+                        // Dropping a row from Liked Music *is* an unlike,
+                        // so it goes through the rating endpoint instead.
                         api.rate(&track.id, false).await
                     } else {
-                        api.remove_from_playlist(&playlist_id, &track.id).await
+                        match track.set_video_id.as_deref() {
+                            // Modern `browse/edit_playlist` removals are
+                            // addressed by the row's own setVideoId —
+                            // rows without the token have no authority
+                            // to edit and are refused without a call.
+                            Some(token) => {
+                                api.remove_from_playlist(&playlist_id, &track.id, token).await
+                            }
+                            None => Err(anyhow::anyhow!(
+                                "row has no setVideoId — this playlist may not be yours"
+                            )),
+                        }
                     }
                     .map_err(|e| e.to_string());
                     let _ = rm_tx.send((playlist_id, playlist_name, track, index, result));

@@ -199,6 +199,7 @@ fn track_for(path: &Path, registry: &Registry, root: &Path) -> Track {
                 .or_else(|| sidecar_art(path)),
             downloaded: true,
             like: None,
+            set_video_id: None,
         };
     }
     let (title, artist, album) = derive_metadata(path, root);
@@ -213,6 +214,7 @@ fn track_for(path: &Path, registry: &Registry, root: &Path) -> Track {
         thumbnail_url: sidecar_art(path),
         downloaded: true,
         like: None,
+        set_video_id: None,
     }
 }
 

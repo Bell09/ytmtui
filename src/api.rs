@@ -9,7 +9,9 @@ const BROWSE_URL: &str =
     "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false";
 const NEXT_URL: &str = "https://music.youtube.com/youtubei/v1/next?prettyPrint=false";
 const LIKE_URL: &str = "https://music.youtube.com/youtubei/v1/like/";
-const EDIT_URL: &str = "https://music.youtube.com/youtubei/v1/playlist/edit";
+/// Playlist edits live under `browse/edit_playlist` these days — the old
+/// `playlist/edit` route answers 404 to any client-level variant of it.
+const EDIT_URL: &str = "https://music.youtube.com/youtubei/v1/browse/edit_playlist";
 
 /// A search filter chip (e.g. "Albums") and the opaque `params` that selects it.
 #[derive(Debug, Clone)]
@@ -29,6 +31,9 @@ pub struct SearchResults {
 pub struct YtmApi {
     client: Client,
     headers: Option<Map<String, Value>>,
+    /// `X-Goog-Visitor-Id` captured from any server reply (edits carry it;
+    /// first request usually doesn't have one yet, browse settles that).
+    visitor_id: std::sync::OnceLock<String>,
 }
 
 impl YtmApi {
@@ -43,6 +48,21 @@ impl YtmApi {
         Self {
             client,
             headers: Auth::load_headers(),
+            visitor_id: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Keep the most recent `X-Goog-Visitor-Id` — the editing endpoints
+    /// expect the session's own value, and every innertube reply carries it.
+    fn capture_visitor(&self, resp: &reqwest::Response) {
+        if let Some(id) = resp
+            .headers()
+            .get("x-goog-visitor-id")
+            .and_then(|v| v.to_str().ok())
+        {
+            if !id.is_empty() {
+                let _ = self.visitor_id.set(id.to_string());
+            }
         }
     }
 
@@ -383,6 +403,7 @@ impl YtmApi {
         }
 
         let resp = req.send().await?;
+        self.capture_visitor(&resp);
         Ok(resp.json().await?)
     }
 
@@ -424,18 +445,21 @@ impl YtmApi {
         Ok(())
     }
 
-    /// POST a single edit action to the innertube `playlist/edit` endpoint
-    /// with the signed-in browser headers. The classification of the reply
-    /// lives in `edit_outcome` — this endpoint differs from the rest of the
-    /// API in that a success may carry no JSON at all.
+    /// POST a single edit action to the innertube `browse/edit_playlist`
+    /// endpoint with the signed-in browser headers (`alt=json`, the
+    /// session's `X-Goog-Visitor-Id`, and the exact action shape YouTube's
+    /// web client writes — see ytmusicapi's `add_*`/`remove_playlist_*`).
     async fn playlist_edit(&self, body: Value) -> anyhow::Result<()> {
         let headers = self
             .headers
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("not signed in"))?;
 
-        let url = format!("{}?prettyPrint=false&key={}", EDIT_URL, API_KEY);
+        let url = format!("{}?alt=json&key={}", EDIT_URL, API_KEY);
         let mut req = self.client.post(url).json(&body);
+        if let Some(visitor) = self.visitor_id.get() {
+            req = req.header("x-goog-visitor-id", visitor);
+        }
         for (k, v) in headers {
             if let Some(s) = v.as_str() {
                 req = req.header(k.as_str(), s);
@@ -443,6 +467,7 @@ impl YtmApi {
         }
 
         let resp = req.send().await?;
+        self.capture_visitor(&resp);
         let status = resp.status();
         // Read the bytes as text first — decoding `.json()` on an empty
         // body is the error that looked like a failed edit below.
@@ -450,11 +475,11 @@ impl YtmApi {
         Self::edit_outcome(status, &text)
     }
 
-    /// Classify a `playlist/edit` reply. A bare 200 with an empty body is
-    /// a success (the endpoint often closes without writing anything);
-    /// a non-2xx is a failure with the status kept visible; and a JSON
-    /// body with an embedded error object fails with a snippet of the
-    /// body so the server's actual complaint stays readable.
+    /// Classify a `browse/edit_playlist` reply. A bare 200 with an empty
+    /// body counts as success; a non-2xx is a failure with the status kept
+    /// visible; a JSON body with an embedded error — or status entries that
+    /// aren't `SUCCEEDED` (ytmusicapi's `check_responses` rule) — fails
+    /// with a body snippet so the server's complaint stays readable.
     fn edit_outcome(status: reqwest::StatusCode, body: &str) -> anyhow::Result<()> {
         anyhow::ensure!(status.is_success(), "HTTP {}", status);
         let trimmed = body.trim();
@@ -499,15 +524,14 @@ impl YtmApi {
     }
 
     /// Append a song to a playlist — the `a` key's add-to-playlist
-    /// picker (ytmusicapi's `add_playlist_items`: a single `ACTION_ADD`
-    /// edit whose dedupe option lets the server skip duplicates).
+    /// picker (`ACTION_ADD_VIDEO`, the same single-action edit the web
+    /// client writes; `DEDUPE_OPTION_SKIP` lets the server drop repeats).
     pub async fn add_to_playlist(&self, playlist_id: &str, video_id: &str) -> anyhow::Result<()> {
         let body = json!({
             "context": context(),
             "playlistId": playlist_id,
             "actions": [{
-                "action": "ACTION_ADD",
-                "addedVideoIds": [video_id],
+                "action": "ACTION_ADD_VIDEO",
                 "addedVideoId": video_id,
                 "dedupeOption": "DEDUPE_OPTION_SKIP",
             }],
@@ -515,20 +539,22 @@ impl YtmApi {
         self.playlist_edit(body).await
     }
 
-    /// Drop a song from a playlist (ytmusicapi's `remove_playlist_items`:
-    /// an `ACTION_REMOVE` edit listing the video ids to erase).
-    /// Server-side this clears every copy whose id matches.
+    /// Drop a song from a playlist. Hand the row's `setVideoId` — the
+    /// per-membership token the removal is addressed with — plus the
+    /// video id itself (`ACTION_REMOVE_VIDEO`, ytmusicapi's exact shape).
     pub async fn remove_from_playlist(
         &self,
         playlist_id: &str,
         video_id: &str,
+        set_video_id: &str,
     ) -> anyhow::Result<()> {
         let body = json!({
             "context": context(),
             "playlistId": playlist_id,
             "actions": [{
-                "action": "ACTION_REMOVE",
-                "removedVideoIds": [video_id],
+                "action": "ACTION_REMOVE_VIDEO",
+                "setVideoId": set_video_id,
+                "removedVideoId": video_id,
             }],
         });
         self.playlist_edit(body).await
@@ -636,6 +662,7 @@ impl YtmApi {
                             like: None,
                             // Stamped from the registry once stored.
                             downloaded: false,
+                            set_video_id: None,
                         });
                     }
                 }
@@ -656,6 +683,7 @@ impl YtmApi {
                 thumbnail_url: None,
                 like: None,
                 downloaded: false,
+                set_video_id: None,
             },
             Track {
                 id: "dQw4w9WgXcQ".to_string(),
@@ -666,6 +694,7 @@ impl YtmApi {
                 thumbnail_url: None,
                 like: None,
                 downloaded: false,
+                set_video_id: None,
             },
         ])
     }
@@ -1306,7 +1335,24 @@ fn parse_item(renderer: &Value) -> Option<Track> {
         thumbnail_url: renderer_thumb(renderer),
         like,
         downloaded: false,
+        set_video_id: row_set_video_id(renderer),
     })
+}
+
+/// The row's playlist-membership token: the row's own edit menu carries a
+/// `playlistEditEndpoint` whose action names this exact row's `setVideoId`.
+/// Only rows listing inside *your* playlists have it.
+fn row_set_video_id(renderer: &Value) -> Option<String> {
+    let items = renderer.pointer("/menu/menuRenderer/items")?.as_array()?;
+    items
+        .iter()
+        .find_map(|item| {
+            item.pointer(
+                "/menuServiceItemRenderer/playlistEditEndpoint/actions/0/setVideoId",
+            )
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        })
 }
 
 /// Video id for a responsive row. Playlist/album rows carry
