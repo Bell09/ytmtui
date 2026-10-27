@@ -959,7 +959,7 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
     };
     let guide: Vec<(&str, &str)> = vec![
         ("d", "download"),
-        ("a", "add to playlist"),
+        ("a", "add"),
         ("space", "pause"),
         ("←→", "seek"),
         ("n p", "skip"),
@@ -972,7 +972,8 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
             ("enter", "play"),
             ("←→", "seek"),
             ("d", "del"),
-            ("a", "add to playlist"),
+            ("a", "add"),
+            ("r", "remove"),
             ("J K", "move"),
             ("esc", "back"),
             ("L", "like"),
@@ -994,10 +995,9 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
             hints.extend(guide);
             hints
         }
-        // Every collection page: a song is highlighted, so `d` is live here.
-        // Offline the mode toggle takes the slot before the permanent guide.
-        _ => {
-            let mut hints = vec![("esc", "back"), ("/", "search")];
+        // An open playlist can lose its highlighted song with `r`.
+        Page::Playlist => {
+            let mut hints = vec![("esc", "back"), ("r", "remove")];
             if app.offline {
                 hints.push(mode);
             }
@@ -1006,8 +1006,9 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
         }
     };
     // Compact spacing is used only when the full guide needs the room; wide
-    // terminals keep the roomier original layout.
-    let compact = area.width < 117;
+    // terminals keep the roomier original layout. The guide grew again with
+    // `a` and `r`, so the roomier cutoff moved up with it.
+    let compact = area.width < 128;
     let build_hints = |compact: bool, ultra: bool| {
         let separator = if compact { " " } else { "  " };
         let mut spans = Vec::new();

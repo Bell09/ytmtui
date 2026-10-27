@@ -26,6 +26,12 @@ type AddCmd = (String, String, String, String);
 /// whether the API call succeeded.
 type AddResult = (String, String, Result<(), String>);
 
+/// One queued "remove from playlist" command: the playlist id and name
+/// (status), the track with the row it occupied (for the rollback breath
+/// if the server refuses), and its video id under the hood.
+type RmCmd = (String, String, Track, usize);
+type RmResult = (String, String, Track, usize, Result<(), String>);
+
 /// Labels for the browse sections, left to right. The matching shelves are
 /// found by title, so the API can return them in any order.
 pub const BROWSE_SECTIONS: [&str; 5] = ["TRENDING", "MIX", "COMMUNITY", "MOODS", "GENRES"];
@@ -275,6 +281,9 @@ pub struct App {
     pub picker_open: bool,
     /// The picker's own cursor into `self.playlists`.
     pub picker_index: usize,
+    /// Queued `r` removals — in-order like the like and add queues.
+    rm_cmd_tx: tokio::sync::mpsc::UnboundedSender<RmCmd>,
+    rm_rx: tokio::sync::mpsc::UnboundedReceiver<RmResult>,
     /// Offline mode, toggled with `o`. While set the sidebar lists the local
     /// music folder instead of the account's and rows play files from disk.
     /// Playback is untouched by the toggle, so a queue spanning both kinds
@@ -354,6 +363,25 @@ impl App {
                         .await
                         .map_err(|e| e.to_string());
                     let _ = add_tx.send((playlist_name, track_title, result));
+                }
+            });
+        }
+        // Removals ride the same in-order discipline. Liked Music is the
+        // exception: dropping a song there *is* an unlike, so its request
+        // roads through the rating endpoint.
+        let (rm_cmd_tx, mut rm_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<RmCmd>();
+        let (rm_tx, rm_rx) = tokio::sync::mpsc::unbounded_channel::<RmResult>();
+        {
+            let api = api.clone();
+            tokio::spawn(async move {
+                while let Some((playlist_id, playlist_name, track, index)) = rm_cmd_rx.recv().await {
+                    let result = if playlist_id == LIKED_PLAYLIST {
+                        api.rate(&track.id, false).await
+                    } else {
+                        api.remove_from_playlist(&playlist_id, &track.id).await
+                    }
+                    .map_err(|e| e.to_string());
+                    let _ = rm_tx.send((playlist_id, playlist_name, track, index, result));
                 }
             });
         }
@@ -477,6 +505,8 @@ impl App {
             add_rx,
             picker_open: false,
             picker_index: 0,
+            rm_cmd_tx,
+            rm_rx,
             offline: false,
             registry: crate::offline::Registry::load(),
             music_dir: crate::offline::music_dir(),
@@ -543,6 +573,37 @@ impl App {
                 Ok(()) => format!("Added '{}' to {}", track_title, playlist_name),
                 Err(e) => format!("Failed to add '{}' to {} — {e}", track_title, playlist_name),
             };
+        }
+        // Finished "remove from playlist": on success the row is already
+        // gone (the key handler pulled it eagerly); on failure the exact
+        // row rides back and is slotted into its old place, so a refusal
+        // leaves the list exactly as it was.
+        while let Ok((playlist_id, playlist_name, track, index, result)) = self.rm_rx.try_recv() {
+            match result {
+                Ok(()) => {
+                    self.status_message = format!("Removed '{}' from {}", track.title, playlist_name);
+                }
+                Err(e) => {
+                    if self.current_page == Page::Playlist
+                        && self
+                            .current_playlist
+                            .as_ref()
+                            .is_some_and(|p| p.id == playlist_id)
+                    {
+                        let at = index.min(self.playlist_tracks.len());
+                        self.playlist_tracks.insert(at, track.clone());
+                        self.status_message =
+                            format!("Failed to remove '{}' from {} — {e}", track.title, playlist_name);
+                    } else {
+                        self.status_message = format!("Failed to remove '{}' — {e}", track.title);
+                    }
+                    // The playback bar's heart reads the liked state off
+                    // this track; a failed unlike must restore it.
+                    if self.current_track.as_ref().is_some_and(|t| t.id == track.id) {
+                        self.current_track = Some(track);
+                    }
+                }
+            }
         }
         // VLLM's listing converges ~5-6s after a rating change; when that
         // deadline lands, refresh whatever liked-songs view is on screen.
@@ -936,6 +997,35 @@ impl App {
 
     pub fn close_playlist_picker(&mut self) {
         self.picker_open = false;
+    }
+
+    /// `r` in an open playlist: drop the highlighted song from it.
+    /// The row leaves the list at once (with the cursor staying on the
+    /// same place) and the queued edit travels to the server; a refusal
+    /// puts the row straight back via the result drain above.
+    pub fn remove_selected_from_playlist(&mut self) {
+        if self.picker_open || self.current_page != Page::Playlist {
+            return;
+        }
+        if self.offline {
+            self.status_message = "Offline mode — 'r' only removes from server playlists.".into();
+            return;
+        }
+        let Some(playlist) = self.current_playlist.clone() else {
+            return;
+        };
+        let index = self.selected_index;
+        let Some(track) = self.playlist_tracks.get(index).cloned() else {
+            return;
+        };
+        self.playlist_tracks.remove(index);
+        // The cursor stays on the same logical spot: the row above the
+        // removed one slides into it, the last row just closes up.
+        let len = self.playlist_tracks.len();
+        self.selected_index = self.selected_index.min(len.saturating_sub(1));
+        self.status_message =
+            format!("Removing '{}' from {}...", track.title, playlist.title);
+        let _ = self.rm_cmd_tx.send((playlist.id.clone(), playlist.title.clone(), track, index));
     }
 
     /// The currently selected search collection, if any.

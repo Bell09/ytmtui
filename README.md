@@ -192,6 +192,7 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 | `Esc` | Back / open queue |
 | `d` | Download highlighted song as MP3 with cover art and synced `.lrc` (or delete in queue) |
 | `a` | Add highlighted song to a library playlist — arrows scroll, `Enter` adds |
+| `r` | Remove highlighted song from the open playlist (rolls back on failure) |
 | `o` | Toggle offline mode |
 | `L` | Like / unlike current song |
 | `l` | Toggle lyrics pane |

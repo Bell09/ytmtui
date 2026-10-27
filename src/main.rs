@@ -345,6 +345,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Add the highlighted song to a library playlist —
                     // `a` opens the picker, arrows scroll, Enter adds.
                     KeyCode::Char('a' | 'A') => app.open_playlist_picker(),
+                    // Drop the highlighted song from the open playlist.
+                    // Guarded against Ctrl+R so repeat cycling keeps its key.
+                    KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.remove_selected_from_playlist()
+                    }
                     // Toggle the lyrics pane on the right.
                     KeyCode::Char('l') => app.toggle_lyrics(),
                     // Repeat / shuffle.
