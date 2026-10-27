@@ -18,6 +18,14 @@ type LibraryResult = (u64, Result<Vec<Playlist>, String>);
 /// press), and whether the API call succeeded.
 type LikeResult = (String, bool, u64, Result<(), String>);
 
+/// One queued "add to playlist" command: the server's playlist id, the
+/// playlist title (for the status line), the track's video id and title.
+type AddCmd = (String, String, String, String);
+
+/// A finished add-to-playlist: the playlist title, the track title, and
+/// whether the API call succeeded.
+type AddResult = (String, String, Result<(), String>);
+
 /// Labels for the browse sections, left to right. The matching shelves are
 /// found by title, so the API can return them in any order.
 pub const BROWSE_SECTIONS: [&str; 5] = ["TRENDING", "MIX", "COMMUNITY", "MOODS", "GENRES"];
@@ -258,6 +266,15 @@ pub struct App {
     like_refresh_at: Option<(Instant, u64)>,
     like_refresh_tx: tokio::sync::mpsc::UnboundedSender<LikeRefreshResult>,
     like_refresh_rx: tokio::sync::mpsc::UnboundedReceiver<LikeRefreshResult>,
+    /// Queued `a` adds. One worker applies them in order, mirroring the
+    /// like queue — two quick `a` presses can't race the edit endpoint.
+    add_cmd_tx: tokio::sync::mpsc::UnboundedSender<AddCmd>,
+    add_rx: tokio::sync::mpsc::UnboundedReceiver<AddResult>,
+    /// True while the add-to-playlist picker overlays the screen. The
+    /// key loop routes navigation straight to the picker while it's up.
+    pub picker_open: bool,
+    /// The picker's own cursor into `self.playlists`.
+    pub picker_index: usize,
     /// Offline mode, toggled with `o`. While set the sidebar lists the local
     /// music folder instead of the account's and rows play files from disk.
     /// Playback is untouched by the toggle, so a queue spanning both kinds
@@ -322,6 +339,24 @@ impl App {
             });
         }
         let (like_refresh_tx, like_refresh_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (add_cmd_tx, mut add_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<AddCmd>();
+        let (add_tx, add_rx) = tokio::sync::mpsc::unbounded_channel::<AddResult>();
+        // Adds flow through the same in-order queue as likes: the picker
+        // hands off the command and the footer reports the outcome.
+        {
+            let api = api.clone();
+            tokio::spawn(async move {
+                while let Some((playlist_id, playlist_name, video_id, track_title)) =
+                    add_cmd_rx.recv().await
+                {
+                    let result = api
+                        .add_to_playlist(&playlist_id, &video_id)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = add_tx.send((playlist_name, track_title, result));
+                }
+            });
+        }
         let (dl_tx, dl_rx) = tokio::sync::mpsc::unbounded_channel();
         let (dl_pct_tx, dl_pct_rx) = tokio::sync::mpsc::unbounded_channel();
         let (mpris_tx, mpris_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -438,6 +473,10 @@ impl App {
             like_refresh_at: None,
             like_refresh_tx,
             like_refresh_rx,
+            add_cmd_tx,
+            add_rx,
+            picker_open: false,
+            picker_index: 0,
             offline: false,
             registry: crate::offline::Registry::load(),
             music_dir: crate::offline::music_dir(),
@@ -496,6 +535,14 @@ impl App {
                 }
                 self.status_message = format!("Failed to update like — {e}");
             }
+        }
+        // Finished "add to playlist" — success or error lands in the
+        // footer. The song shows up the next time the playlist is opened.
+        while let Ok((playlist_name, track_title, result)) = self.add_rx.try_recv() {
+            self.status_message = match result {
+                Ok(()) => format!("Added '{}' to {}", track_title, playlist_name),
+                Err(e) => format!("Failed to add '{}' to {} — {e}", track_title, playlist_name),
+            };
         }
         // VLLM's listing converges ~5-6s after a rating change; when that
         // deadline lands, refresh whatever liked-songs view is on screen.
@@ -821,6 +868,74 @@ impl App {
                 }),
             Page::Library => None,
         }
+    }
+
+    /// `a` on a highlighted song: overlay the add-to-playlist picker.
+    /// Needs a signed-in library to scroll through and a track to give.
+    pub fn open_playlist_picker(&mut self) {
+        if self.picker_open {
+            return;
+        }
+        if !self.api.is_authenticated() {
+            self.status_message = "Sign in first — run `ytmtui setup`.".into();
+            return;
+        }
+        if self.selected_track().is_none() {
+            self.status_message = "Highlight a song to add it to a playlist.".into();
+            return;
+        }
+        if self.playlists.is_empty() {
+            self.status_message = if self.library_loaded {
+                "No editable playlists in your library.".into()
+            } else {
+                "Your library is still loading — press 'a' again in a moment.".into()
+            };
+            return;
+        }
+        self.picker_open = true;
+        self.picker_index = 0;
+    }
+
+    /// The picker's wrap-around cursor, same style as the page lists.
+    pub fn picker_next(&mut self) {
+        let len = self.playlists.len();
+        if self.picker_open && len > 0 {
+            self.picker_index = (self.picker_index + 1) % len;
+        }
+    }
+
+    pub fn picker_previous(&mut self) {
+        let len = self.playlists.len();
+        if self.picker_open && len > 0 {
+            self.picker_index = if self.picker_index == 0 {
+                len - 1
+            } else {
+                self.picker_index - 1
+            };
+        }
+    }
+
+    /// `Enter` in the picker: hand the highlighted playlist the song the
+    /// `a` press started with, then fold up and let the footer report.
+    pub fn picker_add_selected(&mut self) {
+        self.picker_open = false;
+        let Some(track) = self.selected_track() else {
+            return;
+        };
+        let Some(playlist) = self.playlists.get(self.picker_index) else {
+            return;
+        };
+        self.status_message = format!("Adding '{}' to {}...", track.title, playlist.title);
+        let _ = self.add_cmd_tx.send((
+            playlist.id.clone(),
+            playlist.title.clone(),
+            track.id.clone(),
+            track.title.clone(),
+        ));
+    }
+
+    pub fn close_playlist_picker(&mut self) {
+        self.picker_open = false;
     }
 
     /// The currently selected search collection, if any.

@@ -191,6 +191,7 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 | `Tab` / `⇧Tab` | Cycle search filters |
 | `Esc` | Back / open queue |
 | `d` | Download highlighted song as MP3 with cover art and synced `.lrc` (or delete in queue) |
+| `a` | Add highlighted song to a library playlist — arrows scroll, `Enter` adds |
 | `o` | Toggle offline mode |
 | `L` | Like / unlike current song |
 | `l` | Toggle lyrics pane |

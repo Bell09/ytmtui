@@ -9,6 +9,7 @@ const BROWSE_URL: &str =
     "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false";
 const NEXT_URL: &str = "https://music.youtube.com/youtubei/v1/next?prettyPrint=false";
 const LIKE_URL: &str = "https://music.youtube.com/youtubei/v1/like/";
+const EDIT_URL: &str = "https://music.youtube.com/youtubei/v1/playlist/edit";
 
 /// A search filter chip (e.g. "Albums") and the opaque `params` that selects it.
 #[derive(Debug, Clone)]
@@ -407,6 +408,42 @@ impl YtmApi {
         let action = if like { "like" } else { "removelike" };
         let url = format!("{}{}?prettyPrint=false&key={}", LIKE_URL, action, API_KEY);
         let body = json!({ "context": context(), "target": { "videoId": video_id } });
+        let mut req = self.client.post(url).json(&body);
+        for (k, v) in headers {
+            if let Some(s) = v.as_str() {
+                req = req.header(k.as_str(), s);
+            }
+        }
+
+        let resp = req.send().await?;
+        let status = resp.status();
+        let value: Value = resp.json().await?;
+        if !status.is_success() || value.get("error").is_some() {
+            anyhow::bail!("HTTP {}", status);
+        }
+        Ok(())
+    }
+
+    /// Append a song to a playlist — the `a` key's add-to-playlist
+    /// picker (ytmusicapi's `add_playlist_items`: a single `ACTION_ADD`
+    /// edit whose dedupe option lets the server skip duplicates).
+    pub async fn add_to_playlist(&self, playlist_id: &str, video_id: &str) -> anyhow::Result<()> {
+        let headers = self
+            .headers
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("not signed in"))?;
+
+        let url = format!("{}?prettyPrint=false&key={}", EDIT_URL, API_KEY);
+        let body = json!({
+            "context": context(),
+            "playlistId": playlist_id,
+            "actions": [{
+                "action": "ACTION_ADD",
+                "addedVideoIds": [video_id],
+                "addedVideoId": video_id,
+                "dedupeOption": "DEDUPE_OPTION_SKIP",
+            }],
+        });
         let mut req = self.client.post(url).json(&body);
         for (k, v) in headers {
             if let Some(s) = v.as_str() {

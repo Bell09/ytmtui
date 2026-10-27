@@ -279,6 +279,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
+                // The add-to-playlist picker owns the keyboard while it's
+                // open — the page underneath keeps its selection untouched.
+                if app.picker_open {
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => app.picker_next(),
+                        KeyCode::Up | KeyCode::Char('k') => app.picker_previous(),
+                        KeyCode::Enter => app.picker_add_selected(),
+                        KeyCode::Esc => app.close_playlist_picker(),
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match key.code {
                     // Quit.
                     KeyCode::Char('q') => {
@@ -329,6 +342,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Like the current song — the heart in the playback
                     // bar fills in (the like toggle, on `L`).
                     KeyCode::Char('L') => app.toggle_like(),
+                    // Add the highlighted song to a library playlist —
+                    // `a` opens the picker, arrows scroll, Enter adds.
+                    KeyCode::Char('a' | 'A') => app.open_playlist_picker(),
                     // Toggle the lyrics pane on the right.
                     KeyCode::Char('l') => app.toggle_lyrics(),
                     // Repeat / shuffle.

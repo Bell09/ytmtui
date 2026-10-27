@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 use std::time::{Duration, Instant};
@@ -165,6 +165,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     draw_playback_bar(f, app, rows[2]);
     draw_footer_bar(f, app, rows[3]);
+    if app.picker_open {
+        draw_playlist_picker(f, app, rows[1]);
+    }
 }
 
 /// Header: the title line (app name + signed-in account) and the search
@@ -859,6 +862,76 @@ fn lyrics_row_offset(
 
 /// Footer: status message left (red on errors), a compact keybinding
 /// cheat-sheet right with the keys picked out in the glyph accent.
+fn draw_playlist_picker(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
+    // A card centred on the main area: narrow enough to feel like a popup,
+    // tall enough for a dozen rows plus its song line. Playlists that
+    // don't fit keep scrolling under the List's own viewport.
+    let width = 44.min((area.width.saturating_sub(4)) as usize) as u16;
+    let height = ((app.playlists.len() as u16).min(12) + 4).min(area.height.saturating_sub(2));
+    if width < 20 || height < 5 {
+        return;
+    }
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    // Erase the page drawn beneath, then paint the card on top.
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.dim))
+            .title(Span::styled(
+                " add to playlist ",
+                Style::default()
+                    .fg(t.accent2)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        rect,
+    );
+
+    let inner = rect.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
+    // The song the picker holds: accent and cut to the card's width.
+    let song = app
+        .selected_track()
+        .map(|track| track.title)
+        .unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate(&song, rows[0].width as usize),
+            Style::default().fg(t.accent2),
+        ))),
+        rows[0],
+    );
+
+    let text_w = rows[1].width.saturating_sub(1) as usize;
+    let items: Vec<ListItem> = app
+        .playlists
+        .iter()
+        .enumerate()
+        .map(|(i, p)| sidebar_item(t, p, text_w, i == app.picker_index))
+        .collect();
+    let list = List::new(items).highlight_style(
+        Style::default()
+            .fg(t.selection_fg)
+            .bg(t.selection_bg)
+            .add_modifier(Modifier::BOLD),
+    );
+    let mut state = ListState::default();
+    state.select(Some(app.picker_index));
+    f.render_stateful_widget(list, rows[1], &mut state);
+}
+
 fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
 
@@ -875,6 +948,10 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
     // place on every page, rather than appearing and vanishing with the
     // selection. Queue is the one exception — there `d` deletes, so it keeps
     // its own `d del` and doesn't advertise a download.
+    //
+    // `a add to playlist` rides beside it: every page that highlights a
+    // song can hand it to a library playlist, so it sits in the permanent
+    // guide with the other always-live keys.
     let mode: (&str, &str) = if app.offline {
         ("o", "online")
     } else {
@@ -882,6 +959,7 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
     };
     let guide: Vec<(&str, &str)> = vec![
         ("d", "download"),
+        ("a", "add to playlist"),
         ("space", "pause"),
         ("←→", "seek"),
         ("n p", "skip"),
@@ -894,6 +972,7 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
             ("enter", "play"),
             ("←→", "seek"),
             ("d", "del"),
+            ("a", "add to playlist"),
             ("J K", "move"),
             ("esc", "back"),
             ("L", "like"),
