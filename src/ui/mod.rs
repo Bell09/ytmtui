@@ -16,7 +16,7 @@ use crate::models::{BrowseRow, Page, Playlist, PlaylistKind, SearchHit, Track};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Decorative rule under the search input.
-const TOP_RULE: &str = "─────────────────────────────────,'─────────────'.────────────,'───────────`,──────────,'──────────,'─────────`,────────.`───────',──────',─────`────.`───',──`,─";
+const TOP_RULE: &str = ",───────────────────────────,'─────────────'.────────────,'───────────`,──────────,'──────────,'─────────`,────────.`───────',──────',─────`────.`───',──`.─";
 
 /// Fill `width` cells with the top rule, tiling the motif when there is room
 /// for more than one copy.
