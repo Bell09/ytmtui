@@ -1,7 +1,7 @@
 [package]
 name = "ytmtui"
 version = "0.1.4"
-edition = "2021"
+edition = "2024"
 description = "A full-featured YouTube Music TUI client written in Rust"
 license = "MIT"
 readme = "README.md"
