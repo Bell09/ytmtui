@@ -564,12 +564,18 @@ impl App {
             }
         }
         // A failed heart toggle rolls its optimistic flip back — unless a
-        // newer press owns the state now (rapid `h h` double-toggles).
+        // newer press owns the state now (rapid `L L` double-toggles).
         while let Ok((id, want, generation, result)) = self.like_rx.try_recv() {
             if generation != self.like_generation {
                 continue;
             }
+            // Only the playing track's heart was flipped optimistically;
+            // a row pressed inside Liked Music shows its own truth again
+            // when the scheduled liked-list re-sync lands.
             if self.current_track.as_ref().is_none_or(|t| t.id != id) {
+                if let Err(e) = result {
+                    self.status_message = format!("Failed to update like — {e}");
+                }
                 continue;
             }
             if let Err(e) = result {
@@ -1728,7 +1734,20 @@ impl App {
     /// playback bar's heart and the status message change on the keypress
     /// itself, and the network call only rolls them back if it fails.
     pub fn toggle_like(&mut self) {
-        let Some(track) = self.current_track.clone() else {
+        // On the Liked list itself the key targets the highlighted row —
+        // unliking without playing first is the everyday case there.
+        // Everywhere else it names the playing track, as always.
+        let on_liked = self.current_page == Page::Playlist
+            && self
+                .current_playlist
+                .as_ref()
+                .is_some_and(|p| p.id == LIKED_PLAYLIST);
+        let track = if on_liked {
+            self.playlist_tracks.get(self.selected_index).cloned()
+        } else {
+            self.current_track.clone()
+        };
+        let Some(track) = track else {
             return;
         };
         if track.id.is_empty() {
@@ -1742,8 +1761,11 @@ impl App {
         // Unknown counts as not-liked: the first press likes.
         let want = track.like != Some(true);
         // Instant feedback — the request confirms (or reverts) behind it.
-        if let Some(t) = self.current_track.as_mut() {
-            t.like = Some(want);
+        // The heart applies only when the press names the playing song.
+        if self.current_track.as_ref().is_some_and(|t| t.id == track.id) {
+            if let Some(t) = self.current_track.as_mut() {
+                t.like = Some(want);
+            }
         }
         self.status_message = if want {
             "Added to Liked songs".to_string()

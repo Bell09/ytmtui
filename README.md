@@ -194,7 +194,7 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 | `a` | Add highlighted song to a library playlist — arrows scroll, `Enter` adds |
 | `r` | Remove highlighted song from the open playlist (rolls back on failure) |
 | `o` | Toggle offline mode |
-| `L` | Like / unlike current song |
+| `L` | Like / unlike current song — in Liked Music it targets the highlighted row |
 | `l` | Toggle lyrics pane |
 | `X` / `Z` | Queue next / append to queue |
 | `Ctrl+R` | Cycle repeat mode |
