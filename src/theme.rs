@@ -152,26 +152,36 @@ impl Default for Theme {
 }
 
 /// Candidate palette files from the common wallpaper tools.
-fn palette_files() -> Vec<PathBuf> {
-    let mut files = Vec::new();
+///
+/// The paths derive from XDG directories and config files that do not move
+/// while the app runs, so build them once. `palette_files_by_mtime` still
+/// stats every candidate, but it no longer rebuilds and re-deduplicates the
+/// path list on each poll.
+fn palette_files() -> &'static [PathBuf] {
+    static CACHE: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let mut files = Vec::new();
 
-    for base in xdg_dirs("XDG_CACHE_HOME", ".cache") {
-        for tool in ["wal", "wallust", "matugen"] {
-            let dir = base.join(tool);
-            files.push(dir.join("colors.json"));
-            files.push(dir.join("colors"));
-        }
-    }
-    for base in xdg_dirs("XDG_CONFIG_HOME", ".config") {
-        files.push(base.join("matugen").join("colors.json"));
-        files.push(base.join("wallust").join("colors.json"));
-    }
-    for base in xdg_dirs("XDG_DATA_HOME", ".local/share") {
-        files.push(base.join("matugen").join("colors.json"));
-    }
+            for base in xdg_dirs("XDG_CACHE_HOME", ".cache") {
+                for tool in ["wal", "wallust", "matugen"] {
+                    let dir = base.join(tool);
+                    files.push(dir.join("colors.json"));
+                    files.push(dir.join("colors"));
+                }
+            }
+            for base in xdg_dirs("XDG_CONFIG_HOME", ".config") {
+                files.push(base.join("matugen").join("colors.json"));
+                files.push(base.join("wallust").join("colors.json"));
+            }
+            for base in xdg_dirs("XDG_DATA_HOME", ".local/share") {
+                files.push(base.join("matugen").join("colors.json"));
+            }
 
-    files.extend(tool_config_outputs());
-    dedup(files)
+            files.extend(tool_config_outputs());
+            dedup(files)
+        })
+        .as_slice()
 }
 
 /// Existing candidates, newest first. Ties are broken by path so selection is
@@ -179,7 +189,7 @@ fn palette_files() -> Vec<PathBuf> {
 fn palette_files_by_mtime() -> Vec<(PathBuf, SystemTime)> {
     let mut found = Vec::new();
     for path in palette_files() {
-        let Ok(meta) = std::fs::metadata(&path) else {
+        let Ok(meta) = std::fs::metadata(path) else {
             continue;
         };
         if !meta.is_file() {
@@ -188,7 +198,7 @@ fn palette_files_by_mtime() -> Vec<(PathBuf, SystemTime)> {
         let Ok(mtime) = meta.modified() else {
             continue;
         };
-        found.push((path, mtime));
+        found.push((path.clone(), mtime));
     }
     found.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     found

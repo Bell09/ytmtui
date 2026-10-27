@@ -10,10 +10,19 @@ use ratatui::{
     widgets::{List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use crate::app::{App, InputMode, PlaybackState};
-use crate::models::{Page, Playlist, PlaylistKind, SearchHit, Track};
+use crate::models::{BrowseRow, Page, Playlist, PlaylistKind, SearchHit, Track};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Decorative rule under the search input.
+const TOP_RULE: &str = "─────────────────────────────────,'─────────────'.────────────,'───────────`,──────────,'──────────,'─────────`,────────.`───────',──────',─────`────.`───',──`,─";
+
+/// Fill `width` cells with the top rule, tiling the motif when there is room
+/// for more than one copy.
+fn top_rule(width: usize) -> String {
+    TOP_RULE.chars().cycle().take(width).collect()
+}
 
 /// Width of the left playlist sidebar (narrower on small terminals).
 fn sidebar_width(total: u16) -> u16 {
@@ -42,7 +51,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             Constraint::Length(1), // title line
             Constraint::Min(12),   // main: search line + body
             Constraint::Length(1), // playback: track + connector bar
-            Constraint::Length(1), // footer
+            Constraint::Length(1), // footer: status + key guide
         ])
         .split(area);
 
@@ -198,10 +207,11 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
     }
 
     // The search input — a text line sitting on an underline rule; no
-    // left/right/top borders. The rule keeps a fixed width and never
-    // stretches across the header.
+    // left/right/top borders. The rule spans the header width, capped at one
+    // full copy of the decorative motif so ultra-wide terminals keep its
+    // intended shape.
     let focused = app.input_mode == InputMode::Search;
-    let input_w = usize::from(rows[0].width).min(136);
+    let input_w = usize::from(rows[0].width).min(TOP_RULE.chars().count());
 
     let mut spans = vec![
         Span::styled(
@@ -242,7 +252,7 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
     // The underline rule below the input.
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "─".repeat(input_w),
+            top_rule(input_w),
             Style::default().fg(t.accent2),
         ))),
         rows[1],
@@ -545,21 +555,22 @@ fn draw_playback_bar(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let (title, artist, time_label, ratio) = if let Some(ref cur) = app.current_track {
-        let total_elapsed = app.position_secs();
+        let total_elapsed = app.position_secs_f64();
         let total = app.playback_duration_secs;
         // The elapsed clock only advances while actually playing (see above),
         // so the ratio can be computed directly — including while paused.
         let ratio = if total > 0 {
-            (total_elapsed as f64 / total as f64).clamp(0.0, 1.0)
+            (total_elapsed / total as f64).clamp(0.0, 1.0)
         } else {
             0.0
         };
+        let elapsed = total_elapsed.floor() as u64;
         let time = match app.playback_state {
             PlaybackState::Buffering => "buffering…".to_string(),
             _ => format!(
                 "{:02}:{:02} / {}",
-                total_elapsed / 60,
-                total_elapsed % 60,
+                elapsed / 60,
+                elapsed % 60,
                 cur.duration.as_deref().unwrap_or("--:--")
             ),
         };
@@ -628,7 +639,7 @@ fn draw_playback_bar(f: &mut Frame, app: &App, area: Rect) {
         used += display_width(&title);
         spans.push(Span::styled(title, Style::default().fg(t.bright)));
         if !artist.is_empty() {
-            spans.push(Span::styled(" — ", Style::default().fg(t.dim)));
+            spans.push(Span::styled(" ⟢ ", Style::default().fg(t.dim)));
             spans.push(Span::styled(artist, Style::default().fg(t.mark)));
             used += tail_w;
         }
@@ -712,7 +723,7 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let crate::lyrics::LyricsState::Ready(lyrics) = app.lyrics_state.clone() else {
+    let crate::lyrics::LyricsState::Ready(lyrics) = &app.lyrics_state else {
         return;
     };
 
@@ -732,10 +743,12 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
     let wrap_w = inner.width as usize;
     let text_rows = |text: &str| -> usize { display_width(text).div_ceil(wrap_w).max(1) };
 
-    let (spans, centre_row, rows_total): (Vec<Line>, usize, usize) = match &lyrics {
+    let (spans, centre_row, rows_total) = match lyrics {
         crate::lyrics::Lyrics::Synced(lines) => {
-            // Bisect the timestamps for the current line.
-            let pos = app.position_secs() as f64;
+            // Bisect the timestamps using mpv's sub-second clock so a line
+            // flips exactly when its timestamp is reached, not up to a
+            // second late from integer truncation.
+            let pos = app.position_secs_f64();
             let idx = lines.partition_point(|(ts, _)| *ts <= pos) as i64 - 1;
             // A blank row only where the song pauses — verses stay
             // together, sections get air — instead of doubling every line.
@@ -768,7 +781,7 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     Style::default().fg(t.fg) // upcoming
                 };
-                spans.push(Line::from(Span::styled(text.clone(), style)));
+                spans.push(Line::from(Span::styled(text.as_str(), style)));
                 if gap_after.get(i).copied().unwrap_or(false) {
                     spans.push(Line::from(""));
                 }
@@ -785,7 +798,7 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
             let mut spans = Vec::with_capacity(lines.len() * 2);
             for (i, text) in lines.iter().enumerate() {
                 spans.push(Line::from(Span::styled(
-                    text.clone(),
+                    text.as_str(),
                     Style::default().fg(t.fg),
                 )));
                 if i + 1 < lines.len() && dense {
@@ -804,7 +817,12 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
         height: rows_total.min(inner.height as usize) as u16,
         ..inner
     };
-    let offset = lyrics_row_offset(app, centre_row, rows_total, inner.height as usize);
+    let offset = lyrics_row_offset(
+        &mut app.lyrics_scroll,
+        centre_row,
+        rows_total,
+        inner.height as usize,
+    );
     app.lyrics_offset = offset;
     f.render_widget(
         Paragraph::new(spans)
@@ -817,19 +835,25 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
 /// The row offset to render: a fresh manual scroll (autoscroll pauses
 /// for 3s after you scroll) clamped to the content, otherwise
 /// centred on the current line.
-fn lyrics_row_offset(app: &mut App, centre_row: usize, rows_total: usize, viewport: usize) -> u16 {
+fn lyrics_row_offset(
+    scroll: &mut Option<(u16, Instant)>,
+    centre_row: usize,
+    rows_total: usize,
+    viewport: usize,
+) -> u16 {
     let max_off = rows_total.saturating_sub(viewport) as u16;
-    match app.lyrics_scroll {
+    let centred = || {
+        centre_row
+            .saturating_sub(viewport / 2)
+            .min(max_off as usize) as u16
+    };
+    match *scroll {
         Some((off, at)) if at.elapsed() < Duration::from_secs(3) => off.min(max_off),
         Some(_) => {
-            app.lyrics_scroll = None;
-            centre_row
-                .saturating_sub(viewport / 2)
-                .min(max_off as usize) as u16
+            *scroll = None;
+            centred()
         }
-        None => centre_row
-            .saturating_sub(viewport / 2)
-            .min(max_off as usize) as u16,
+        None => centred(),
     }
 }
 
@@ -861,7 +885,7 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
         ("space", "pause"),
         ("←→", "seek"),
         ("n p", "skip"),
-        ("h", "like"),
+        ("L", "like"),
         ("l", "lyrics"),
         ("q", "quit"),
     ];
@@ -872,7 +896,7 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
             ("d", "del"),
             ("J K", "move"),
             ("esc", "back"),
-            ("h", "like"),
+            ("L", "like"),
             ("l", "lyrics"),
             ("q", "quit"),
         ],
@@ -883,6 +907,11 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
         }
         Page::Library => {
             let mut hints = vec![("esc", "back"), ("/", "search"), mode];
+            hints.extend(guide);
+            hints
+        }
+        Page::Browse => {
+            let mut hints = vec![("enter", "play/open"), ("esc", "back")];
             hints.extend(guide);
             hints
         }
@@ -897,24 +926,64 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
             hints
         }
     };
-    let mut hint_spans = vec![Span::styled(" ", Style::default())];
-    let mut hint_w = 1usize;
-    for (i, (key, action)) in hints.iter().enumerate() {
-        if i > 0 {
-            hint_spans.push(Span::styled("  ", Style::default()));
-            hint_w += 2;
+    // Compact spacing is used only when the full guide needs the room; wide
+    // terminals keep the roomier original layout.
+    let compact = area.width < 117;
+    let build_hints = |compact: bool, ultra: bool| {
+        let separator = if compact { " " } else { "  " };
+        let mut spans = Vec::new();
+        let mut width = 0usize;
+        if !compact {
+            spans.push(Span::styled(" ", Style::default()));
+            width += 1;
         }
-        let key_text = key.to_string();
-        let label_text = format!(" {}", action);
-        hint_w += display_width(&key_text) + display_width(&label_text);
-        hint_spans.push(Span::styled(
-            key_text,
-            Style::default().fg(t.accent2).add_modifier(Modifier::BOLD),
-        ));
-        hint_spans.push(Span::styled(label_text, Style::default().fg(t.dim)));
+        for (i, (key, action)) in hints.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(separator, Style::default()));
+                width += display_width(separator);
+            }
+            let key_text = if compact && *key == "space" {
+                "␣".to_string()
+            } else {
+                key.to_string()
+            };
+            let label_text = if compact && *action == "play/open" {
+                " play".to_string()
+            } else if ultra && *action == "download" {
+                " dl".to_string()
+            } else if ultra && *action == "lyrics" {
+                " lyr".to_string()
+            } else {
+                format!(" {}", action)
+            };
+            width += display_width(&key_text) + display_width(&label_text);
+            spans.push(Span::styled(
+                key_text,
+                Style::default().fg(t.accent2).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(label_text, Style::default().fg(t.dim)));
+        }
+        if !compact {
+            spans.push(Span::styled(" ", Style::default()));
+            width += 1;
+        }
+        (spans, width)
+    };
+    let (mut hint_spans, hint_w) = build_hints(compact, false);
+    let status_gap = if compact { 2 } else { 1 };
+    // The status is drawn with one leading cell of breathing room, so leave
+    // that cell out of the budget as well as the gap to the guide.
+    let mut status_budget =
+        (area.width as usize).saturating_sub(hint_w + status_gap + 1);
+    if compact && status_budget < 8 {
+        let (ultra_spans, ultra_w) = build_hints(true, true);
+        let ultra_budget =
+            (area.width as usize).saturating_sub(ultra_w + status_gap + 1);
+        if ultra_budget > status_budget {
+            hint_spans = ultra_spans;
+            status_budget = ultra_budget;
+        }
     }
-    hint_spans.push(Span::styled(" ", Style::default()));
-    hint_w += 1;
 
     // Errors ("Playback error…", "Failed to load…") get the bright red.
     // Otherwise the status picks up palette colours: numbers (the "3" in
@@ -922,8 +991,11 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
     // (· — …) the accent, and ordinary words the title colour.
     let lower = app.status_message.to_lowercase();
     let is_error = lower.contains("error") || lower.contains("fail");
-    let status_budget = (area.width as usize).saturating_sub(hint_w + 2);
-    let truncated = truncate(&app.status_message, status_budget);
+    let truncated = if status_budget >= 8 {
+        truncate(&app.status_message, status_budget)
+    } else {
+        String::new()
+    };
 
     let mut status_spans: Vec<Span> = Vec::new();
     if is_error {
@@ -947,9 +1019,11 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let mut status_line = vec![Span::raw(" ")];
-    status_line.extend(status_spans);
-    f.render_widget(Paragraph::new(Line::from(status_line)), area);
+    if !status_spans.is_empty() {
+        let mut status_line = vec![Span::raw(" ")];
+        status_line.extend(status_spans);
+        f.render_widget(Paragraph::new(Line::from(status_line)), area);
+    }
     f.render_widget(
         Paragraph::new(Line::from(hint_spans)).alignment(Alignment::Right),
         area,
@@ -960,10 +1034,26 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
 // Content pages
 // ---------------------------------------------------------------------------
 
+/// The slice of a one-row-per-item list that can actually be seen, centred on
+/// the cursor. Building only this window keeps a 1,000-track queue as cheap to
+/// draw as a 20-track one; Ratatui would discard the rest anyway.
+fn visible_window(len: usize, selected: usize, viewport: u16) -> (usize, usize) {
+    if len == 0 || viewport == 0 {
+        return (0, 0);
+    }
+    let viewport = (viewport as usize).min(len);
+    let selected = selected.min(len - 1);
+    let start = selected
+        .saturating_sub(viewport / 2)
+        .min(len - viewport);
+    (start, start + viewport)
+}
+
 fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
     match app.current_page {
         Page::Search => draw_search(f, app, area),
         Page::Library => draw_library_detail(f, app, area),
+        Page::Browse => draw_browse(f, app, area),
         Page::Playlist => draw_playlist_page(f, app, area),
         Page::Queue => draw_queue_page(f, app, area),
     }
@@ -1044,6 +1134,70 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, rows[1], &mut state);
 }
 
+/// "For you": mixes, trending songs, community picks and the mood/genre
+/// grids, grouped under section headers. Headers are visible but the cursor
+/// only lands on real rows.
+fn draw_browse(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
+    if app.browse_rows.is_empty() {
+        let message = if app.browse_loaded {
+            " Nothing here right now."
+        } else {
+            " Loading your mixes…"
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                message,
+                Style::default().fg(t.dim),
+            ))),
+            area,
+        );
+        return;
+    }
+
+    let width = area.width as usize;
+    let items: Vec<ListItem> = app
+        .browse_rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| match row {
+            BrowseRow::Header(title) => ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!(" {}", title.to_uppercase()),
+                    Style::default()
+                        .fg(t.accent_bright)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "  ",
+                    Style::default().fg(t.dim),
+                ),
+            ])),
+            BrowseRow::Item(hit) => {
+                let playing = match hit {
+                    SearchHit::Track(track) => {
+                        app.current_track.as_ref().is_some_and(|c| c.id == track.id)
+                    }
+                    _ => false,
+                };
+                let pct = match hit {
+                    SearchHit::Track(track) => app.download_pct(&track.id),
+                    _ => None,
+                };
+                hit_row(t, hit, width, i == app.selected_index, playing, pct)
+            }
+        })
+        .collect();
+    let list = List::new(items).highlight_style(
+        Style::default()
+            .fg(t.selection_fg)
+            .bg(t.selection_bg),
+    );
+    let mut state = ListState::default();
+    state.select(Some(app.selected_index));
+    f.render_stateful_widget(list, area, &mut state);
+}
+
 /// Library: the detail view of the highlighted sidebar entry — title, a dim
 /// meta line, then its lazily-fetched track list (scrollable with PgUp/PgDn).
 fn draw_library_detail(f: &mut Frame, app: &mut App, area: Rect) {
@@ -1087,43 +1241,53 @@ fn draw_library_detail(f: &mut Frame, app: &mut App, area: Rect) {
             );
         }
 
+        let viewport = rows[2].height as usize;
+        let showing_preview = app.preview_for.as_deref() == Some(playlist.id.as_str());
         let mut lines: Vec<Line> = Vec::new();
-        if app.preview_for.as_deref() == Some(playlist.id.as_str()) {
+        let mut total_lines = 0usize;
+
+        if showing_preview {
             if app.preview_tracks.is_empty() {
                 // A local folder has no request in flight — an empty list
                 // is the answer, not a wait.
+                total_lines = 1;
                 let waiting = !crate::offline::is_local(playlist.id.as_str());
                 lines.push(Line::from(Span::styled(
                     if waiting { " Loading…" } else { " Nothing here yet" },
                     Style::default().fg(if waiting { t.warn } else { t.dim }),
                 )));
             } else {
-                for (i, track) in app.preview_tracks.iter().enumerate() {
-                    let playing = app.current_track.as_ref().is_some_and(|c| c.id == track.id);
-                    lines.push(track_line(
-                        t,
-                        i + 1,
-                        track,
-                        width,
-                        false,
-                        playing,
-                        app.download_pct(&track.id),
-                    ));
-                }
+                total_lines = app.preview_tracks.len();
             }
         }
 
-        // Record scroll bounds so PgUp/PgDn clamp correctly.
-        let max = lines.len().saturating_sub(rows[2].height as usize) as u16;
+        // Record scroll bounds so PgUp/PgDn clamp correctly, then build only
+        // the visible rows. The old code formatted every track in the list on
+        // every frame, even though Paragraph discards what is off-screen.
+        let max = total_lines.saturating_sub(viewport) as u16;
         app.details_scroll_max = max;
-        app.details_viewport = rows[2].height;
+        app.details_viewport = viewport as u16;
         if app.details_scroll > max {
             app.details_scroll = max;
         }
-        f.render_widget(
-            Paragraph::new(lines).scroll((app.details_scroll, 0)),
-            rows[2],
-        );
+        if showing_preview && !app.preview_tracks.is_empty() {
+            let start = app.details_scroll as usize;
+            let end = (start + viewport).min(total_lines);
+            lines.reserve(end.saturating_sub(start));
+            for (offset, track) in app.preview_tracks[start..end].iter().enumerate() {
+                let playing = app.current_track.as_ref().is_some_and(|c| c.id == track.id);
+                lines.push(track_line(
+                    t,
+                    start + offset + 1,
+                    track,
+                    width,
+                    false,
+                    playing,
+                    app.download_pct(&track.id),
+                ));
+            }
+        }
+        f.render_widget(Paragraph::new(lines), rows[2]);
     } else {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -1177,16 +1341,22 @@ fn draw_playlist_page(f: &mut Frame, app: &App, area: Rect) {
     );
 
     let list_w = rows[1].width as usize;
+    let (start, end) = visible_window(
+        app.playlist_tracks.len(),
+        app.selected_index,
+        rows[1].height,
+    );
     let items: Vec<ListItem> = if app.playlist_tracks.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             " Nothing here yet.",
             Style::default().fg(t.dim),
         )))]
     } else {
-        app.playlist_tracks
+        app.playlist_tracks[start..end]
             .iter()
             .enumerate()
-            .map(|(i, track)| {
+            .map(|(offset, track)| {
+                let i = start + offset;
                 let playing = app.current_track.as_ref().is_some_and(|c| c.id == track.id);
                 track_row(
                     t,
@@ -1207,7 +1377,7 @@ fn draw_playlist_page(f: &mut Frame, app: &App, area: Rect) {
     );
     let mut state = ListState::default();
     if !app.playlist_tracks.is_empty() {
-        state.select(Some(app.selected_index));
+        state.select(Some(app.selected_index.saturating_sub(start)));
     }
     f.render_stateful_widget(list, rows[1], &mut state);
 }
@@ -1246,16 +1416,18 @@ fn draw_queue_page(f: &mut Frame, app: &App, area: Rect) {
     );
 
     let list_w = rows[1].width as usize;
+    let (start, end) = visible_window(app.queue.len(), app.selected_index, rows[1].height);
     let items: Vec<ListItem> = if app.queue.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             " Queue is empty — press X or Z on a track to queue it.",
             Style::default().fg(t.dim),
         )))]
     } else {
-        app.queue
+        app.queue[start..end]
             .iter()
             .enumerate()
-            .map(|(i, track)| {
+            .map(|(offset, track)| {
+                let i = start + offset;
                 let playing = app.current_track.as_ref().is_some_and(|c| c.id == track.id);
                 track_row(
                     t,
@@ -1276,7 +1448,7 @@ fn draw_queue_page(f: &mut Frame, app: &App, area: Rect) {
     );
     let mut state = ListState::default();
     if !app.queue.is_empty() {
-        state.select(Some(app.selected_index));
+        state.select(Some(app.selected_index.saturating_sub(start)));
     }
     f.render_stateful_widget(list, rows[1], &mut state);
 }
@@ -1496,6 +1668,8 @@ fn kind_glyph(kind: PlaylistKind) -> &'static str {
         PlaylistKind::Album => "▣",
         PlaylistKind::Artist => "♪",
         PlaylistKind::Channel => "▸",
+        PlaylistKind::Mood => "◐",
+        PlaylistKind::Genre => "◆",
     }
 }
 

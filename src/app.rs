@@ -1,4 +1,4 @@
-use crate::models::{Page, Playlist, PlaylistKind, SearchHit, Track};
+use crate::models::{BrowseRow, BrowseShelf, Page, Playlist, PlaylistKind, SearchHit, Track};
 use crate::api::{SearchFilter, YtmApi};
 use crate::player::Player;
 use std::collections::{HashMap, HashSet};
@@ -8,12 +8,39 @@ use std::time::{Duration, Instant, SystemTime};
 
 type PreviewResult = (String, Result<Vec<Track>, String>);
 
+/// A finished library fetch: the generation it was started for, and the
+/// playlists (or an error). The generation lets a newer request supersede one
+/// that is still in flight, e.g. when switching back online.
+type LibraryResult = (u64, Result<Vec<Playlist>, String>);
+
 /// The heart key's outcome: video id, the rating that was requested,
 /// which press asked for it (so an older reply can't clobber a newer
 /// press), and whether the API call succeeded.
 type LikeResult = (String, bool, u64, Result<(), String>);
 
-/// A queued `h` press: (video id, want like, generation).
+/// Labels for the browse sections, left to right. The matching shelves are
+/// found by title, so the API can return them in any order.
+pub const BROWSE_SECTIONS: [&str; 5] = ["TRENDING", "MIX", "COMMUNITY", "MOODS", "GENRES"];
+
+/// Which browse section a shelf header belongs to.
+fn browse_section_for_title(title: &str) -> Option<usize> {
+    let title = title.to_lowercase();
+    if title.contains("trending") {
+        Some(0)
+    } else if title.contains("mix") {
+        Some(1)
+    } else if title.contains("community") {
+        Some(2)
+    } else if title.contains("mood") {
+        Some(3)
+    } else if title.contains("genre") {
+        Some(4)
+    } else {
+        None
+    }
+}
+
+/// A queued `L` press: (video id, want like, generation).
 type LikeRequest = (String, bool, u64);
 
 /// A background re-fetch of the liked-songs list, for the delayed
@@ -34,7 +61,7 @@ const SEARCH_FILTER_ORDER: [&str; 5] = [
     "Featured playlists",
 ];
 
-/// The "Liked Music" auto-playlist's id — the list the `h` heart keeps
+/// The "Liked Music" auto-playlist's id — the list the `L` heart keeps
 /// in step with the server while it's on screen.
 const LIKED_PLAYLIST: &str = "VLLM";
 
@@ -98,6 +125,21 @@ pub struct App {
     /// The row to reselect when returning from a collection.
     pub playlist_return_index: usize,
 
+    /// The "For you" browse page: flattened section headers and rows. The
+    /// selection cursor only lands on `BrowseRow::Item`.
+    pub browse_rows: Vec<BrowseRow>,
+    pub browse_loaded: bool,
+    /// Root shelves, indexed by section; `None` if that section was not
+    /// present in the feed.
+    pub browse_shelves: Vec<Option<BrowseShelf>>,
+    /// Active section while browsing.
+    pub browse_section: Option<usize>,
+    browse_return_page: Page,
+    browse_return_index: usize,
+    /// One level of history for opening a mood/genre category: the root
+    /// rows and the row that opened it.
+    browse_back: Option<(Vec<BrowseRow>, usize)>,
+
     /// Lazily-fetched preview of the highlighted library entry, plus a cache so
     /// moving back to a previously seen entry is instant.
     pub preview_tracks: Vec<Track>,
@@ -105,6 +147,12 @@ pub struct App {
     preview_cache: HashMap<String, Vec<Track>>,
     preview_tx: tokio::sync::mpsc::UnboundedSender<PreviewResult>,
     preview_rx: tokio::sync::mpsc::UnboundedReceiver<PreviewResult>,
+
+    /// Library fetches run in the background so the first frame is never
+    /// blocked on the network. Only the newest generation may apply.
+    library_tx: tokio::sync::mpsc::UnboundedSender<LibraryResult>,
+    library_rx: tokio::sync::mpsc::UnboundedReceiver<LibraryResult>,
+    library_generation: u64,
 
     pub selected_index: usize,
     pub current_track: Option<Track>,
@@ -118,6 +166,10 @@ pub struct App {
     /// Playback order when shuffle is on: positions into `queue`, with the
     /// current track first. Rebuilt on every queue change.
     shuffle_order: Vec<usize>,
+    /// Bumped whenever the queue contents change. `sync_ipc` rebuilds its
+    /// mirrored rows only when this differs from the last synced revision.
+    queue_version: u64,
+    ipc_queue_version: u64,
     /// Where `Esc` returns to after viewing the queue page.
     pub queue_return_page: Page,
     pub queue_return_index: usize,
@@ -126,8 +178,15 @@ pub struct App {
     pub player: Player,
     pub should_quit: bool,
     pub status_message: String,
-    pub playback_start_time: Option<Instant>,
-    pub elapsed_secs: u64,
+    /// Latest position mpv reported, plus when it was sampled. The UI clock
+    /// follows mpv instead of a fixed startup timer, so the progress bar and
+    /// lyrics start with the audible audio.
+    playback_position: f64,
+    position_sampled_at: Option<Instant>,
+    /// Whether mpv answered at least one timeline query for this track. A
+    /// healthy IPC channel that reports no position yet means "still
+    /// buffering", not "fall back to a guessed start time".
+    mpv_seen: bool,
     pub playback_duration_secs: u64,
     pub buffering_timer: Option<Instant>,
     /// Colour theme (from pywal, wallust or matugen, reloaded live when the
@@ -139,6 +198,9 @@ pub struct App {
     /// when the mtime actually moves.
     theme_src: Option<PathBuf>,
     theme_mtime: Option<SystemTime>,
+    /// Wallpaper palettes change at human speed; checking their mtimes once a
+    /// second is plenty and keeps the 10Hz UI tick free of filesystem scans.
+    theme_poll_at: Instant,
     /// Signed-in account name, fetched in the background for the header.
     pub account_name: Option<String>,
     account_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
@@ -181,13 +243,13 @@ pub struct App {
     pub lyrics_offset: u16,
     lyrics_tx: tokio::sync::mpsc::UnboundedSender<crate::lyrics::LyricsMsg>,
     lyrics_rx: tokio::sync::mpsc::UnboundedReceiver<crate::lyrics::LyricsMsg>,
-    /// Queued `h` heart toggles. One worker applies them strictly in
+    /// Queued `L` heart toggles. One worker applies them strictly in
     /// press order — concurrent rate calls race server-side, and a rapid
-    /// `h h` could otherwise land the unlike after the like and drop the
+    /// `L L` could otherwise land the unlike after the like and drop the
     /// song from the account entirely.
     like_cmd_tx: tokio::sync::mpsc::UnboundedSender<LikeRequest>,
     like_rx: tokio::sync::mpsc::UnboundedReceiver<LikeResult>,
-    /// Bumped on every `h` press — only the latest press's reply may
+    /// Bumped on every `L` press — only the latest press's reply may
     /// change the state back.
     like_generation: u64,
     /// When to re-sync the visible liked-songs list with the server
@@ -242,6 +304,7 @@ impl App {
             "Not signed in — run `ytmtui setup` · Press 'q' to quit."
         };
         let (preview_tx, preview_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (library_tx, library_rx) = tokio::sync::mpsc::unbounded_channel();
         let (account_tx, account_rx) = tokio::sync::mpsc::unbounded_channel();
         let (art_tx, art_rx) = tokio::sync::mpsc::unbounded_channel();
         let (lyrics_tx, lyrics_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -284,8 +347,11 @@ impl App {
             });
         }
         // Fetch the signed-in account name in the background for the header.
+        // Reuse the API client so this and the library fetch share one
+        // connection pool rather than racing two TLS handshakes at startup.
+        let account_api = api.clone();
         tokio::spawn(async move {
-            if let Some(name) = crate::auth::Auth::current_account().await {
+            if let Some(name) = account_api.current_account_name().await {
                 let _ = account_tx.send(name);
             }
         });
@@ -303,11 +369,21 @@ impl App {
             playlist_tracks: Vec::new(),
             playlist_return_page: Page::Library,
             playlist_return_index: 0,
+            browse_rows: Vec::new(),
+            browse_loaded: false,
+            browse_shelves: vec![None; BROWSE_SECTIONS.len()],
+            browse_section: None,
+            browse_return_page: Page::Library,
+            browse_return_index: 0,
+            browse_back: None,
             preview_tracks: Vec::new(),
             preview_for: None,
             preview_cache: HashMap::new(),
             preview_tx,
             preview_rx,
+            library_tx,
+            library_rx,
+            library_generation: 0,
             selected_index: 0,
             current_track: None,
             queue: Vec::new(),
@@ -315,6 +391,8 @@ impl App {
             repeat: RepeatMode::Off,
             shuffle: false,
             shuffle_order: Vec::new(),
+            queue_version: 1,
+            ipc_queue_version: 0,
             queue_return_page: Page::Library,
             queue_return_index: 0,
             playback_state: PlaybackState::Stopped,
@@ -322,13 +400,15 @@ impl App {
             player: Player::new(),
             should_quit: false,
             status_message: auth_status.to_string(),
-            playback_start_time: None,
-            elapsed_secs: 0,
+            playback_position: 0.0,
+            position_sampled_at: None,
+            mpv_seen: false,
             playback_duration_secs: 210,
             buffering_timer: None,
             theme,
             theme_src,
             theme_mtime,
+            theme_poll_at: Instant::now(),
             account_name: None,
             account_rx,
             art_track: None,
@@ -373,6 +453,7 @@ impl App {
 
     pub fn update(&mut self) {
         self.poll_theme();
+        self.poll_library();
         self.poll_preview();
         while let Ok(name) = self.account_rx.try_recv() {
             self.account_name = Some(name);
@@ -418,7 +499,7 @@ impl App {
         }
         // VLLM's listing converges ~5-6s after a rating change; when that
         // deadline lands, refresh whatever liked-songs view is on screen.
-        // A superseded press (a newer `h` bumped the generation) is skipped
+        // A superseded press (a newer `L` bumped the generation) is skipped
         // — its successor owns the state and sets its own deadline.
         let due = self
             .like_refresh_at
@@ -476,15 +557,17 @@ impl App {
         // transitions.
         self.apply_mpris_commands();
         self.apply_ipc_commands();
-        // Transition out of buffering once the stream has had time to start.
-        if self.playback_state == PlaybackState::Buffering {
+        // Follow mpv's own clock. A file is only marked playing once mpv
+        // reports a positive time, so the progress bar and lyrics begin with
+        // the audible audio instead of a fixed 1.5s guess. The timer remains
+        // only as a fallback for an unreachable IPC socket.
+        self.poll_player_timeline();
+        if self.playback_state == PlaybackState::Buffering && !self.mpv_seen {
             if let Some(timer) = self.buffering_timer {
                 if timer.elapsed() >= Duration::from_millis(1500) {
-                    self.playback_state = PlaybackState::Playing;
-                    self.playback_start_time = Some(Instant::now());
-                    if let Some(ref t) = self.current_track {
-                        self.status_message = format!("Playing: {} - {}", t.title, t.artist);
-                    }
+                    self.playback_position = 0.0;
+                    self.position_sampled_at = Some(Instant::now());
+                    self.finish_buffering();
                 }
             }
         }
@@ -499,7 +582,7 @@ impl App {
                 if status.success() {
                     self.advance_on_end();
                 } else {
-                    self.playback_start_time = None;
+                    self.position_sampled_at = None;
                     self.playback_state = PlaybackState::Stopped;
                     self.status_message = "Playback error: stream failed".to_string();
                 }
@@ -512,12 +595,20 @@ impl App {
 
     /// Repaint when a wallpaper tool rewrites one of its palette files.
     ///
-    /// The newest valid palette wins, so switching from pywal to wallust or
-    /// matugen also repaints. One `stat()` per candidate per tick (the loop
-    /// runs at 10Hz) is enough to notice a change; successful parses are
-    /// cached by mtime. If a writer is truncating the newest file, it is
-    /// skipped until the write lands and the current colours stay on screen.
+    /// Wallpaper changes happen at human speed, so the filesystem is checked
+    /// once a second rather than on every 10Hz tick. In the common case the
+    /// currently watched file is still the newest one, which lets us skip the
+    /// second candidate scan entirely. Successful parses are cached by mtime,
+    /// so a stable palette costs one `stat()`. If a writer is truncating the
+    /// newest file, it is skipped until the write lands and the current
+    /// colours stay on screen.
     fn poll_theme(&mut self) {
+        const POLL_INTERVAL: Duration = Duration::from_secs(1);
+        if self.theme_poll_at.elapsed() < POLL_INTERVAL {
+            return;
+        }
+        self.theme_poll_at = Instant::now();
+
         // No theming tool at all: drop back to the terminal's own colours.
         let Some(latest) = crate::theme::Theme::latest_file() else {
             if self.theme_src.is_some() {
@@ -527,6 +618,25 @@ impl App {
             }
             return;
         };
+
+        // Steady state: the file we already follow is still the newest. If
+        // its mtime has not moved there is nothing else to inspect, and if it
+        // is mid-write we keep the last good theme instead of falling back to
+        // an older wallpaper palette.
+        if self.theme_src.as_ref() == Some(&latest) {
+            let Ok(meta) = std::fs::metadata(&latest) else {
+                return;
+            };
+            let mtime = meta.modified().ok();
+            if self.theme_mtime == mtime {
+                return;
+            }
+            if let Some(theme) = crate::theme::Theme::reload_from(&latest) {
+                self.theme = theme;
+                self.theme_mtime = mtime;
+            }
+            return;
+        }
 
         let Some(path) = crate::theme::Theme::source_file() else {
             // A palette exists but none parses yet: a writer is probably
@@ -539,14 +649,8 @@ impl App {
             return;
         };
 
-        // If our current file is still the newest but is temporarily
-        // unparsable, don't fall back to an older wallpaper palette.
-        if self.theme_src.as_ref() == Some(&latest) && latest != path {
-            return;
-        }
-
         // If we can't stat it, leave the watched state alone and try again
-        // next tick rather than latching on a missing mtime.
+        // next second rather than latching on a missing mtime.
         let Ok(meta) = std::fs::metadata(&path) else {
             return;
         };
@@ -555,11 +659,46 @@ impl App {
             return;
         }
         // Only latch the path/mtime once the palette parsed. A failed read
-        // means the writer is still going; the next tick retries.
+        // means the writer is still going; the next poll retries.
         if let Some(theme) = crate::theme::Theme::reload_from(&path) {
             self.theme = theme;
             self.theme_src = Some(path);
             self.theme_mtime = mtime;
+        }
+    }
+
+    /// Drain a finished background library fetch. Results from a superseded
+    /// request are ignored so switching offline/online quickly can't let an
+    /// older response overwrite the current view.
+    fn poll_library(&mut self) {
+        while let Ok((generation, result)) = self.library_rx.try_recv() {
+            if generation != self.library_generation {
+                continue;
+            }
+            match result {
+                Ok(mut playlists) => {
+                    // Group the list by kind: playlists, then albums (artists
+                    // and channels are already dropped by the API).
+                    playlists.sort_by_key(|p| match p.kind {
+                        PlaylistKind::Playlist => 0,
+                        PlaylistKind::Album => 1,
+                        PlaylistKind::Artist => 2,
+                        PlaylistKind::Channel => 3,
+                        PlaylistKind::Mood | PlaylistKind::Genre => 4,
+                    });
+                    self.library_loaded = true;
+                    self.selected_index = 0;
+                    self.status_message = if playlists.is_empty() {
+                        "Your library is empty.".to_string()
+                    } else {
+                        format!("{} items · Enter to open", playlists.len())
+                    };
+                    self.playlists = playlists;
+                    self.preview_for = None;
+                    self.sync_preview();
+                }
+                Err(e) => self.status_message = format!("Failed to load library: {}", e),
+            }
         }
     }
 
@@ -623,12 +762,17 @@ impl App {
         match self.current_page {
             Page::Search => self.search_results.len(),
             Page::Library => self.playlists.len(),
+            Page::Browse => self.browse_rows.len(),
             Page::Playlist => self.playlist_tracks.len(),
             Page::Queue => self.queue.len(),
         }
     }
 
     pub fn next(&mut self) {
+        if self.current_page == Page::Browse {
+            self.browse_step(true);
+            return;
+        }
         let len = self.list_len();
         if len > 0 {
             self.selected_index = (self.selected_index + 1) % len;
@@ -637,6 +781,10 @@ impl App {
     }
 
     pub fn previous(&mut self) {
+        if self.current_page == Page::Browse {
+            self.browse_step(false);
+            return;
+        }
         let len = self.list_len();
         if len > 0 {
             self.selected_index = if self.selected_index == 0 {
@@ -664,6 +812,13 @@ impl App {
                 .and_then(|h| h.track().cloned()),
             Page::Playlist => self.playlist_tracks.get(self.selected_index).cloned(),
             Page::Queue => self.queue.get(self.selected_index).cloned(),
+            Page::Browse => self
+                .browse_rows
+                .get(self.selected_index)
+                .and_then(|row| match row {
+                    BrowseRow::Item(SearchHit::Track(track)) => Some(track.clone()),
+                    _ => None,
+                }),
             Page::Library => None,
         }
     }
@@ -782,31 +937,240 @@ impl App {
         self.perform_search().await;
     }
 
-    pub async fn load_library(&mut self) {
+    /// Fetch the account's library in the background. The TUI keeps drawing
+    /// and accepting input immediately; `poll_library` applies the result on
+    /// the next tick. Every call gets a new generation so an older, slower
+    /// response cannot overwrite a newer one.
+    pub fn start_library_load(&mut self) {
+        self.library_generation = self.library_generation.wrapping_add(1);
+        let generation = self.library_generation;
         self.status_message = "Loading your library...".to_string();
-        match self.api.library_playlists().await {
-            Ok(mut playlists) => {
-                // Group the list by kind: playlists, then albums (artists
-                // and channels are already dropped by the API).
-                playlists.sort_by_key(|p| match p.kind {
-                    PlaylistKind::Playlist => 0,
-                    PlaylistKind::Album => 1,
-                    PlaylistKind::Artist => 2,
-                    PlaylistKind::Channel => 3,
-                });
-                self.library_loaded = true;
-                self.selected_index = 0;
-                self.status_message = if playlists.is_empty() {
-                    "Your library is empty.".to_string()
-                } else {
-                    format!("{} items · Enter to open", playlists.len())
-                };
-                self.playlists = playlists;
-                self.preview_for = None;
-                self.sync_preview();
-            }
-            Err(e) => self.status_message = format!("Failed to load library: {}", e),
+        let api = self.api.clone();
+        let tx = self.library_tx.clone();
+        tokio::spawn(async move {
+            let result = api.library_playlists().await.map_err(|e| e.to_string());
+            let _ = tx.send((generation, result));
+        });
+    }
+
+    /// Open the personalised browse page. It is cached for the session, so
+    /// returning to it is instant.
+    pub async fn open_browse(&mut self) {
+        if self.current_page == Page::Browse {
+            return;
         }
+        if self.offline {
+            self.status_message = "Go online to browse mixes and charts".to_string();
+            return;
+        }
+        let return_page = self.current_page;
+        let return_index = self.selected_index;
+        self.browse_return_page = return_page;
+        self.browse_return_index = return_index;
+        // Entering from another page always shows the top-level browse. If
+        // the last visit ended inside a mood/genre category, restore its
+        // root and select the button that opened it.
+        if let Some((rows, index)) = self.browse_back.take() {
+            self.browse_rows = rows;
+            self.selected_index = index;
+            self.status_message = "Browse".to_string();
+        }
+        self.current_page = Page::Browse;
+        if self.browse_loaded {
+            if !matches!(
+                self.browse_rows.get(self.selected_index),
+                Some(BrowseRow::Item(_))
+            ) {
+                self.selected_index = self.first_browse_item();
+            }
+            return;
+        }
+
+        self.status_message = "Loading mixes, trending and categories...".to_string();
+        match self.api.for_you().await {
+            Ok(shelves) => {
+                let mut slots: Vec<Option<BrowseShelf>> = vec![None; BROWSE_SECTIONS.len()];
+                for shelf in shelves {
+                    if let Some(section) = browse_section_for_title(&shelf.title) {
+                        slots[section] = Some(shelf);
+                    }
+                }
+                self.browse_shelves = slots;
+                self.browse_loaded = true;
+                self.select_browse_section(0);
+            }
+            Err(e) => {
+                // Keep the user where they were rather than parking them on
+                // an empty page; the footer still explains why.
+                self.current_page = return_page;
+                self.selected_index = return_index;
+                self.status_message = format!("Failed to load browse: {}", e);
+            }
+        }
+    }
+
+    /// Open the browse page at a section (by its index), loading the
+    /// sections first when needed. Used by the 1–5 shortcuts.
+    pub async fn open_browse_section(&mut self, section: usize) {
+        let section = section.min(BROWSE_SECTIONS.len() - 1);
+        self.input_mode = InputMode::Normal;
+        if self.current_page != Page::Browse {
+            self.open_browse().await;
+        } else if self.browse_back.is_some() {
+            // A category is open; selecting a section returns to the root view.
+            self.browse_back = None;
+        }
+        if self.current_page == Page::Browse && self.browse_loaded {
+            self.select_browse_section(section);
+        }
+    }
+
+    /// Show one root shelf under the active section. The section titles
+    /// live in the content header, so the list starts directly with its
+    /// items.
+    fn select_browse_section(&mut self, section: usize) {
+        self.browse_section = Some(section);
+        self.browse_back = None;
+        let items = self
+            .browse_shelves
+            .get(section)
+            .and_then(Option::as_ref)
+            .map(|shelf| shelf.items.clone());
+        if let Some(items) = items {
+            let count = items.len();
+            self.browse_rows = items.into_iter().map(BrowseRow::Item).collect();
+            self.selected_index = self.first_browse_item();
+            self.status_message = format!("{count} items");
+        } else {
+            self.browse_rows.clear();
+            self.selected_index = 0;
+            self.status_message = "nothing here right now".to_string();
+        }
+    }
+
+    fn set_browse_rows(&mut self, rows: Vec<BrowseRow>) {
+        self.browse_rows = rows;
+        self.browse_loaded = true;
+        self.selected_index = self.first_browse_item();
+    }
+
+    fn first_browse_item(&self) -> usize {
+        self.browse_rows
+            .iter()
+            .position(|row| matches!(row, BrowseRow::Item(_)))
+            .unwrap_or(0)
+    }
+
+    /// Move the cursor through item rows, skipping section headers.
+    fn browse_step(&mut self, forward: bool) {
+        let len = self.browse_rows.len();
+        if len == 0 {
+            return;
+        }
+        let mut index = self.selected_index.min(len - 1);
+        for _ in 0..len {
+            index = if forward {
+                (index + 1) % len
+            } else {
+                (index + len - 1) % len
+            };
+            if matches!(self.browse_rows[index], BrowseRow::Item(_)) {
+                self.selected_index = index;
+                return;
+            }
+        }
+    }
+
+    /// Esc on the browse page: category history first, then wherever the
+    /// browse page was opened from.
+    pub fn leave_browse(&mut self) {
+        if let Some((rows, index)) = self.browse_back.take() {
+            self.browse_rows = rows;
+            self.selected_index = index;
+            self.status_message = "Browse".to_string();
+        } else {
+            self.current_page = self.browse_return_page;
+            self.selected_index = self.browse_return_index;
+            self.sync_preview();
+        }
+    }
+
+    async fn open_browse_selected(&mut self) {
+        let Some(BrowseRow::Item(item)) = self.browse_rows.get(self.selected_index).cloned() else {
+            return;
+        };
+        match item {
+            SearchHit::Track(track) => {
+                let tracks = self.browse_track_list();
+                let index = tracks
+                    .iter()
+                    .position(|t| t.id == track.id)
+                    .unwrap_or(0);
+                self.queue = tracks;
+                self.queue_index = index;
+                self.rebuild_shuffle_order(None);
+                self.play_track(track);
+            }
+            SearchHit::Collection(playlist) => {
+                let Some((browse_id, params)) = crate::api::category_parts(&playlist.id) else {
+                    self.open_collection(playlist).await;
+                    return;
+                };
+                let browse_id = browse_id.to_string();
+                let params = params.to_string();
+                let title = playlist.title.clone();
+                self.status_message = format!("Loading {}...", title);
+                let previous_rows = self.browse_rows.clone();
+                let previous_index = self.selected_index;
+                match self.api.category_playlists(&browse_id, &params).await {
+                    Ok(items) if !items.is_empty() => {
+                        let count = items.len();
+                        let mut rows = vec![BrowseRow::Header(title.clone())];
+                        rows.extend(items.into_iter().map(|p| {
+                            BrowseRow::Item(SearchHit::Collection(p))
+                        }));
+                        self.browse_back = Some((previous_rows, previous_index));
+                        self.set_browse_rows(rows);
+                        self.status_message = format!("{title} · {count} collections");
+                    }
+                    Ok(_) => {
+                        self.status_message = format!("Nothing found in {title}");
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Failed to load {title}: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Tracks in the same section as the highlighted browse row, used as the
+    /// playback queue when a trending song starts.
+    fn browse_track_list(&self) -> Vec<Track> {
+        if self.browse_rows.is_empty() {
+            return Vec::new();
+        }
+        let mut start = 0;
+        for i in (0..=self.selected_index.min(self.browse_rows.len() - 1)).rev() {
+            if matches!(self.browse_rows[i], BrowseRow::Header(_)) {
+                start = i + 1;
+                break;
+            }
+        }
+        let mut end = self.browse_rows.len();
+        for i in start..self.browse_rows.len() {
+            if matches!(self.browse_rows[i], BrowseRow::Header(_)) {
+                end = i;
+                break;
+            }
+        }
+        self.browse_rows[start..end]
+            .iter()
+            .filter_map(|row| match row {
+                BrowseRow::Item(SearchHit::Track(track)) => Some(track.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Whether a track is available without the network: a local file is so
@@ -858,15 +1222,17 @@ impl App {
     /// snapshot — it is one request, and it can't hand back a list that went
     /// stale while we were away. Playback is deliberately left alone: a
     /// queue mixing local files and online tracks keeps running either way.
-    pub async fn toggle_offline(&mut self) {
+    pub fn toggle_offline(&mut self) {
         if self.offline {
             self.offline = false;
             self.preview_cache.clear();
             self.current_page = Page::Library;
-            self.load_library().await;
+            self.start_library_load();
             return;
         }
         self.offline = true;
+        // Any library request still in flight is for the online view now.
+        self.library_generation = self.library_generation.wrapping_add(1);
         // Re-read `config.json` so an edited path applies from here on.
         self.music_dir = crate::offline::music_dir();
         self.offline_tracks = crate::offline::scan(&self.music_dir, &self.registry);
@@ -966,6 +1332,7 @@ impl App {
     pub async fn activate_selected(&mut self) {
         match self.current_page {
             Page::Library => self.open_selected_playlist().await,
+            Page::Browse => self.open_browse_selected().await,
             Page::Search => {
                 if let Some(collection) = self.selected_collection() {
                     self.open_collection(collection).await;
@@ -1025,30 +1392,83 @@ impl App {
     pub fn play_selected(&mut self) {
         if let Some(t) = self.selected_track() {
             // Playing from a page replaces the queue with that page's list,
-            // the way playing a collection does.
+            // the way playing a collection does. Find the track's position in
+            // that list instead of assuming the page row and queue indices
+            // line up (browse sections contain headers and collections).
             self.queue = self.current_track_list();
-            self.queue_index = self.selected_index.min(self.queue.len().saturating_sub(1));
+            let index = self
+                .queue
+                .iter()
+                .position(|queued| queued.id == t.id)
+                .unwrap_or(0);
+            self.queue_index = index.min(self.queue.len().saturating_sub(1));
             self.rebuild_shuffle_order(None);
             self.play_track(t);
         }
     }
 
-    /// Start playback of `t`. Resets the elapsed clock and adopts the track's
-    /// own duration for the progress bar.
+    /// Start playback of `t`. The clock stays at zero until mpv reports
+    /// that audio is actually running; the duration is corrected from mpv
+    /// once the file is loaded.
     fn play_track(&mut self, t: Track) {
-        self.status_message = format!("Buffering stream for: {} - {}", t.title, t.artist);
+        self.status_message = "buffer♪ng".to_string();
         if let Err(e) = self.player.play(&t.id) {
             self.status_message = format!("Playback error: {}", e);
             self.playback_state = PlaybackState::Stopped;
             return;
         }
-        self.elapsed_secs = 0;
+        self.playback_position = 0.0;
+        self.position_sampled_at = None;
+        self.mpv_seen = false;
         self.playback_duration_secs = parse_duration(&t.duration).unwrap_or(210);
         self.current_track = Some(t);
         self.playback_state = PlaybackState::Buffering;
         self.buffering_timer = Some(Instant::now());
         self.sync_art();
         self.sync_lyrics();
+    }
+
+    /// Read mpv's authoritative timeline. While buffering, the first
+    /// positive position is the moment audio started — the state flips to
+    /// Playing on that same tick, so lyrics and progress are never ahead of
+    /// the sound or trailing behind it.
+    fn poll_player_timeline(&mut self) {
+        if !matches!(
+            self.playback_state,
+            PlaybackState::Buffering | PlaybackState::Playing | PlaybackState::Paused
+        ) {
+            return;
+        }
+        let Some(timeline) = self.player.timeline() else {
+            return;
+        };
+        self.mpv_seen = true;
+        if let Some(position) = timeline.position.filter(|p| p.is_finite()) {
+            self.playback_position = position.max(0.0);
+            self.position_sampled_at = Some(Instant::now());
+            if self.playback_state == PlaybackState::Buffering && position > 0.0 {
+                self.finish_buffering();
+            }
+        }
+        if let Some(duration) = timeline.duration.filter(|d| d.is_finite() && *d > 0.0) {
+            let secs = duration.round() as u64;
+            if secs > 0 && secs != self.playback_duration_secs {
+                self.playback_duration_secs = secs;
+                if let Some(track) = self.current_track.as_mut() {
+                    let label = format_duration(secs);
+                    if track.duration.as_deref() != Some(label.as_str()) {
+                        track.duration = Some(label);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Buffering is over: audio is running (or the IPC fallback expired).
+    fn finish_buffering(&mut self) {
+        self.playback_state = PlaybackState::Playing;
+        self.buffering_timer = None;
+        self.status_message = "Play♪ng".to_string();
     }
 
     /// Start (or reuse) the background cover-art fetch for the current track.
@@ -1085,7 +1505,7 @@ impl App {
         }
     }
 
-    /// `h`: like the currently-playing song — cycle between liked and no
+    /// `L`: like the currently-playing song — cycle between liked and no
     /// rating (a disliked track lands on LIKE). The flip is optimistic: the
     /// playback bar's heart and the status message change on the keypress
     /// itself, and the network call only rolls them back if it fails.
@@ -1126,7 +1546,7 @@ impl App {
             .send((track.id.clone(), want, generation));
     }
 
-    /// Live-update the liked-songs list on screen for an `h` press:
+    /// Live-update the liked-songs list on screen for an `L` press:
     /// un-liking drops the row, liking puts it at the top (VLLM lists
     /// newest-first, so a fresh like lands on index 0). The selection
     /// sticks to its track as rows move.
@@ -1270,6 +1690,7 @@ impl App {
                 .filter_map(|h| h.track().cloned())
                 .collect(),
             Page::Playlist => self.playlist_tracks.clone(),
+            Page::Browse => self.browse_track_list(),
             _ => Vec::new(),
         }
     }
@@ -1289,23 +1710,22 @@ impl App {
         if !self.is_music_active() {
             return;
         }
-        let active = if self.playback_state == PlaybackState::Playing {
-            self.playback_start_time
-                .map(|s| s.elapsed().as_secs())
-                .unwrap_or(0)
+        let current = self.position_secs_f64();
+        let total = self.playback_duration_secs as f64;
+        let target = (current + delta as f64).clamp(0.0, total.max(0.0));
+        let effective = (target - current).round() as i64;
+        self.playback_position = target;
+        self.position_sampled_at = if self.playback_state == PlaybackState::Playing {
+            Some(Instant::now())
         } else {
-            0
+            None
         };
-        let current = (self.elapsed_secs + active) as i64;
-        let total = self.playback_duration_secs as i64;
-        let target = (current + delta).clamp(0, total.max(0));
-        let effective = target - current;
-        self.elapsed_secs = target as u64;
-        if self.playback_state == PlaybackState::Playing {
-            self.playback_start_time = Some(Instant::now());
+        // Compare the real positions, not the rounded label: a -10s press
+        // from 0.2s clamps to zero and must still reach mpv.
+        if (target - current).abs() > 0.01 {
+            self.player.seek_to(target);
         }
         if effective != 0 {
-            self.player.seek(effective);
             // A plain signed number instead of a rewind/fast-forward glyph:
             // emoji render double-width (or as colour emoji) in some
             // terminals and knock the footer out of alignment.
@@ -1405,7 +1825,7 @@ impl App {
         match next {
             Some(i) if i < self.queue.len() => self.jump_to(i),
             _ => {
-                self.playback_start_time = None;
+                self.position_sampled_at = None;
                 self.playback_state = PlaybackState::Stopped;
                 self.status_message = "End of queue".to_string();
             }
@@ -1416,6 +1836,7 @@ impl App {
     /// track first, then the rest shuffled. `keep_next` pins one track to
     /// play right after the current one (play-next inserts).
     fn rebuild_shuffle_order(&mut self, keep_next: Option<usize>) {
+        self.queue_version = self.queue_version.wrapping_add(1);
         if !self.shuffle {
             self.shuffle_order.clear();
             return;
@@ -1534,6 +1955,7 @@ impl App {
         let was_current = i == self.queue_index;
         let removed = self.queue.remove(i);
         if self.queue.is_empty() {
+            self.queue_version = self.queue_version.wrapping_add(1);
             self.queue_index = 0;
             self.selected_index = 0;
             if was_current {
@@ -1610,42 +2032,49 @@ impl App {
         }
         match self.playback_state {
             PlaybackState::Playing => {
-                if let Some(start) = self.playback_start_time.take() {
-                    self.elapsed_secs += start.elapsed().as_secs();
-                }
+                self.playback_position = self.position_secs_f64();
+                self.position_sampled_at = None;
                 self.player.pause();
                 self.playback_state = PlaybackState::Paused;
-                self.status_message = "Paused playback".to_string();
+                self.status_message = "Paused".to_string();
             }
             PlaybackState::Paused => {
                 self.player.pause();
                 self.playback_state = PlaybackState::Playing;
-                self.playback_start_time = Some(Instant::now());
-                self.status_message = "Resumed playback".to_string();
+                self.position_sampled_at = Some(Instant::now());
+                self.status_message = "Resumed".to_string();
             }
             PlaybackState::Buffering => {}
             PlaybackState::Stopped => {}
         }
     }
 
-    /// Current playback position in whole seconds (mirrors the progress
-    /// bar's clock: it only advances while actually playing).
-    pub fn position_secs(&self) -> u64 {
+    /// Current playback position with sub-second precision. The value comes
+    /// from mpv and is interpolated only until the next tick, so progress
+    /// and lyrics stay tied to what is actually audible.
+    pub fn position_secs_f64(&self) -> f64 {
         let active = if self.playback_state == PlaybackState::Playing {
-            self.playback_start_time
-                .map(|s| s.elapsed().as_secs())
-                .unwrap_or(0)
+            self.position_sampled_at
+                .map(|s| s.elapsed().as_secs_f64())
+                .unwrap_or(0.0)
         } else {
-            0
+            0.0
         };
-        self.elapsed_secs + active
+        (self.playback_position + active).clamp(0.0, self.playback_duration_secs as f64)
+    }
+
+    /// Whole-second view of [`Self::position_secs_f64`] for labels, MPRIS
+    /// and the queue bridge.
+    pub fn position_secs(&self) -> u64 {
+        self.position_secs_f64().floor() as u64
     }
 
     /// Stop playback entirely (MPRIS `Stop`): end mpv but keep the last
     /// track's metadata so widgets can still show what was playing.
     pub fn stop_playback(&mut self) {
+        self.playback_position = self.position_secs_f64();
+        self.position_sampled_at = None;
         self.player.stop();
-        self.playback_start_time = None;
         self.playback_state = PlaybackState::Stopped;
         self.status_message = "Stopped".to_string();
     }
@@ -1675,8 +2104,9 @@ impl App {
                 MprisCmd::Previous => self.play_previous(),
                 MprisCmd::Seek(offset_us) => self.seek_relative(offset_us / 1_000_000),
                 MprisCmd::SetPosition(pos_us) => {
-                    let current = self.position_secs() as i64 * 1_000_000;
-                    self.seek_relative((pos_us - current) / 1_000_000);
+                    let current = self.position_secs_f64();
+                    let target = pos_us as f64 / 1_000_000.0;
+                    self.seek_relative((target - current).round() as i64);
                 }
             }
         }
@@ -1697,7 +2127,7 @@ impl App {
                 t.title.as_str(),
                 t.artist.as_str(),
                 t.album.as_deref().unwrap_or(""),
-                parse_duration(&t.duration).unwrap_or(0) as i64 * 1_000_000,
+                self.playback_duration_secs as i64 * 1_000_000,
             ),
             None => ("", "", "", "", 0),
         };
@@ -1714,7 +2144,7 @@ impl App {
             album,
             length_us,
             art_url: &art_url,
-            pos_us: self.position_secs() as i64 * 1_000_000,
+            pos_us: (self.position_secs_f64() * 1_000_000.0) as i64,
         });
     }
 
@@ -1754,44 +2184,82 @@ impl App {
     }
 
     /// Mirror the queue to Unix-socket clients (the widget's queue list).
-    fn sync_ipc(&self) {
-        let tracks: Vec<crate::ipc::QueueRow> = self
-            .queue
-            .iter()
-            .map(|t| crate::ipc::QueueRow {
-                title: t.title.clone(),
-                artist: t.artist.clone(),
-                album: t.album.clone().unwrap_or_default(),
-                duration_secs: parse_duration(&t.duration).unwrap_or(0),
-                // The widget draws row thumbnails from this URL; fall back
-                // to YouTube's per-video cover like the art panel does.
-                thumbnail_url: match t.thumbnail_url.as_deref() {
-                    Some(url) if !url.is_empty() => url.to_string(),
-                    _ => format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", t.id),
-                },
-            })
-            .collect();
+    ///
+    /// The queue rows are rebuilt only when the queue actually changes.
+    /// Position, status and the active index still update every tick, but an
+    /// idle player no longer clones every title and thumbnail URL ten times a
+    /// second.
+    fn sync_ipc(&mut self) {
+        let rebuild_tracks = self.queue_version != self.ipc_queue_version;
+        let tracks = if rebuild_tracks {
+            self.ipc_queue_version = self.queue_version;
+            Some(
+                self.queue
+                    .iter()
+                    .map(|t| crate::ipc::QueueRow {
+                        title: t.title.clone(),
+                        artist: t.artist.clone(),
+                        album: t.album.clone().unwrap_or_default(),
+                        duration_secs: parse_duration(&t.duration).unwrap_or(0),
+                        // The widget draws row thumbnails from this URL; fall
+                        // back to YouTube's per-video cover like the art panel.
+                        thumbnail_url: match t.thumbnail_url.as_deref() {
+                            Some(url) if !url.is_empty() => url.to_string(),
+                            _ => format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", t.id),
+                        },
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
         let active = matches!(
             self.playback_state,
             PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Paused
         );
-        let mut guard = self.ipc.write().unwrap();
-        guard.tracks = tracks;
-        guard.current_index = if active { self.queue_index as i32 } else { -1 };
-        guard.repeat = self.repeat.label().to_string();
-        guard.shuffle = self.shuffle;
-        guard.status = match self.playback_state {
+        let status = match self.playback_state {
             PlaybackState::Playing | PlaybackState::Buffering => "Playing",
             PlaybackState::Paused => "Paused",
             PlaybackState::Stopped => "Stopped",
-        }
-        .to_string();
-        guard.position_secs = self.position_secs();
-        guard.track_id = self
+        };
+        let track_id = self
             .current_track
             .as_ref()
-            .map(|t| t.id.clone())
-            .unwrap_or_default();
+            .map(|t| t.id.as_str())
+            .unwrap_or("");
+        let mut guard = self.ipc.write().unwrap();
+        if let Some(tracks) = tracks {
+            guard.tracks = tracks;
+        }
+        guard.current_index = if active { self.queue_index as i32 } else { -1 };
+        set_string(&mut guard.repeat, self.repeat.label());
+        guard.shuffle = self.shuffle;
+        set_string(&mut guard.status, status);
+        guard.position_secs = self.position_secs();
+        set_string(&mut guard.track_id, track_id);
+    }
+}
+
+/// Replace `dst` only when the value changed, avoiding a fresh allocation on
+/// every UI tick for state that is usually stable.
+fn set_string(dst: &mut String, value: &str) {
+    if dst != value {
+        dst.clear();
+        dst.push_str(value);
+    }
+}
+
+/// Format seconds the way track durations are written (`M:SS` / `H:MM:SS`).
+fn format_duration(secs: u64) -> String {
+    if secs >= 3600 {
+        format!(
+            "{}:{:02}:{:02}",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        )
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
     }
 }
 
@@ -1817,4 +2285,20 @@ fn curate_filters(filters: Vec<SearchFilter>) -> Vec<SearchFilter> {
         }
     }
     curated
+}
+
+#[cfg(test)]
+mod browse_section_tests {
+    use super::*;
+
+    #[test]
+    fn sections_have_requested_order_and_match_shelves() {
+        assert_eq!(BROWSE_SECTIONS, ["TRENDING", "MIX", "COMMUNITY", "MOODS", "GENRES"]);
+        assert_eq!(browse_section_for_title("Trending songs for you"), Some(0));
+        assert_eq!(browse_section_for_title("Mix for you"), Some(1));
+        assert_eq!(browse_section_for_title("From the community"), Some(2));
+        assert_eq!(browse_section_for_title("Moods"), Some(3));
+        assert_eq!(browse_section_for_title("Genres"), Some(4));
+        assert_eq!(browse_section_for_title("Chill"), None);
+    }
 }

@@ -37,6 +37,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 | 🔐 **Auth wizard** | `ytmtui setup` auto-detects your browser and extracts cookies |
 | 🔍 **Innertube search** | Signed-in search with Top / Songs / Albums / Artists / Playlists filters |
 | 📚 **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
+| ✨ **For you** | Personal mixes, trending songs, community playlists, moods and genres on one page |
 | ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, buffering state |
 | 💫 **Extras** | Synced lyrics, queue, offline mode, like/unlike, MP3 download with cover art and `.lrc` lyrics |
 
@@ -185,12 +186,13 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 | `Space` | Play / Pause |
 | `←` / `→` | Seek -5s / +5s |
 | `n` / `p` | Next / previous track |
+| `1`–`5` | Jump to **Trending / Mix / Community / Moods / Genres** |
 | `/` | Focus search bar |
 | `Tab` / `⇧Tab` | Cycle search filters |
 | `Esc` | Back / open queue |
 | `d` | Download highlighted song as MP3 with cover art and synced `.lrc` (or delete in queue) |
 | `o` | Toggle offline mode |
-| `h` | Like / unlike current song |
+| `L` | Like / unlike current song |
 | `l` | Toggle lyrics pane |
 | `X` / `Z` | Queue next / append to queue |
 | `Ctrl+R` | Cycle repeat mode |
@@ -209,8 +211,9 @@ The window is deliberately chrome-free — no box borders, just hairlines, white
 - 📂 **Playlist sidebar** — always-visible library of playlists, albums, artists & channels  
   `↑`/`↓` moves the `▌` cursor · `Enter` opens the selection
 - 📄 **Detail / results** — title, meta line and lazily-fetched track list (cached)
+- ✨ **For you** — press `1`–`5` to jump to **Trending · Mix · Community · Moods · Genres**
 - 🎚️ **Playback bar** — indicator, track, time and a full-width progress bar that only advances while playing
-- ℹ️ **Footer** — status message + compact keybinding cheat-sheet
+- ℹ️ **Footer** — status message and compact keybinding cheat-sheet
 
 ---
 

@@ -230,13 +230,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Create app state instantly
+    // Create app state instantly. The library fetch runs in the background
+    // so the first frame appears immediately — an empty sidebar fills in when
+    // the account's playlists arrive.
     let mut app = App::new();
-
-    // Load the library so the sidebar has playlist data, then show the
-    // detail of the first entry.
-    app.load_library().await;
-    app.sync_preview();
+    app.start_library_load();
 
     // Main event loop
     while !app.should_quit {
@@ -297,11 +295,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('p') => app.play_previous(),
                     // Play/pause.
                     KeyCode::Char(' ') => app.toggle_play(),
+                    // Jump to a section of the personalised browse page.
+                    KeyCode::Char(digit @ '1'..='5') => {
+                        let section = digit as usize - '1' as usize;
+                        app.open_browse_section(section).await;
+                    }
                     // The queue page: `z` opens it, Esc leaves it.
                     KeyCode::Char('z') => app.open_queue(),
                     // Offline mode: the local music folder instead of the
                     // account's library. Press again to go back online.
-                    KeyCode::Char('o') => app.toggle_offline().await,
+                    KeyCode::Char('o') => app.toggle_offline(),
                     // Queue the highlighted track:
                     // X plays it next, Z appends it.
                     KeyCode::Char('X') => app.queue_focused_next(),
@@ -324,8 +327,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('J') => app.queue_move(true),
                     KeyCode::Char('K') => app.queue_move(false),
                     // Like the current song — the heart in the playback
-                    // bar fills in (the like toggle, on `h`).
-                    KeyCode::Char('h') => app.toggle_like(),
+                    // bar fills in (the like toggle, on `L`).
+                    KeyCode::Char('L') => app.toggle_like(),
                     // Toggle the lyrics pane on the right.
                     KeyCode::Char('l') => app.toggle_lyrics(),
                     // Repeat / shuffle.
@@ -362,7 +365,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // Back from a collection; from search, back to the library.
                     KeyCode::Esc => {
-                        if app.current_page == Page::Playlist {
+                        if app.current_page == Page::Browse {
+                            app.leave_browse();
+                        } else if app.current_page == Page::Playlist {
                             app.current_page = app.playlist_return_page;
                             app.selected_index = app.playlist_return_index;
                             app.sync_preview();

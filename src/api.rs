@@ -1,5 +1,5 @@
 use crate::auth::Auth;
-use crate::models::{Playlist, PlaylistKind, SearchHit, Track};
+use crate::models::{BrowseShelf, Playlist, PlaylistKind, SearchHit, Track};
 use reqwest::Client;
 use serde_json::{json, Map, Value};
 
@@ -33,8 +33,7 @@ pub struct YtmApi {
 impl YtmApi {
     pub fn new() -> Self {
         // Timeouts on purpose: without them a stalled connection hangs
-        // whatever awaits it — including startup (load_library runs
-        // before the first frame is drawn).
+        // whatever awaits it — including the background library fetch.
         let client = Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(20))
@@ -48,6 +47,17 @@ impl YtmApi {
 
     pub fn is_authenticated(&self) -> bool {
         self.headers.is_some()
+    }
+
+    /// The signed-in account's display name. Uses this client's headers and
+    /// connection pool, so the header's account lookup can share the same TLS
+    /// session as the library fetch.
+    pub async fn current_account_name(&self) -> Option<String> {
+        let headers = self.headers.as_ref()?;
+        crate::auth::account_name_with(&self.client, headers)
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Search YouTube Music. `params` selects a filter chip (album/artist/…);
@@ -124,7 +134,12 @@ impl YtmApi {
                 Some(token) if !seen_tokens.contains(&token) => {
                     seen_tokens.push(token.clone());
                     body = json!({ "context": context(), "continuation": token });
-                    value = self.browse(&body).await?;
+                    // A single flaky continuation should not throw away the
+                    // shelves already found; keep what we have.
+                    match self.browse(&body).await {
+                        Ok(next) => value = next,
+                        Err(_) => break,
+                    }
                 }
                 _ => break,
             }
@@ -141,6 +156,167 @@ impl YtmApi {
             let title = p.title.to_lowercase();
             !(title.contains("episode") && title.contains("later"))
         });
+        Ok(playlists)
+    }
+
+    /// The "For you" browse page: mixes, trending songs, community
+    /// playlists and the mood/genre category grids. Home and explore are
+    /// fetched together; optional shelves are skipped if that source fails
+    /// rather than making the whole page unavailable.
+    pub async fn for_you(&self) -> anyhow::Result<Vec<BrowseShelf>> {
+        let (home, trending, categories) = tokio::join!(
+            self.home_for_you_shelves(),
+            self.trending_songs_shelf(),
+            self.moods_and_genres_shelves(),
+        );
+        let (mix, community) = home?;
+        let mut shelves = Vec::new();
+        if let Some(shelf) = mix {
+            shelves.push(shelf);
+        }
+        if let Ok(Some(shelf)) = trending {
+            shelves.push(shelf);
+        }
+        if let Some(shelf) = community {
+            shelves.push(shelf);
+        }
+        if let Ok(categories) = categories {
+            shelves.extend(categories);
+        }
+        shelves.retain(|shelf| !shelf.items.is_empty());
+        if shelves.is_empty() {
+            anyhow::bail!("nothing to browse yet");
+        }
+        Ok(shelves)
+    }
+
+    /// Walk the home feed until both personalised shelves are found. The
+    /// feed returns a few shelves per page, so a small number of
+    /// continuations is normal.
+    async fn home_for_you_shelves(
+        &self,
+    ) -> anyhow::Result<(Option<BrowseShelf>, Option<BrowseShelf>)> {
+        let mut body = json!({ "context": context(), "browseId": "FEmusic_home" });
+        let mut value = self.browse(&body).await?;
+        let mut seen_tokens = Vec::new();
+        let mut mix = None;
+        let mut community = None;
+
+        for _ in 0..12 {
+            let mut shelves = Vec::new();
+            collect_browse_shelves(&value, &mut shelves);
+            for mut shelf in shelves {
+                let title = shelf.title.to_lowercase();
+                if mix.is_none() && (title == "mixed for you" || title == "mix for you") {
+                    shelf.title = "Mix for you".to_string();
+                    mix = Some(shelf);
+                } else if community.is_none()
+                    && (title == "from the community"
+                        || title == "from community"
+                        || title == "trending community playlists")
+                {
+                    community = Some(shelf);
+                }
+            }
+            if mix.is_some() && community.is_some() {
+                break;
+            }
+            match section_continuation(&value) {
+                Some(token) if !seen_tokens.contains(&token) => {
+                    seen_tokens.push(token.clone());
+                    body = json!({ "context": context(), "continuation": token });
+                    // A single flaky continuation should not throw away the
+                    // shelves already found; keep what we have.
+                    match self.browse(&body).await {
+                        Ok(next) => value = next,
+                        Err(_) => break,
+                    }
+                }
+                _ => break,
+            }
+        }
+        Ok((mix, community))
+    }
+
+    /// The explore page's "Trending" shelf is made of playable video rows.
+    async fn trending_songs_shelf(&self) -> anyhow::Result<Option<BrowseShelf>> {
+        let value = self
+            .browse(&json!({ "context": context(), "browseId": "FEmusic_explore" }))
+            .await?;
+        let mut shelves = Vec::new();
+        collect_browse_shelves(&value, &mut shelves);
+        let Some(mut shelf) = shelves
+            .into_iter()
+            .find(|shelf| shelf.title.eq_ignore_ascii_case("trending"))
+        else {
+            return Ok(None);
+        };
+        shelf.items.retain(|item| item.track().is_some());
+        if shelf.items.is_empty() {
+            return Ok(None);
+        }
+        shelf.title = "Trending songs for you".to_string();
+        Ok(Some(shelf))
+    }
+
+    /// Moods and genres are navigation grids, not playlists. Keep the two
+    /// labelled grids and turn each button into an openable category.
+    async fn moods_and_genres_shelves(&self) -> anyhow::Result<Vec<BrowseShelf>> {
+        let value = self.browse(&json!({
+            "context": context(),
+            "browseId": "FEmusic_moods_and_genres",
+        })).await?;
+        let mut grids = Vec::new();
+        collect_navigation_grids(&value, &mut grids);
+        let mut shelves = Vec::new();
+        for (title, buttons) in grids {
+            let lower = title.to_lowercase();
+            let (label, kind) = if lower.contains("mood") {
+                ("Moods", PlaylistKind::Mood)
+            } else if lower.contains("genre") {
+                ("Genres", PlaylistKind::Genre)
+            } else {
+                continue;
+            };
+            let mut items = Vec::new();
+            for button in buttons {
+                if let Some(playlist) = parse_category_button(button, kind) {
+                    items.push(SearchHit::Collection(playlist));
+                }
+            }
+            if !items.is_empty() {
+                shelves.push(BrowseShelf {
+                    title: label.to_string(),
+                    items,
+                });
+            }
+        }
+        Ok(shelves)
+    }
+
+    /// Open one of the mood/genre buttons: its browse page is a collection
+    /// of playlists, surfaced as one flat list.
+    pub async fn category_playlists(
+        &self,
+        browse_id: &str,
+        params: &str,
+    ) -> anyhow::Result<Vec<Playlist>> {
+        let value = self.browse(&json!({
+            "context": context(),
+            "browseId": browse_id,
+            "params": params,
+        })).await?;
+        let mut playlists = Vec::new();
+        collect_two_row_playlists(&value, &mut playlists);
+        if playlists.is_empty() {
+            let mut hits = Vec::new();
+            collect_search_hits(&value, &mut hits);
+            playlists.extend(hits.into_iter().filter_map(|hit| hit.collection().cloned()));
+        }
+        playlists.retain(|p| matches!(p.kind, PlaylistKind::Playlist | PlaylistKind::Album));
+        let mut seen = std::collections::HashSet::new();
+        playlists.retain(|p| seen.insert(p.id.clone()));
+        playlists.truncate(80);
         Ok(playlists)
     }
 
@@ -643,6 +819,159 @@ fn collect_two_row_playlists(value: &Value, out: &mut Vec<Playlist>) {
     }
 }
 
+/// Prefix used in a synthetic playlist id for a mood/genre button. The id
+/// is never sent to Innertube as a playlist; the app recognises it before
+/// opening and fetches the category instead.
+const CATEGORY_PREFIX: &str = "ytmtui-category:";
+
+pub fn category_id(browse_id: &str, params: &str) -> String {
+    format!("{CATEGORY_PREFIX}{browse_id}|{params}")
+}
+
+/// Split a synthetic category id back into `(browseId, params)`.
+pub fn category_parts(id: &str) -> Option<(&str, &str)> {
+    id.strip_prefix(CATEGORY_PREFIX)?.split_once('|')
+}
+
+/// Recursively collect titled shelves from a home/explore response.
+fn collect_browse_shelves(value: &Value, out: &mut Vec<BrowseShelf>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(shelf) = map.get("musicCarouselShelfRenderer") {
+                if let Some(parsed) = parse_browse_shelf(shelf) {
+                    out.push(parsed);
+                }
+            } else if let Some(shelf) = map.get("musicShelfRenderer") {
+                if let Some(parsed) = parse_browse_shelf(shelf) {
+                    out.push(parsed);
+                }
+            }
+            for v in map.values() {
+                collect_browse_shelves(v, out);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                collect_browse_shelves(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_browse_shelf(shelf: &Value) -> Option<BrowseShelf> {
+    let title = shelf_title(shelf)?;
+    let mut items = Vec::new();
+    for item in shelf.get("contents")?.as_array()? {
+        if let Some(hit) = parse_browse_item(item) {
+            items.push(hit);
+        }
+    }
+    if items.is_empty() {
+        return None;
+    }
+    Some(BrowseShelf { title, items })
+}
+
+fn shelf_title(shelf: &Value) -> Option<String> {
+    let header = shelf.get("header")?;
+    runs_text(
+        header
+            .pointer("/musicCarouselShelfBasicHeaderRenderer/title")
+            .or_else(|| header.pointer("/musicShelfBasicHeaderRenderer/title"))
+            .or_else(|| header.get("title")),
+    )
+}
+
+fn parse_browse_item(item: &Value) -> Option<SearchHit> {
+    if let Some(renderer) = item.get("musicTwoRowItemRenderer") {
+        return parse_playlist(renderer).map(SearchHit::Collection);
+    }
+    if let Some(renderer) = item.get("musicResponsiveListItemRenderer") {
+        return parse_item(renderer).map(SearchHit::Track);
+    }
+    None
+}
+
+/// Collect each labelled navigation grid on the moods/genres page.
+fn collect_navigation_grids<'a>(value: &'a Value, out: &mut Vec<(String, Vec<&'a Value>)>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(grid) = map.get("gridRenderer") {
+                let title = runs_text(
+                    grid.pointer("/header/gridHeaderRenderer/title"),
+                )
+                .unwrap_or_default();
+                let buttons: Vec<&Value> = grid
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.get("musicNavigationButtonRenderer"))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !title.is_empty() && !buttons.is_empty() {
+                    out.push((title, buttons));
+                }
+            }
+            for v in map.values() {
+                collect_navigation_grids(v, out);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                collect_navigation_grids(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_category_button(renderer: &Value, kind: PlaylistKind) -> Option<Playlist> {
+    let title = runs_text(renderer.get("buttonText"))?;
+    let endpoint = renderer.pointer("/clickCommand/browseEndpoint")?;
+    let browse_id = endpoint.get("browseId")?.as_str()?;
+    let params = endpoint.get("params")?.as_str()?;
+    if browse_id != "FEmusic_moods_and_genres_category" {
+        return None;
+    }
+    Some(Playlist {
+        id: category_id(browse_id, params),
+        title,
+        subtitle: kind_label(kind).to_string(),
+        track_count: None,
+        kind,
+    })
+}
+
+fn kind_label(kind: PlaylistKind) -> &'static str {
+    match kind {
+        PlaylistKind::Playlist => "Playlist",
+        PlaylistKind::Album => "Album",
+        PlaylistKind::Artist => "Artist",
+        PlaylistKind::Channel => "Channel",
+        PlaylistKind::Mood => "Mood",
+        PlaylistKind::Genre => "Genre",
+    }
+}
+
+/// The section-level continuation on home/explore pages. A generic
+/// `find_next_continuation` can pick up a shelf's own token instead.
+fn section_continuation(value: &Value) -> Option<String> {
+    let section = find_json(value, "sectionListContinuation")
+        .or_else(|| find_json(value, "sectionListRenderer"))?;
+    section
+        .get("continuations")?
+        .as_array()?
+        .first()?
+        .get("nextContinuationData")?
+        .get("continuation")?
+        .as_str()
+        .map(str::to_string)
+}
+
 fn parse_playlist(renderer: &Value) -> Option<Playlist> {
     let browse_endpoint = renderer.get("navigationEndpoint")?.get("browseEndpoint")?;
     let id = browse_endpoint.get("browseId")?.as_str()?.to_string();
@@ -776,11 +1105,7 @@ fn parse_track_count(subtitle: &str) -> Option<usize> {
 }
 
 fn parse_item(renderer: &Value) -> Option<Track> {
-    let id = renderer
-        .get("playlistItemData")
-        .and_then(|p| p.get("videoId"))
-        .and_then(|v| v.as_str())?
-        .to_string();
+    let id = item_video_id(renderer)?;
 
     let columns = renderer.get("flexColumns")?.as_array()?;
 
@@ -873,6 +1198,28 @@ fn parse_item(renderer: &Value) -> Option<Track> {
     })
 }
 
+/// Video id for a responsive row. Playlist/album rows carry
+/// `playlistItemData`; explore/home rows often expose the id only on the
+/// thumbnail's play button.
+fn item_video_id(renderer: &Value) -> Option<String> {
+    let direct = renderer
+        .pointer("/playlistItemData/videoId")
+        .or_else(|| renderer.pointer("/navigationEndpoint/watchEndpoint/videoId"))
+        .or_else(|| {
+            renderer.pointer(
+                "/overlay/musicItemThumbnailOverlayRenderer/content/musicPlayButtonRenderer/playNavigationEndpoint/watchEndpoint/videoId",
+            )
+        })
+        .and_then(Value::as_str);
+    if let Some(id) = direct {
+        return Some(id.to_string());
+    }
+    find_json(renderer, "watchEndpoint")?
+        .get("videoId")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// Largest thumbnail URL carried by a list renderer, when present.
 fn renderer_thumb(renderer: &Value) -> Option<String> {
     let thumbs = renderer
@@ -933,4 +1280,118 @@ fn is_duration(s: &str) -> bool {
         && parts
             .iter()
             .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+#[cfg(test)]
+mod browse_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_home_shelf_with_collections_and_songs() {
+        let value = json!({
+            "header": {
+                "musicCarouselShelfBasicHeaderRenderer": {
+                    "title": { "runs": [{ "text": "Mixed for you" }] }
+                }
+            },
+            "contents": [
+                {
+                    "musicTwoRowItemRenderer": {
+                        "title": { "runs": [{ "text": "My Mix" }] },
+                        "subtitle": { "runs": [{ "text": "Artist A" }] },
+                        "navigationEndpoint": {
+                            "browseEndpoint": {
+                                "browseId": "VLRDMIX",
+                                "browseEndpointContextSupportedConfigs": {
+                                    "browseEndpointContextMusicConfig": {
+                                        "pageType": "MUSIC_PAGE_TYPE_PLAYLIST"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                {
+                    "musicResponsiveListItemRenderer": {
+                        "overlay": {
+                            "musicItemThumbnailOverlayRenderer": {
+                                "content": {
+                                    "musicPlayButtonRenderer": {
+                                        "playNavigationEndpoint": {
+                                            "watchEndpoint": { "videoId": "vid123" }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "flexColumns": [
+                            {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                    "text": { "runs": [{ "text": "Trending song" }] }
+                                }
+                            },
+                            {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                    "text": { "runs": [{ "text": "Some Artist • 1.2M views" }] }
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        let shelf = parse_browse_shelf(&value).expect("shelf");
+        assert_eq!(shelf.title, "Mixed for you");
+        assert_eq!(shelf.items.len(), 2);
+        match &shelf.items[0] {
+            SearchHit::Collection(playlist) => assert_eq!(playlist.id, "VLRDMIX"),
+            other => panic!("expected collection, got {other:?}"),
+        }
+        match &shelf.items[1] {
+            SearchHit::Track(track) => {
+                assert_eq!(track.id, "vid123");
+                assert_eq!(track.title, "Trending song");
+                assert_eq!(track.artist, "Some Artist");
+            }
+            other => panic!("expected track, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_mood_and_genre_categories() {
+        let value = json!({
+            "gridRenderer": {
+                "header": {
+                    "gridHeaderRenderer": {
+                        "title": { "runs": [{ "text": "Moods & moments" }] }
+                    }
+                },
+                "items": [{
+                    "musicNavigationButtonRenderer": {
+                        "buttonText": { "runs": [{ "text": "Chill" }] },
+                        "clickCommand": {
+                            "browseEndpoint": {
+                                "browseId": "FEmusic_moods_and_genres_category",
+                                "params": "category-params"
+                            }
+                        }
+                    }
+                }]
+            }
+        });
+
+        let mut grids = Vec::new();
+        collect_navigation_grids(&value, &mut grids);
+        assert_eq!(grids.len(), 1);
+        assert_eq!(grids[0].0, "Moods & moments");
+        let playlist = parse_category_button(grids[0].1[0], PlaylistKind::Mood).expect("button");
+        assert_eq!(playlist.title, "Chill");
+        assert_eq!(playlist.kind, PlaylistKind::Mood);
+        assert_eq!(
+            category_parts(&playlist.id),
+            Some(("FEmusic_moods_and_genres_category", "category-params"))
+        );
+    }
 }

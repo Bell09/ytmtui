@@ -277,6 +277,16 @@ async fn account_name(headers: &Map<String, Value>) -> Result<Option<String>, ()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|_| ())?;
+    account_name_with(&client, headers).await
+}
+
+/// The same probe on a caller-supplied client. The TUI passes its API client
+/// so the account lookup shares the connection pool with the library request
+/// instead of opening a second TLS connection at startup.
+pub(crate) async fn account_name_with(
+    client: &reqwest::Client,
+    headers: &Map<String, Value>,
+) -> Result<Option<String>, ()> {
     let url = format!(
         "https://music.youtube.com/youtubei/v1/account/account_menu?key={}&prettyPrint=false",
         API_KEY

@@ -28,6 +28,11 @@ pub enum PlaylistKind {
     Album,
     Artist,
     Channel,
+    /// A mood button on the "Moods & genres" browse page. Its id carries the
+    /// Innertube category link, not a playlist id.
+    Mood,
+    /// A genre button on the "Moods & genres" browse page.
+    Genre,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +52,8 @@ impl Playlist {
             PlaylistKind::Album => "Album",
             PlaylistKind::Artist => "Artist",
             PlaylistKind::Channel => "Channel",
+            PlaylistKind::Mood => "Mood",
+            PlaylistKind::Genre => "Genre",
         }
     }
 }
@@ -75,10 +82,26 @@ impl SearchHit {
     }
 }
 
+/// A titled group of rows on the "For you" browse page.
+#[derive(Debug, Clone)]
+pub struct BrowseShelf {
+    pub title: String,
+    pub items: Vec<SearchHit>,
+}
+
+/// One displayed line on the browse page. Headers are drawn but skipped by
+/// the selection cursor.
+#[derive(Debug, Clone)]
+pub enum BrowseRow {
+    Header(String),
+    Item(SearchHit),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Search,
     Library,
+    Browse,
     Playlist,
     Queue,
 }

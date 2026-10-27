@@ -60,6 +60,14 @@ fn ov<T: Into<Value<'static>>>(v: T) -> OwnedValue {
     OwnedValue::try_from(v.into()).expect("basic D-Bus values convert infallibly")
 }
 
+/// Reuse a string's allocation when the value is unchanged.
+fn set_string(dst: &mut String, value: &str) {
+    if dst != value {
+        dst.clear();
+        dst.push_str(value);
+    }
+}
+
 /// Everything the D-Bus side shares with the UI loop.
 #[derive(Default)]
 pub struct MprisHandle {
@@ -118,13 +126,17 @@ impl MprisHandle {
             // track cut, handled by the id change below).
             let jumped = !track_changed
                 && (s.pos_us + 1_500_000 < st.pos_us || s.pos_us > st.pos_us + 2_000_000);
-            st.status = s.status.to_string();
-            st.track_key = s.track_key.to_string();
-            st.title = s.title.to_string();
-            st.artist = s.artist.to_string();
-            st.album = s.album.to_string();
+            // These fields are usually stable, so only rewrite the strings
+            // when they actually change. The D-Bus mirror is fed at 10Hz;
+            // unconditionally reallocating six strings every tick is pure
+            // churn while a song is playing.
+            set_string(&mut st.status, s.status);
+            set_string(&mut st.track_key, s.track_key);
+            set_string(&mut st.title, s.title);
+            set_string(&mut st.artist, s.artist);
+            set_string(&mut st.album, s.album);
             st.length_us = s.length_us;
-            st.art_url = s.art_url.to_string();
+            set_string(&mut st.art_url, s.art_url);
             st.pos_us = s.pos_us;
             let seek_pos = if track_changed || jumped {
                 Some(s.pos_us)

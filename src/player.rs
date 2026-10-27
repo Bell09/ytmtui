@@ -1,6 +1,17 @@
-use std::io::Write;
+use serde_json::Value;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// What mpv says about the current timeline.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Timeline {
+    /// Playback clock in seconds; `None` until a file is loaded.
+    pub position: Option<f64>,
+    /// Total duration in seconds, when the stream reports one.
+    pub duration: Option<f64>,
+}
 
 /// A thin wrapper around an `mpv` process.
 ///
@@ -37,13 +48,15 @@ impl Player {
         };
         let child = Command::new("mpv")
             .arg("--no-video")
+            .arg("--audio-display=no")
             .arg("--no-terminal")
-            // Run libmpv with no user config, no scripts, and the "high"
-            // preset bestaudio/best stream. --no-config also drops the short
-            // 2s cache and the video+audio ytdl-format from mpv.conf;
-            // volume stays at the default 100 (unity).
+            // Run libmpv with no user config or scripts, with the best
+            // available audio stream and no album-art decode path. Cache is
+            // re-enabled explicitly below: it keeps network playback smooth
+            // while local files still open directly with no startup delay.
             .arg("--no-config")
             .arg("--load-scripts=no")
+            .arg("--cache=auto")
             // Only ever consulted for URLs; a local path simply skips the
             // ytdl hook, so this stays harmless offline.
             .arg("--ytdl-format=bestaudio/best")
@@ -73,11 +86,60 @@ impl Player {
         }
     }
 
-    /// Seek the running mpv process by a relative number of seconds (may be
-    /// negative) via its IPC socket.
-    pub fn seek(&mut self, seconds: i64) {
+    /// Ask mpv where playback actually is. The UI clock is slaved to this
+    /// instead of a wall-clock guess, so a slow stream start or a seek can
+    /// never leave the progress bar and lyrics out of step with the audio.
+    ///
+    /// Every call uses a short-lived IPC connection with tight read/write
+    /// timeouts; a missing or wedged mpv returns `None` without stalling a
+    /// frame.
+    pub fn timeline(&self) -> Option<Timeline> {
+        let mut stream = UnixStream::connect(&self.socket_path).ok()?;
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(25)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(25)));
+        let commands = concat!(
+            "{\"command\":[\"get_property\",\"time-pos\"],\"request_id\":1}\n",
+            "{\"command\":[\"get_property\",\"duration\"],\"request_id\":2}\n",
+        );
+        stream.write_all(commands.as_bytes()).ok()?;
+
+        let mut reader = BufReader::new(stream);
+        let deadline = Instant::now() + Duration::from_millis(40);
+        let mut timeline = Timeline::default();
+        let mut seen = 0u8;
+        while seen != 3 && Instant::now() < deadline {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            // mpv interleaves unsolicited events (start-file, file-loaded,
+            // playback-restart) with replies; only the request ids matter.
+            match value.get("request_id").and_then(Value::as_u64) {
+                Some(1) => {
+                    timeline.position = value.get("data").and_then(Value::as_f64);
+                    seen |= 1;
+                }
+                Some(2) => {
+                    timeline.duration = value.get("data").and_then(Value::as_f64);
+                    seen |= 2;
+                }
+                _ => {}
+            }
+        }
+        (seen != 0).then_some(timeline)
+    }
+
+    /// Seek to an absolute position via mpv's IPC socket.
+    pub fn seek_to(&mut self, seconds: f64) {
         if let Ok(mut stream) = UnixStream::connect(&self.socket_path) {
-            let cmd = format!("{{\"command\":[\"seek\",{},\"relative\"]}}\n", seconds);
+            let cmd = format!(
+                "{{\"command\":[\"seek\",{:.3},\"absolute\"]}}\n",
+                seconds.max(0.0)
+            );
             let _ = stream.write_all(cmd.as_bytes());
         }
     }
