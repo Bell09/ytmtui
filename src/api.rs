@@ -424,16 +424,84 @@ impl YtmApi {
         Ok(())
     }
 
-    /// Append a song to a playlist — the `a` key's add-to-playlist
-    /// picker (ytmusicapi's `add_playlist_items`: a single `ACTION_ADD`
-    /// edit whose dedupe option lets the server skip duplicates).
-    pub async fn add_to_playlist(&self, playlist_id: &str, video_id: &str) -> anyhow::Result<()> {
+    /// POST a single edit action to the innertube `playlist/edit` endpoint
+    /// with the signed-in browser headers. The classification of the reply
+    /// lives in `edit_outcome` — this endpoint differs from the rest of the
+    /// API in that a success may carry no JSON at all.
+    async fn playlist_edit(&self, body: Value) -> anyhow::Result<()> {
         let headers = self
             .headers
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("not signed in"))?;
 
         let url = format!("{}?prettyPrint=false&key={}", EDIT_URL, API_KEY);
+        let mut req = self.client.post(url).json(&body);
+        for (k, v) in headers {
+            if let Some(s) = v.as_str() {
+                req = req.header(k.as_str(), s);
+            }
+        }
+
+        let resp = req.send().await?;
+        let status = resp.status();
+        // Read the bytes as text first — decoding `.json()` on an empty
+        // body is the error that looked like a failed edit below.
+        let text = resp.text().await?;
+        Self::edit_outcome(status, &text)
+    }
+
+    /// Classify a `playlist/edit` reply. A bare 200 with an empty body is
+    /// a success (the endpoint often closes without writing anything);
+    /// a non-2xx is a failure with the status kept visible; and a JSON
+    /// body with an embedded error object fails with a snippet of the
+    /// body so the server's actual complaint stays readable.
+    fn edit_outcome(status: reqwest::StatusCode, body: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(status.is_success(), "HTTP {}", status);
+        let trimmed = body.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        match serde_json::from_str::<Value>(trimmed) {
+            Ok(value) => {
+                if let Some(error) = value.get("error") {
+                    anyhow::bail!(
+                        "HTTP {} — reply: {}",
+                        status,
+                        serde_json::to_string(error).unwrap_or_default()
+                    );
+                }
+                // ytmusicapi's `check_responses`: a 200 can still carry a
+                // status entry whose statusText says the edit bounced.
+                if let Some(statuses) = value.get("status").and_then(Value::as_array) {
+                    let failed = statuses.iter().any(|s| {
+                        !s.get("statusText")
+                            .and_then(Value::as_str)
+                            .is_none_or(|t| t.eq_ignore_ascii_case("SUCCEEDED"))
+                            || !s.get("success")
+                                .and_then(Value::as_bool)
+                                .is_none_or(|b| b)
+                    });
+                    if failed {
+                        let snippet: String = trimmed.chars().take(120).collect();
+                        anyhow::bail!("HTTP {} — status: {}", status, snippet);
+                    }
+                }
+                Ok(())
+            }
+            // A non-JSON non-empty reply on a 200 is something the app
+            // never counted on (redirect page, CDN notice, …) — keep it
+            // as a visible failure rather than claiming the edit landed.
+            Err(_) => {
+                let snippet: String = trimmed.chars().take(80).collect();
+                anyhow::bail!("HTTP {} — non-JSON reply: {}", status, snippet)
+            }
+        }
+    }
+
+    /// Append a song to a playlist — the `a` key's add-to-playlist
+    /// picker (ytmusicapi's `add_playlist_items`: a single `ACTION_ADD`
+    /// edit whose dedupe option lets the server skip duplicates).
+    pub async fn add_to_playlist(&self, playlist_id: &str, video_id: &str) -> anyhow::Result<()> {
         let body = json!({
             "context": context(),
             "playlistId": playlist_id,
@@ -444,20 +512,7 @@ impl YtmApi {
                 "dedupeOption": "DEDUPE_OPTION_SKIP",
             }],
         });
-        let mut req = self.client.post(url).json(&body);
-        for (k, v) in headers {
-            if let Some(s) = v.as_str() {
-                req = req.header(k.as_str(), s);
-            }
-        }
-
-        let resp = req.send().await?;
-        let status = resp.status();
-        let value: Value = resp.json().await?;
-        if !status.is_success() || value.get("error").is_some() {
-            anyhow::bail!("HTTP {}", status);
-        }
-        Ok(())
+        self.playlist_edit(body).await
     }
 
     /// Drop a song from a playlist (ytmusicapi's `remove_playlist_items`:
@@ -468,12 +523,6 @@ impl YtmApi {
         playlist_id: &str,
         video_id: &str,
     ) -> anyhow::Result<()> {
-        let headers = self
-            .headers
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("not signed in"))?;
-
-        let url = format!("{}?prettyPrint=false&key={}", EDIT_URL, API_KEY);
         let body = json!({
             "context": context(),
             "playlistId": playlist_id,
@@ -482,20 +531,7 @@ impl YtmApi {
                 "removedVideoIds": [video_id],
             }],
         });
-        let mut req = self.client.post(url).json(&body);
-        for (k, v) in headers {
-            if let Some(s) = v.as_str() {
-                req = req.header(k.as_str(), s);
-            }
-        }
-
-        let resp = req.send().await?;
-        let status = resp.status();
-        let value: Value = resp.json().await?;
-        if !status.is_success() || value.get("error").is_some() {
-            anyhow::bail!("HTTP {}", status);
-        }
-        Ok(())
+        self.playlist_edit(body).await
     }
 
     /// `next` page yields the lyrics tab's browseId (MPLYt…), then a
