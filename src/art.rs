@@ -172,13 +172,22 @@ pub async fn fetch_cover(urls: Vec<String>) -> Option<RgbaImage> {
                 if !resp.status().is_success() {
                     return None;
                 }
-                let bytes = resp.bytes().await.ok()?;
-                Some(image::load_from_memory(&bytes).ok()?.to_rgba8())
+                // Bytes only — decoding is the memory-heavy step and is
+                // done one candidate at a time below.
+                resp.bytes().await.ok()
             })
         })
         .collect();
+    // Decode candidates strictly one at a time, largest first. A
+    // maxresdefault frame decodes to ~3.5 MB of RGBA; holding every
+    // answered candidate as a decoded image (the old behaviour) kept
+    // several of those alive at once for no benefit — the first success
+    // wins either way.
     for task in tasks {
-        let Some(rgba) = task.await.ok().flatten() else {
+        let Some(bytes) = task.await.ok().flatten() else {
+            continue;
+        };
+        let Some(rgba) = image::load_from_memory(&bytes).ok().map(|i| i.to_rgba8()) else {
             continue;
         };
         if let Some(square) = center_square(rgba) {
@@ -201,11 +210,19 @@ pub fn fit_square(src: &RgbaImage, px_w: u32, px_h: u32) -> RgbaImage {
 
 /// Encode an image as PNG bytes (the kitty protocol's preferred payload).
 pub fn png_bytes(img: &RgbaImage) -> Option<Vec<u8>> {
-    let mut buf = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(img.clone())
-        .write_to(&mut buf, image::ImageFormat::Png)
+    use image::ImageEncoder;
+    let mut buf = Vec::new();
+    // Encode straight from the borrowed pixel buffer: building a
+    // `DynamicImage` here used to clone the whole canvas first.
+    image::codecs::png::PngEncoder::new(&mut buf)
+        .write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            image::ExtendedColorType::Rgba8,
+        )
         .ok()?;
-    Some(buf.into_inner())
+    Some(buf)
 }
 
 /// Base64 without extra dependencies (needed for kitty payloads).

@@ -79,6 +79,12 @@ const SEARCH_FILTER_ORDER: [&str; 5] = [
 /// in step with the server while it's on screen.
 const LIKED_PLAYLIST: &str = "VLLM";
 
+/// How many playlist previews the Library keeps cached. Every entry is a
+/// full `Vec<Track>` (title / artist / album strings each), so an unbounded
+/// cache quietly grows with every playlist visited. Six covers the
+/// back-and-forth case with room to spare.
+const PREVIEW_CACHE_CAP: usize = 6;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlaybackState {
     Stopped,
@@ -835,6 +841,16 @@ impl App {
             if let Ok(tracks) = result {
                 let mut tracks = tracks;
                 Self::mark(&self.registry, &mut tracks);
+                // Keep the cache small: it is a speed-up, never a source of
+                // truth, so evicting any older entry costs one refetch and
+                // keeps the resident track lists bounded.
+                if !self.preview_cache.contains_key(&id)
+                    && self.preview_cache.len() >= PREVIEW_CACHE_CAP
+                {
+                    if let Some(victim) = self.preview_cache.keys().next().cloned() {
+                        self.preview_cache.remove(&victim);
+                    }
+                }
                 self.preview_cache.insert(id.clone(), tracks.clone());
                 if self.preview_for.as_deref() == Some(id.as_str()) {
                     self.preview_tracks = tracks;

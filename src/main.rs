@@ -65,7 +65,10 @@ fn bridge_offline() -> ! {
     std::process::exit(1);
 }
 
-#[tokio::main]
+// Two runtime threads are plenty for a UI that mostly waits on the network,
+// and each fewer thread means one fewer glibc malloc arena holding on to
+// freed pages.
+#[tokio::main(worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `--json` is accepted anywhere in the argv, so both
     // `ytmtui --json queue` and `ytmtui queue --json` work.

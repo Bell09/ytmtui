@@ -12,13 +12,13 @@ categories = ["command-line-utilities", "multimedia::audio"]
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 reqwest = { version = "0.12", features = ["json", "gzip", "deflate", "brotli"] }
 unicode-width = "0.1"
 anyhow = "1.0"
-image = "0.25"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 zbus = "5"
 directories = "5.0"
 urlencoding = "2.1"
