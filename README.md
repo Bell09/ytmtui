@@ -49,9 +49,8 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 
 | | |
 | :---: | :---: |
-| ![Your Anxiety Buddy](assets/screenshots/your-anxiety-buddy.png) | ![Billie Eilish](assets/screenshots/billie-eilish.png) |
-
-![Birds of a Feather](assets/screenshots/birds-of-a-feather.png)
+| ![Billie Eilish — i love you](assets/screenshots/i-love-you.png) | ![Billie Eilish — What Was I Made For?](assets/screenshots/what-was-i-made-for.png) |
+| ![llana Flores — rises the moon](assets/screenshots/rises-the-moon.png) | ![Green Day — Boulevard of Broken Dreams](assets/screenshots/boulevard-of-broken-dreams.png) |
 
 </div>
 
