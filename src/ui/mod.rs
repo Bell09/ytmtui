@@ -188,7 +188,7 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
     // against the app name while it's on, so the source of music on screen
     // is never in doubt.
     let mut title_spans = vec![Span::styled(
-        " ytmtui",
+        " YTMTUI ⟢ Qu!m Ashley Cast!ll0",
         Style::default().fg(t.brand).add_modifier(Modifier::BOLD),
     )];
     if app.offline {
