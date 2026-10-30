@@ -184,11 +184,11 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
         ])
         .split(search);
 
-    // Title line: app name left, account name right. The offline chip sits
+    // Title line: app name left. The offline chip sits
     // against the app name while it's on, so the source of music on screen
     // is never in doubt.
     let mut title_spans = vec![Span::styled(
-        " YTMTUI",
+        " ytmtui",
         Style::default().fg(t.brand).add_modifier(Modifier::BOLD),
     )];
     if app.offline {
@@ -198,16 +198,6 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
         ));
     }
     f.render_widget(Paragraph::new(Line::from(title_spans)), title);
-    if let Some(name) = &app.account_name {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!("{} ", name),
-                Style::default().fg(t.dim),
-            )))
-            .alignment(Alignment::Right),
-            title,
-        );
-    }
 
     // The search input — a text line sitting on an underline rule; no
     // left/right/top borders. The rule spans the header width, capped at one
