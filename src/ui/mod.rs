@@ -968,15 +968,16 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
             ("esc", "back"),
             ("L", "like"),
             ("l", "lyrics"),
+            ("b", "browse"),
             ("q", "quit"),
         ],
         Page::Search => {
-            let mut hints = vec![("/", "search"), ("tab", "filter"), ("esc", "back")];
+            let mut hints = vec![("/", "search"), ("tab", "filter"), ("b", "browse"), ("esc", "back")];
             hints.extend(guide);
             hints
         }
         Page::Library => {
-            let mut hints = vec![("esc", "back"), ("/", "search"), mode];
+            let mut hints = vec![("esc", "back"), ("/", "search"), ("b", "browse"), mode];
             hints.extend(guide);
             hints
         }
@@ -987,7 +988,7 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
         }
         // An open playlist can lose its highlighted song with `r`.
         Page::Playlist => {
-            let mut hints = vec![("esc", "back"), ("r", "remove")];
+            let mut hints = vec![("esc", "back"), ("r", "remove"), ("b", "browse")];
             if app.offline {
                 hints.push(mode);
             }

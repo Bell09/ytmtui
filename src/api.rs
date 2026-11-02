@@ -180,25 +180,16 @@ impl YtmApi {
         Ok(playlists)
     }
 
-    /// The "For you" browse page: mixes, trending songs, community
-    /// playlists and the mood/genre category grids. Home and explore are
-    /// fetched together; optional shelves are skipped if that source fails
-    /// rather than making the whole page unavailable.
+    /// The "For you" browse page: home shelves, trending songs, community
+    /// playlists and mood/genre category grids.
     pub async fn for_you(&self) -> anyhow::Result<Vec<BrowseShelf>> {
         let (home, trending, categories) = tokio::join!(
             self.home_for_you_shelves(),
             self.trending_songs_shelf(),
             self.moods_and_genres_shelves(),
         );
-        let (mix, community) = home?;
-        let mut shelves = Vec::new();
-        if let Some(shelf) = mix {
-            shelves.push(shelf);
-        }
+        let mut shelves = home.unwrap_or_default();
         if let Ok(Some(shelf)) = trending {
-            shelves.push(shelf);
-        }
-        if let Some(shelf) = community {
             shelves.push(shelf);
         }
         if let Ok(categories) = categories {
@@ -211,35 +202,36 @@ impl YtmApi {
         Ok(shelves)
     }
 
-    /// Walk the home feed until both personalised shelves are found. The
-    /// feed returns a few shelves per page, so a small number of
-    /// continuations is normal.
-    async fn home_for_you_shelves(
-        &self,
-    ) -> anyhow::Result<(Option<BrowseShelf>, Option<BrowseShelf>)> {
+    /// Walk the home feed and keep every shelf it offers — Quick picks,
+    /// Your daily discover, Discovery mix, Mixed for you, the community
+    /// picks, similar-to rows and so on. Duplicate titles across
+    /// continuation pages are dropped; the first copy wins.
+    async fn home_for_you_shelves(&self) -> anyhow::Result<Vec<BrowseShelf>> {
         let mut body = json!({ "context": context(), "browseId": "FEmusic_home" });
         let mut value = self.browse(&body).await?;
         let mut seen_tokens = Vec::new();
-        let mut mix = None;
-        let mut community = None;
+        let mut seen_titles: Vec<String> = Vec::new();
+        let mut shelves = Vec::new();
 
         for _ in 0..12 {
-            let mut shelves = Vec::new();
-            collect_browse_shelves(&value, &mut shelves);
-            for mut shelf in shelves {
-                let title = shelf.title.to_lowercase();
-                if mix.is_none() && (title == "mixed for you" || title == "mix for you") {
-                    shelf.title = "Mix for you".to_string();
-                    mix = Some(shelf);
-                } else if community.is_none()
-                    && (title == "from the community"
-                        || title == "from community"
-                        || title == "trending community playlists")
-                {
-                    community = Some(shelf);
+            let mut page = Vec::new();
+            collect_browse_shelves(&value, &mut page);
+            let mut fresh_shelf = false;
+            for mut shelf in page {
+                let key = shelf.title.to_lowercase();
+                if key.is_empty() || seen_titles.contains(&key) {
+                    continue;
                 }
+                seen_titles.push(key);
+                fresh_shelf = true;
+                if shelf.title.eq_ignore_ascii_case("mixed for you") {
+                    shelf.title = "Mixed for you".to_string();
+                }
+                shelves.push(shelf);
             }
-            if mix.is_some() && community.is_some() {
+            // Stop revisiting once a page adds nothing new; still keep what
+            // we have when the next continuation flakes.
+            if !fresh_shelf {
                 break;
             }
             match section_continuation(&value) {
@@ -256,7 +248,7 @@ impl YtmApi {
                 _ => break,
             }
         }
-        Ok((mix, community))
+        Ok(shelves)
     }
 
     /// The explore page's "Trending" shelf is made of playable video rows.
