@@ -13,15 +13,46 @@ use ratatui::{
 use std::time::{Duration, Instant};
 use crate::app::{App, InputMode, PlaybackState};
 use crate::models::{BrowseRow, Page, Playlist, PlaylistKind, SearchHit, Track};
+use crate::theme::Theme;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Decorative rule under the search input.
 const TOP_RULE: &str = "',─────,'───────',─────────,'─────────────'.────────────,'───────────`,──────────,'──────────,'─────────`,────────.`───────',──────',─────`,────.`───',──`.─";
 
-/// Fill `width` cells with the top rule, tiling the motif when there is room
-/// for more than one copy.
-fn top_rule(width: usize) -> String {
-    TOP_RULE.chars().cycle().take(width).collect()
+/// Colour for one glyph of the top rule. The dashes stay on the secondary
+/// accent; the punctuation ticks borrow the rest of the palette so the rule
+/// reads as a little pywal-coloured stitch rather than one flat hairline.
+fn rule_char_style(c: char, t: &Theme) -> Style {
+    match c {
+        ',' => Style::default().fg(t.accent_bright),
+        '\'' => Style::default().fg(t.mark),
+        '`' => Style::default().fg(t.ok),
+        '.' => Style::default().fg(t.warn),
+        _ => Style::default().fg(t.accent2),
+    }
+}
+
+/// The top rule as one line of spans, with runs of same-coloured glyphs
+/// merged so a full-width rule costs only a handful of spans.
+fn top_rule_line(width: usize, t: &Theme) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut current: Option<(Style, String)> = None;
+    for c in TOP_RULE.chars().cycle().take(width) {
+        let style = rule_char_style(c, t);
+        match current.as_mut() {
+            Some((style_now, text)) if *style_now == style => text.push(c),
+            _ => {
+                if let Some((style_prev, text)) = current.take() {
+                    spans.push(Span::styled(text, style_prev));
+                }
+                current = Some((style, c.to_string()));
+            }
+        }
+    }
+    if let Some((style, text)) = current {
+        spans.push(Span::styled(text, style));
+    }
+    Line::from(spans)
 }
 
 /// Width of the left playlist sidebar (narrower on small terminals).
@@ -247,13 +278,7 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
 
     // The underline rule below the input.
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            top_rule(input_w),
-            Style::default().fg(t.accent2),
-        ))),
-        rows[1],
-    );
+    f.render_widget(Paragraph::new(top_rule_line(input_w, t)), rows[1]);
 }
 
 /// The always-visible Library playlist list. Rows carry a kind glyph, the
