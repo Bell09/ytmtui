@@ -32,23 +32,50 @@ type AddResult = (String, String, Result<(), String>);
 type RmCmd = (String, String, Track, usize);
 type RmResult = (String, String, Track, usize, Result<(), String>);
 
-/// Labels for the browse sections, left to right. The matching shelves are
-/// found by title, so the API can return them in any order.
-pub const BROWSE_SECTIONS: [&str; 5] = ["TRENDING", "MIX", "COMMUNITY", "MOODS", "GENRES"];
+/// Labels for the browse sections, top to bottom in the `b` picker. The
+/// matching shelves are found by title, so the API can return them in any
+/// order or name them slightly differently.
+pub const BROWSE_SECTIONS: [&str; 11] = [
+    "QUICK PICKS",
+    "DAILY DISCOVER",
+    "FROM THE COMMUNITY",
+    "MOODS & GENRES",
+    "SIMILAR TO",
+    "STATIONS",
+    "DISCOVERY MIX",
+    "MIXED FOR YOU",
+    "NEW RELEASES",
+    "TRENDING PLAYLISTS",
+    "TRENDING SONGS",
+];
 
-/// Which browse section a shelf header belongs to.
+/// Which browse section a shelf header belongs to. The order of the checks
+/// matters: "Discovery mix" must beat the generic "mix", and the exact
+/// "from the community" title must beat "trending community playlists".
 fn browse_section_for_title(title: &str) -> Option<usize> {
     let title = title.to_lowercase();
-    if title.contains("trending") {
+    if title.contains("quick") {
         Some(0)
-    } else if title.contains("mix") {
+    } else if title.contains("discovery") {
+        Some(6)
+    } else if title.contains("daily discover") {
         Some(1)
-    } else if title.contains("community") {
-        Some(2)
-    } else if title.contains("mood") {
-        Some(3)
-    } else if title.contains("genre") {
+    } else if title.contains("new releases") {
+        Some(8)
+    } else if title.contains("similar") {
         Some(4)
+    } else if title.contains("station") {
+        Some(5)
+    } else if title.contains("mood") || title.contains("genre") {
+        Some(3)
+    } else if title == "from the community" || title == "from community" {
+        Some(2)
+    } else if title.contains("community") {
+        Some(9)
+    } else if title.contains("mix") {
+        Some(7)
+    } else if title.contains("trending") {
+        Some(10)
     } else {
         None
     }
@@ -287,6 +314,10 @@ pub struct App {
     pub picker_open: bool,
     /// The picker's own cursor into `self.playlists`.
     pub picker_index: usize,
+    /// Browse section picker (opened with `b`): modal list of shelves to jump
+    /// straight into.
+    pub browse_picker_open: bool,
+    pub browse_picker_index: usize,
     /// Queued `r` removals — in-order like the like and add queues.
     rm_cmd_tx: tokio::sync::mpsc::UnboundedSender<RmCmd>,
     rm_rx: tokio::sync::mpsc::UnboundedReceiver<RmResult>,
@@ -524,6 +555,8 @@ impl App {
             add_rx,
             picker_open: false,
             picker_index: 0,
+            browse_picker_open: false,
+            browse_picker_index: 0,
             rm_cmd_tx,
             rm_rx,
             offline: false,
@@ -1034,6 +1067,64 @@ impl App {
         self.picker_open = false;
     }
 
+    /// Browse section labels in the order we want them to appear in the
+    /// picker. They correspond to the shelves `home_for_you_shelves` keeps.
+    pub const BROWSE_PICKER_LABELS: [&str; 11] = [
+        "Quick picks",
+        "Your daily discover",
+        "From the community",
+        "Mood and Genres",
+        "Similar to",
+        "Station",
+        "Discovery mix",
+        "Mixed for you",
+        "New releases",
+        "Trending community playlists",
+        "Trending songs",
+    ];
+
+    /// `b` on any page: overlay the browse section picker.
+    pub fn open_browse_picker(&mut self) {
+        if self.browse_picker_open {
+            return;
+        }
+        if self.offline {
+            self.status_message = "Go online to browse shelves.".into();
+            return;
+        }
+        self.browse_picker_open = true;
+        self.browse_picker_index = 0;
+    }
+
+    pub fn browse_picker_next(&mut self) {
+        let len = Self::BROWSE_PICKER_LABELS.len();
+        if self.browse_picker_open && len > 0 {
+            self.browse_picker_index = (self.browse_picker_index + 1) % len;
+        }
+    }
+
+    pub fn browse_picker_previous(&mut self) {
+        let len = Self::BROWSE_PICKER_LABELS.len();
+        if self.browse_picker_open && len > 0 {
+            self.browse_picker_index = if self.browse_picker_index == 0 {
+                len - 1
+            } else {
+                self.browse_picker_index - 1
+            };
+        }
+    }
+
+    /// `Enter` in the browse picker: open the selected shelf.
+    pub async fn browse_picker_select(&mut self) {
+        self.browse_picker_open = false;
+        let section = self.browse_picker_index.min(BROWSE_SECTIONS.len() - 1);
+        self.open_browse_section(section).await;
+    }
+
+    pub fn close_browse_picker(&mut self) {
+        self.browse_picker_open = false;
+    }
+
     /// `r` in an open playlist: drop the highlighted song from it.
     /// The row leaves the list at once (with the cursor staying on the
     /// same place) and the queued edit travels to the server; a refusal
@@ -1232,12 +1323,21 @@ impl App {
                 let mut slots: Vec<Option<BrowseShelf>> = vec![None; BROWSE_SECTIONS.len()];
                 for shelf in shelves {
                     if let Some(section) = browse_section_for_title(&shelf.title) {
-                        slots[section] = Some(shelf);
+                        // Moods and genres share one slot, so append rather
+                        // than overwrite when the second one lands.
+                        match slots[section].as_mut() {
+                            Some(existing) => existing.items.extend(shelf.items),
+                            None => slots[section] = Some(shelf),
+                        }
                     }
                 }
                 self.browse_shelves = slots;
                 self.browse_loaded = true;
-                self.select_browse_section(0);
+                // Land on the first section that actually came back.
+                let first = (0..BROWSE_SECTIONS.len())
+                    .find(|&i| self.browse_shelves[i].is_some())
+                    .unwrap_or(0);
+                self.select_browse_section(first);
             }
             Err(e) => {
                 // Keep the user where they were rather than parking them on
@@ -2549,12 +2649,39 @@ mod browse_section_tests {
 
     #[test]
     fn sections_have_requested_order_and_match_shelves() {
-        assert_eq!(BROWSE_SECTIONS, ["TRENDING", "MIX", "COMMUNITY", "MOODS", "GENRES"]);
-        assert_eq!(browse_section_for_title("Trending songs for you"), Some(0));
-        assert_eq!(browse_section_for_title("Mix for you"), Some(1));
+        assert_eq!(
+            BROWSE_SECTIONS,
+            [
+                "QUICK PICKS",
+                "DAILY DISCOVER",
+                "FROM THE COMMUNITY",
+                "MOODS & GENRES",
+                "SIMILAR TO",
+                "STATIONS",
+                "DISCOVERY MIX",
+                "MIXED FOR YOU",
+                "NEW RELEASES",
+                "TRENDING PLAYLISTS",
+                "TRENDING SONGS",
+            ]
+        );
+        assert_eq!(browse_section_for_title("Quick picks"), Some(0));
+        assert_eq!(browse_section_for_title("Your daily discover"), Some(1));
         assert_eq!(browse_section_for_title("From the community"), Some(2));
+        // Moods and genres merge into one slot.
         assert_eq!(browse_section_for_title("Moods"), Some(3));
-        assert_eq!(browse_section_for_title("Genres"), Some(4));
-        assert_eq!(browse_section_for_title("Chill"), None);
+        assert_eq!(browse_section_for_title("Genres"), Some(3));
+        assert_eq!(browse_section_for_title("Similar to Drake"), Some(4));
+        assert_eq!(browse_section_for_title("Stations"), Some(5));
+        // The specific mix name must win over the generic "mix".
+        assert_eq!(browse_section_for_title("Discovery mix"), Some(6));
+        assert_eq!(browse_section_for_title("Mixed for you"), Some(7));
+        assert_eq!(browse_section_for_title("New releases"), Some(8));
+        assert_eq!(
+            browse_section_for_title("Trending community playlists"),
+            Some(9)
+        );
+        assert_eq!(browse_section_for_title("Trending songs for you"), Some(10));
+        assert_eq!(browse_section_for_title("Listen again"), None);
     }
 }

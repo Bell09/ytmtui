@@ -295,6 +295,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
+                // The browse section picker (opened with `b`) owns the keyboard
+                // while it's open.
+                if app.browse_picker_open {
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => app.browse_picker_next(),
+                        KeyCode::Up | KeyCode::Char('k') => app.browse_picker_previous(),
+                        KeyCode::Enter => app.browse_picker_select().await,
+                        KeyCode::Esc => app.close_browse_picker(),
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match key.code {
                     // Quit.
                     KeyCode::Char('q') => {
@@ -311,15 +324,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('p') => app.play_previous(),
                     // Play/pause.
                     KeyCode::Char(' ') => app.toggle_play(),
-                    // Jump to a section of the personalised browse page.
+                    // Jump straight to one of the first five browse shelves
+                    // (the `b` picker lists all of them).
                     KeyCode::Char(digit @ '1'..='5') => {
                         let section = digit as usize - '1' as usize;
                         app.open_browse_section(section).await;
                     }
                     // The queue page: `z` opens it, Esc leaves it.
                     KeyCode::Char('z') => app.open_queue(),
-                    // Browse page: `b` opens "For you" from anywhere.
-                    KeyCode::Char('b') => app.open_browse().await,
+                    // Browse page: `b` opens the section picker from anywhere.
+                    KeyCode::Char('b') => app.open_browse_picker(),
                     // Offline mode: the local music folder instead of the
                     // account's library. Press again to go back online.
                     KeyCode::Char('o') => app.toggle_offline(),

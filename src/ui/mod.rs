@@ -168,6 +168,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.picker_open {
         draw_playlist_picker(f, app, rows[1]);
     }
+    if app.browse_picker_open {
+        // Draw over the main content body so it's always visible
+        draw_browse_picker(f, app, body[2]);
+    }
 }
 
 /// Header: the title line (app name + signed-in account) and the search
@@ -920,6 +924,64 @@ fn draw_playlist_picker(f: &mut Frame, app: &App, area: Rect) {
     let mut state = ListState::default();
     state.select(Some(app.picker_index));
     f.render_stateful_widget(list, rows[1], &mut state);
+}
+
+/// Modal picker for choosing a browse shelf (opened with `b`).
+fn draw_browse_picker(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
+    let labels = &crate::app::App::BROWSE_PICKER_LABELS;
+    let width = 44.min((area.width.saturating_sub(4)) as usize) as u16;
+    let height = ((labels.len() as u16).min(12) + 3).min(area.height.saturating_sub(2));
+    if width < 20 || height < 5 {
+        return;
+    }
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.dim))
+            .title(Span::styled(
+                " browse shelves ",
+                Style::default()
+                    .fg(t.accent2)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        rect,
+    );
+
+    let inner = rect.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let text_w = inner.width.saturating_sub(1) as usize;
+    let items: Vec<ListItem> = labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let style = if i == app.browse_picker_index {
+                Style::default()
+                    .fg(t.selection_fg)
+                    .bg(t.selection_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t.fg)
+            };
+            ListItem::new(Line::from(Span::styled(
+                truncate(label, text_w),
+                style,
+            )))
+        })
+        .collect();
+    let list = List::new(items);
+    let mut state = ListState::default();
+    state.select(Some(app.browse_picker_index));
+    f.render_stateful_widget(list, inner, &mut state);
 }
 
 fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {

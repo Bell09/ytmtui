@@ -212,7 +212,7 @@ The window is deliberately chrome-free — no box borders, just hairlines, white
 - 📂 **Playlist sidebar** — always-visible library of playlists, albums, artists & channels  
   `↑`/`↓` moves the `▌` cursor · `Enter` opens the selection
 - 📄 **Detail / results** — title, meta line and lazily-fetched track list (cached)
-- ✨ **For you** — press `1`–`5` to jump to **Trending · Mix · Community · Moods · Genres**
+- ✨ **For you** — press `b` for the shelf picker (**Quick picks · Your daily discover · From the community · Mood and Genres · Similar to · Station · Discovery mix · Mixed for you · New releases · Trending community playlists · Trending songs**) · `1`–`5` jump straight to the first five
 - 🎚️ **Playback bar** — indicator, track, time and a full-width progress bar that only advances while playing
 - ℹ️ **Footer** — status message and compact keybinding cheat-sheet
 
