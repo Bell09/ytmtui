@@ -200,8 +200,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_playlist_picker(f, app, rows[1]);
     }
     if app.browse_picker_open {
-        // Draw over the main content body so it's always visible
-        draw_browse_picker(f, app, body[2]);
+        // Same area as the add-to-playlist picker, so both cards centre on
+        // the whole main region rather than just the content column.
+        draw_browse_picker(f, app, rows[1]);
     }
 }
 
@@ -955,8 +956,10 @@ fn draw_playlist_picker(f: &mut Frame, app: &App, area: Rect) {
 fn draw_browse_picker(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let labels = &crate::app::App::BROWSE_PICKER_LABELS;
+    // Same card geometry as the add-to-playlist picker: 44 columns wide,
+    // a caption line, and up to a dozen rows.
     let width = 44.min((area.width.saturating_sub(4)) as usize) as u16;
-    let height = ((labels.len() as u16).min(12) + 3).min(area.height.saturating_sub(2));
+    let height = ((labels.len() as u16).min(12) + 4).min(area.height.saturating_sub(2));
     if width < 20 || height < 5 {
         return;
     }
@@ -984,7 +987,21 @@ fn draw_browse_picker(f: &mut Frame, app: &App, area: Rect) {
         vertical: 1,
         horizontal: 2,
     });
-    let text_w = inner.width.saturating_sub(1) as usize;
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
+    // The hotkey prompt, in the same place and accent the add picker uses
+    // for the song it holds.
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "enter to open",
+            Style::default().fg(t.accent2),
+        ))),
+        rows[0],
+    );
+
+    let text_w = rows[1].width.saturating_sub(1) as usize;
     let items: Vec<ListItem> = labels
         .iter()
         .enumerate()
@@ -997,16 +1014,13 @@ fn draw_browse_picker(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 Style::default().fg(t.fg)
             };
-            ListItem::new(Line::from(Span::styled(
-                truncate(label, text_w),
-                style,
-            )))
+            ListItem::new(Line::from(Span::styled(truncate(label, text_w), style)))
         })
         .collect();
     let list = List::new(items);
     let mut state = ListState::default();
     state.select(Some(app.browse_picker_index));
-    f.render_stateful_widget(list, inner, &mut state);
+    f.render_stateful_widget(list, rows[1], &mut state);
 }
 
 fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
