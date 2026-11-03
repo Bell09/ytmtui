@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde_json::{json, Map, Value};
 
 const API_KEY: &str = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
-const CLIENT_VERSION: &str = "1.20240101.01.00";
+const CLIENT_VERSION: &str = "1.20261102.01.00";
 const BROWSE_URL: &str =
     "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false";
 const NEXT_URL: &str = "https://music.youtube.com/youtubei/v1/next?prettyPrint=false";
@@ -49,6 +49,40 @@ impl YtmApi {
             client,
             headers: Auth::load_headers(),
             visitor_id: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Make sure the session has a visitor id before the first personalised
+    /// request. YouTube's web client reads one out of the page's `ytcfg`
+    /// blob and sends it on every call; without it each request is treated
+    /// as a brand-new anonymous visitor.
+    async fn ensure_visitor(&self) {
+        if self.visitor_id.get().is_some() {
+            return;
+        }
+        let Ok(scraper) = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+        else {
+            return;
+        };
+        let resp = scraper
+            .get("https://music.youtube.com/")
+            .header("connection", "close")
+            .header(
+                "user-agent",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            .header("accept-language", "en-US,en;q=0.9")
+            .header("cookie", "SOCS=CAI")
+            .header("x-goog-api-format-version", "2")
+            .send()
+            .await;
+        let Ok(resp) = resp else { return };
+        let Ok(text) = resp.text().await else { return };
+        if let Some(id) = extract_visitor_data(&text) {
+            let _ = self.visitor_id.set(id);
         }
     }
 
@@ -183,17 +217,20 @@ impl YtmApi {
     /// The "For you" browse page: home shelves, trending songs, community
     /// playlists and mood/genre category grids.
     pub async fn for_you(&self) -> anyhow::Result<Vec<BrowseShelf>> {
-        let (home, trending, categories) = tokio::join!(
-            self.home_for_you_shelves(),
+        let mut shelves = self.home_for_you_shelves().await.unwrap_or_default();
+        let (trending, categories, discovery) = tokio::join!(
             self.trending_songs_shelf(),
             self.moods_and_genres_shelves(),
+            self.discovery_mix_shelf(),
         );
-        let mut shelves = home.unwrap_or_default();
         if let Ok(Some(shelf)) = trending {
             shelves.push(shelf);
         }
         if let Ok(categories) = categories {
             shelves.extend(categories);
+        }
+        if let Ok(Some(shelf)) = discovery {
+            shelves.push(shelf);
         }
         shelves.retain(|shelf| !shelf.items.is_empty());
         if shelves.is_empty() {
@@ -203,9 +240,9 @@ impl YtmApi {
     }
 
     /// Walk the home feed and keep every shelf it offers — Quick picks,
-    /// Your daily discover, Discovery mix, Mixed for you, the community
-    /// picks, similar-to rows and so on. Duplicate titles across
-    /// continuation pages are dropped; the first copy wins.
+    /// Your daily discover, Mixed for you, the community picks and so on.
+    /// Duplicate titles across continuation pages are dropped; the first
+    /// copy wins.
     async fn home_for_you_shelves(&self) -> anyhow::Result<Vec<BrowseShelf>> {
         let mut body = json!({ "context": context(), "browseId": "FEmusic_home" });
         let mut value = self.browse(&body).await?;
@@ -249,6 +286,30 @@ impl YtmApi {
             }
         }
         Ok(shelves)
+    }
+
+    /// The "Mixed for you" page holds the account's generated mixes. Its
+    /// Discover Mix is a real playlist even when the home feed leaves the
+    /// Discovery mix shelf out.
+    async fn discovery_mix_shelf(&self) -> anyhow::Result<Option<BrowseShelf>> {
+        let value = self
+            .browse(&json!({
+                "context": context(),
+                "browseId": "FEmusic_mixed_for_you",
+            }))
+            .await?;
+        let mut playlists = Vec::new();
+        collect_two_row_playlists(&value, &mut playlists);
+        let Some(playlist) = playlists
+            .into_iter()
+            .find(|playlist| playlist.title.to_lowercase().contains("discover"))
+        else {
+            return Ok(None);
+        };
+        Ok(Some(BrowseShelf {
+            title: "Discovery mix".to_string(),
+            items: vec![SearchHit::Collection(playlist)],
+        }))
     }
 
     /// The explore page's "Trending" shelf is made of playable video rows.
@@ -386,9 +447,17 @@ impl YtmApi {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("not signed in"))?;
 
+        self.ensure_visitor().await;
         let url = format!("{}&key={}", BROWSE_URL, API_KEY);
         let mut req = self.client.post(url).json(body);
+        if let Some(visitor) = self.visitor_id.get() {
+            req = req.header("x-goog-visitor-id", visitor);
+        }
         for (k, v) in headers {
+            // reqwest sets its own; forwarding the saved copy duplicates it.
+            if k.eq_ignore_ascii_case("content-type") {
+                continue;
+            }
             if let Some(s) = v.as_str() {
                 req = req.header(k.as_str(), s);
             }
@@ -699,8 +768,7 @@ fn context() -> Value {
             "clientVersion": CLIENT_VERSION,
             "hl": "en"
         },
-        "user": { "lockedSafetyMode": false },
-        "request": { "useSsl": true }
+        "user": {}
     })
 }
 
@@ -716,6 +784,15 @@ fn mobile_context() -> Value {
         "user": { "lockedSafetyMode": false },
         "request": { "useSsl": true }
     })
+}
+
+/// The visitor id YouTube's own page embeds in `ytcfg`.
+fn extract_visitor_data(html: &str) -> Option<String> {
+    let marker = "\"VISITOR_DATA\":\"";
+    let start = html.find(marker)? + marker.len();
+    let rest = &html[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 /// First depth-first match for `key` anywhere in the tree.

@@ -333,7 +333,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // The queue page: `z` opens it, Esc leaves it.
                     KeyCode::Char('z') => app.open_queue(),
                     // Browse page: `b` opens the section picker from anywhere.
-                    KeyCode::Char('b') => app.open_browse_picker(),
+                    KeyCode::Char('b') => app.open_browse_picker().await,
                     // Offline mode: the local music folder instead of the
                     // account's library. Press again to go back online.
                     KeyCode::Char('o') => app.toggle_offline(),

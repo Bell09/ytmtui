@@ -955,12 +955,12 @@ fn draw_playlist_picker(f: &mut Frame, app: &App, area: Rect) {
 /// Modal picker for choosing a browse shelf (opened with `b`).
 fn draw_browse_picker(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    let labels = &crate::app::App::BROWSE_PICKER_LABELS;
+    let sections = &app.browse_picker_sections;
     // Same card geometry as the add-to-playlist picker: 44 columns wide,
     // a caption line, and up to a dozen rows.
     let width = 44.min((area.width.saturating_sub(4)) as usize) as u16;
-    let height = ((labels.len() as u16).min(12) + 4).min(area.height.saturating_sub(2));
-    if width < 20 || height < 5 {
+    let height = ((sections.len() as u16).min(12) + 4).min(area.height.saturating_sub(2));
+    if width < 20 || height < 5 || sections.is_empty() {
         return;
     }
     let rect = Rect::new(
@@ -1002,10 +1002,14 @@ fn draw_browse_picker(f: &mut Frame, app: &App, area: Rect) {
     );
 
     let text_w = rows[1].width.saturating_sub(1) as usize;
-    let items: Vec<ListItem> = labels
+    let items: Vec<ListItem> = sections
         .iter()
         .enumerate()
-        .map(|(i, label)| {
+        .map(|(i, &section)| {
+            let label = crate::app::App::BROWSE_PICKER_LABELS
+                .get(section)
+                .copied()
+                .unwrap_or("Shelf");
             let style = if i == app.browse_picker_index {
                 Style::default()
                     .fg(t.selection_fg)
