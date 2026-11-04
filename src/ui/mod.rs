@@ -17,7 +17,7 @@ use crate::theme::Theme;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Decorative rule under the search input.
-const TOP_RULE: &str = "',────────',─────────,'─────────────'.────────────,'───────────`,──────────,'──────────,'─────────`,────────.`───────',──────',─────`,────.`───',──`.─";
+const TOP_RULE: &str = "°𝄞·──────°,─────────｡“─────────────˚｡────────────˳◜───────────｡`──────────°,──────────,'─────────`,────────.`───────',──────⸝'─────`.────.ᐣ───ᐟ.──.ᐟ─~";
 
 /// Colour for one glyph of the top rule. The dashes stay on the secondary
 /// accent; the punctuation ticks borrow the rest of the palette so the rule
