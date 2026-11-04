@@ -1092,9 +1092,10 @@ impl App {
         "Trending songs",
     ];
 
-    /// `b` on any page: overlay the browse section picker. Shelves are
-    /// fetched first when this is the first browse action of the session,
-    /// so the list can leave out sections YouTube did not return.
+    /// `b` on any page: overlay the browse section picker. The feed is
+    /// refetched every time so the list reflects what YouTube is serving right
+    /// now — the home shelves rotate between requests, and a session-long
+    /// cache can keep showing a stale subset.
     pub async fn open_browse_picker(&mut self) {
         if self.browse_picker_open {
             return;
@@ -1103,11 +1104,14 @@ impl App {
             self.status_message = "Go online to browse shelves.".into();
             return;
         }
-        if !self.browse_loaded {
-            self.status_message = "Loading shelves...".to_string();
-            if !self.load_browse_shelves().await {
-                return;
-            }
+        self.status_message = "Refreshing shelves...".to_string();
+        // Keep the previous shelves if this refresh fails; only a first
+        // load with no cache means there is nothing to show.
+        let refreshed = self.load_browse_shelves().await;
+        if !refreshed && !self.browse_loaded {
+            return;
+        }
+        if refreshed {
             self.status_message = "Browse shelves".to_string();
         }
         let available: Vec<usize> = (0..BROWSE_SECTIONS.len())

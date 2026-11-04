@@ -253,24 +253,20 @@ impl YtmApi {
         for _ in 0..12 {
             let mut page = Vec::new();
             collect_browse_shelves(&value, &mut page);
-            let mut fresh_shelf = false;
             for mut shelf in page {
                 let key = shelf.title.to_lowercase();
                 if key.is_empty() || seen_titles.contains(&key) {
                     continue;
                 }
                 seen_titles.push(key);
-                fresh_shelf = true;
                 if shelf.title.eq_ignore_ascii_case("mixed for you") {
                     shelf.title = "Mixed for you".to_string();
                 }
                 shelves.push(shelf);
             }
-            // Stop revisiting once a page adds nothing new; still keep what
-            // we have when the next continuation flakes.
-            if !fresh_shelf {
-                break;
-            }
+            // Keep following the section token even when a page only repeats
+            // shelves we already have: YouTube sometimes shuffles the new
+            // ones onto a later page.
             match section_continuation(&value) {
                 Some(token) if !seen_tokens.contains(&token) => {
                     seen_tokens.push(token.clone());
