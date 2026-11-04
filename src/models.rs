@@ -67,7 +67,7 @@ impl Playlist {
 
 /// One row in a search result: either a playable song or an openable
 /// collection (album / artist / playlist).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SearchHit {
     Track(Track),
     Collection(Playlist),
@@ -90,7 +90,7 @@ impl SearchHit {
 }
 
 /// A titled group of rows on the "For you" browse page.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowseShelf {
     pub title: String,
     pub items: Vec<SearchHit>,

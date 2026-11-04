@@ -238,6 +238,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the account's playlists arrive.
     let mut app = App::new();
     app.start_library_load();
+    // Warm the shelf cache in the background so the first `b` opens at once.
+    app.start_browse_refresh();
 
     // Main event loop
     while !app.should_quit {

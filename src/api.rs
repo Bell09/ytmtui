@@ -217,12 +217,26 @@ impl YtmApi {
     /// The "For you" browse page: home shelves, trending songs, community
     /// playlists and mood/genre category grids.
     pub async fn for_you(&self) -> anyhow::Result<Vec<BrowseShelf>> {
-        let mut shelves = self.home_for_you_shelves().await.unwrap_or_default();
-        let (trending, categories, discovery) = tokio::join!(
+        self.for_you_with_pages(12).await
+    }
+
+    /// The first page only: enough sections to open the picker after a
+    /// single round-trip while the full walk continues in the background.
+    pub async fn for_you_quick(&self) -> anyhow::Result<Vec<BrowseShelf>> {
+        self.for_you_with_pages(1).await
+    }
+
+    async fn for_you_with_pages(&self, max_pages: usize) -> anyhow::Result<Vec<BrowseShelf>> {
+        // The home walk is the slow part (one request per continuation
+        // page); run the other three endpoints alongside it instead of
+        // after it so opening the picker waits for the longest, not the sum.
+        let (home, trending, categories, discovery) = tokio::join!(
+            self.home_for_you_shelves(max_pages),
             self.trending_songs_shelf(),
             self.moods_and_genres_shelves(),
             self.discovery_mix_shelf(),
         );
+        let mut shelves = home.unwrap_or_default();
         if let Ok(Some(shelf)) = trending {
             shelves.push(shelf);
         }
@@ -243,14 +257,14 @@ impl YtmApi {
     /// Your daily discover, Mixed for you, the community picks and so on.
     /// Duplicate titles across continuation pages are dropped; the first
     /// copy wins.
-    async fn home_for_you_shelves(&self) -> anyhow::Result<Vec<BrowseShelf>> {
+    async fn home_for_you_shelves(&self, max_pages: usize) -> anyhow::Result<Vec<BrowseShelf>> {
         let mut body = json!({ "context": context(), "browseId": "FEmusic_home" });
         let mut value = self.browse(&body).await?;
         let mut seen_tokens = Vec::new();
         let mut seen_titles: Vec<String> = Vec::new();
         let mut shelves = Vec::new();
 
-        for _ in 0..12 {
+        for _ in 0..max_pages {
             let mut page = Vec::new();
             collect_browse_shelves(&value, &mut page);
             for mut shelf in page {

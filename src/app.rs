@@ -96,6 +96,9 @@ type LikeRefreshResult = Result<Vec<Track>, String>;
 /// registry entry to save — or why it couldn't.
 type DownloadResult = (String, Result<crate::offline::Entry, String>);
 
+/// A background home-feed refresh for the browse picker.
+type BrowseResult = Result<Vec<BrowseShelf>, String>;
+
 /// Filters shown in the search bar, in display order. Only the ones the
 /// Innertube response actually advertises are kept.
 const SEARCH_FILTER_ORDER: [&str; 5] = [
@@ -325,6 +328,11 @@ pub struct App {
     /// Section indices the picker actually lists. Only shelves the feed
     /// returned are offered, so no entry opens an empty page.
     pub browse_picker_sections: Vec<usize>,
+    /// In-flight home-feed refresh for the picker (started at boot and on
+    /// every `b`). The open card updates when the result lands.
+    browse_refresh_tx: tokio::sync::mpsc::UnboundedSender<BrowseResult>,
+    browse_refresh_rx: tokio::sync::mpsc::UnboundedReceiver<BrowseResult>,
+    browse_refreshing: bool,
     /// Queued `r` removals — in-order like the like and add queues.
     rm_cmd_tx: tokio::sync::mpsc::UnboundedSender<RmCmd>,
     rm_rx: tokio::sync::mpsc::UnboundedReceiver<RmResult>,
@@ -375,6 +383,7 @@ impl App {
         };
         let (preview_tx, preview_rx) = tokio::sync::mpsc::unbounded_channel();
         let (library_tx, library_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (browse_refresh_tx, browse_refresh_rx) = tokio::sync::mpsc::unbounded_channel();
         let (account_tx, account_rx) = tokio::sync::mpsc::unbounded_channel();
         let (art_tx, art_rx) = tokio::sync::mpsc::unbounded_channel();
         let (lyrics_tx, lyrics_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -476,7 +485,7 @@ impl App {
             }
         });
 
-        Self {
+        let mut app = Self {
             current_page: Page::Library,
             input_mode: InputMode::Normal,
             search_query: String::new(),
@@ -565,6 +574,9 @@ impl App {
             browse_picker_open: false,
             browse_picker_index: 0,
             browse_picker_sections: (0..BROWSE_SECTIONS.len()).collect(),
+            browse_refresh_tx,
+            browse_refresh_rx,
+            browse_refreshing: false,
             rm_cmd_tx,
             rm_rx,
             offline: false,
@@ -577,12 +589,15 @@ impl App {
             dl_rx,
             dl_pct_tx,
             dl_pct_rx,
-        }
+        };
+        app.load_browse_cache();
+        app
     }
 
     pub fn update(&mut self) {
         self.poll_theme();
         self.poll_library();
+        self.poll_browse_refresh();
         self.poll_preview();
         while let Ok(name) = self.account_rx.try_recv() {
             self.account_name = Some(name);
@@ -1104,24 +1119,20 @@ impl App {
             self.status_message = "Go online to browse shelves.".into();
             return;
         }
-        self.status_message = "Refreshing shelves...".to_string();
-        // Keep the previous shelves if this refresh fails; only a first
-        // load with no cache means there is nothing to show.
-        let refreshed = self.load_browse_shelves().await;
-        if !refreshed && !self.browse_loaded {
-            return;
+        // Warm cache: show the list immediately and refresh it in the
+        // background. A cold cache only waits for the first home page —
+        // the rest of the walk finishes behind the open picker.
+        if !self.browse_loaded {
+            self.status_message = "Loading shelves...".to_string();
+            match self.api.for_you_quick().await {
+                Ok(shelves) => self.apply_browse_shelves(shelves),
+                Err(e) => {
+                    self.status_message = format!("Failed to load browse: {}", e);
+                    return;
+                }
+            }
         }
-        if refreshed {
-            self.status_message = "Browse shelves".to_string();
-        }
-        let available: Vec<usize> = (0..BROWSE_SECTIONS.len())
-            .filter(|&section| {
-                self.browse_shelves
-                    .get(section)
-                    .and_then(Option::as_ref)
-                    .map_or(false, |shelf| !shelf.items.is_empty())
-            })
-            .collect();
+        let available = self.available_browse_sections();
         if available.is_empty() {
             self.status_message = "No browse shelves came back.".to_string();
             return;
@@ -1129,6 +1140,8 @@ impl App {
         self.browse_picker_sections = available;
         self.browse_picker_index = 0;
         self.browse_picker_open = true;
+        self.status_message = "Browse shelves".to_string();
+        self.start_browse_refresh();
     }
 
     pub fn browse_picker_next(&mut self) {
@@ -1377,24 +1390,138 @@ impl App {
     async fn load_browse_shelves(&mut self) -> bool {
         match self.api.for_you().await {
             Ok(shelves) => {
-                let mut slots: Vec<Option<BrowseShelf>> = vec![None; BROWSE_SECTIONS.len()];
-                for shelf in shelves {
-                    if let Some(section) = browse_section_for_title(&shelf.title) {
-                        // Moods and genres share one slot, so append rather
-                        // than overwrite when the second one lands.
-                        match slots[section].as_mut() {
-                            Some(existing) => existing.items.extend(shelf.items),
-                            None => slots[section] = Some(shelf),
-                        }
-                    }
-                }
-                self.browse_shelves = slots;
-                self.browse_loaded = true;
+                self.apply_browse_shelves(shelves);
                 true
             }
             Err(e) => {
                 self.status_message = format!("Failed to load browse: {}", e);
                 false
+            }
+        }
+    }
+
+    /// Sort the feed's shelves into the fixed section slots. Moods and
+    /// genres share one slot, so their items append instead of replacing.
+    fn apply_browse_shelves(&mut self, shelves: Vec<BrowseShelf>) {
+        let mut slots: Vec<Option<BrowseShelf>> = vec![None; BROWSE_SECTIONS.len()];
+        for shelf in shelves {
+            if let Some(section) = browse_section_for_title(&shelf.title) {
+                match slots[section].as_mut() {
+                    Some(existing) => existing.items.extend(shelf.items),
+                    None => slots[section] = Some(shelf),
+                }
+            }
+        }
+        self.browse_shelves = slots;
+        self.browse_loaded = true;
+        self.save_browse_cache();
+    }
+
+    /// Where the last feed shelves live between runs.
+    fn browse_cache_path() -> PathBuf {
+        crate::auth::config_dir().join("browse.json")
+    }
+
+    /// Show the previous session's shelves before the network answers, so
+    /// pressing `b` right after launch does not wait on the home walk.
+    /// A missing or malformed cache just leaves the slots empty.
+    fn load_browse_cache(&mut self) {
+        let Ok(text) = std::fs::read_to_string(Self::browse_cache_path()) else {
+            return;
+        };
+        let Ok(mut cached) = serde_json::from_str::<Vec<Option<BrowseShelf>>>(&text) else {
+            return;
+        };
+        if cached.len() < BROWSE_SECTIONS.len() {
+            cached.resize(BROWSE_SECTIONS.len(), None);
+        }
+        cached.truncate(BROWSE_SECTIONS.len());
+        if cached
+            .iter()
+            .any(|slot| slot.as_ref().is_some_and(|shelf| !shelf.items.is_empty()))
+        {
+            self.browse_shelves = cached;
+            self.browse_loaded = true;
+        }
+    }
+
+    /// Keep the shelves for the next launch so the first `b` is instant.
+    fn save_browse_cache(&self) {
+        if let Ok(text) = serde_json::to_string(&self.browse_shelves) {
+            let _ = std::fs::write(Self::browse_cache_path(), text);
+        }
+    }
+
+    /// Sections that currently have items, in picker order.
+    fn available_browse_sections(&self) -> Vec<usize> {
+        (0..BROWSE_SECTIONS.len())
+            .filter(|&section| {
+                self.browse_shelves
+                    .get(section)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|shelf| !shelf.items.is_empty())
+            })
+            .collect()
+    }
+
+    /// Rebuild the open picker after a background refresh, keeping the
+    /// highlighted section selected when it survived the refresh.
+    fn refresh_browse_picker_sections(&mut self) {
+        let current = self
+            .browse_picker_sections
+            .get(self.browse_picker_index)
+            .copied();
+        let available = self.available_browse_sections();
+        if available.is_empty() {
+            return;
+        }
+        self.browse_picker_index = current
+            .and_then(|section| available.iter().position(|&s| s == section))
+            .unwrap_or(0);
+        self.browse_picker_sections = available;
+    }
+
+    /// Refresh the feed in the background so `b` never waits on a warm
+    /// cache. `poll_browse_refresh` applies the result and updates the open
+    /// card in place.
+    pub fn start_browse_refresh(&mut self) {
+        if self.browse_refreshing || self.offline || !self.api.is_authenticated() {
+            return;
+        }
+        self.browse_refreshing = true;
+        let api = self.api.clone();
+        let tx = self.browse_refresh_tx.clone();
+        tokio::spawn(async move {
+            let result = api.for_you().await.map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_browse_refresh(&mut self) {
+        loop {
+            let result = match self.browse_refresh_rx.try_recv() {
+                Ok(result) => result,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.browse_refreshing = false;
+                    break;
+                }
+            };
+            self.browse_refreshing = false;
+            match result {
+                Ok(shelves) => {
+                    self.apply_browse_shelves(shelves);
+                    if self.browse_picker_open {
+                        self.refresh_browse_picker_sections();
+                    }
+                }
+                Err(e) => {
+                    // The boot refresh is silent: don't replace the footer
+                    // with a network error the user did not ask for.
+                    if self.browse_picker_open {
+                        self.status_message = format!("Failed to refresh shelves: {e}");
+                    }
+                }
             }
         }
     }
