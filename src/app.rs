@@ -35,41 +35,51 @@ type RmResult = (String, String, Track, usize, Result<(), String>);
 /// Labels for the browse sections, top to bottom in the `b` picker. The
 /// matching shelves are found by title, so the API can return them in any
 /// order or name them slightly differently.
-pub const BROWSE_SECTIONS: [&str; 9] = [
+pub const BROWSE_SECTIONS: [&str; 12] = [
     "QUICK PICKS",
     "DAILY DISCOVER",
+    "FEATURED FOR YOU",
+    "FORGOTTEN FAVORITES",
     "FROM THE COMMUNITY",
     "MOODS & GENRES",
     "DISCOVERY MIX",
     "MIXED FOR YOU",
     "NEW RELEASES",
+    "COVERS & REMIXES",
     "TRENDING PLAYLISTS",
     "TRENDING SONGS",
 ];
 
 /// Which browse section a shelf header belongs to. The order of the checks
-/// matters: "Discovery mix" must beat the generic "mix", and the exact
-/// "from the community" title must beat "trending community playlists".
+/// matters: "Discovery mix" must beat the generic "mix", "Covers and remixes"
+/// must beat it too ("remixes" contains "mix"), and the exact "from the
+/// community" title must beat "trending community playlists".
 fn browse_section_for_title(title: &str) -> Option<usize> {
     let title = title.to_lowercase();
     if title.contains("quick") {
         Some(0)
     } else if title.contains("discovery") {
-        Some(4)
+        Some(6)
     } else if title.contains("daily discover") {
         Some(1)
-    } else if title.contains("new releases") {
-        Some(6)
-    } else if title.contains("mood") || title.contains("genre") {
-        Some(3)
-    } else if title == "from the community" || title == "from community" {
+    } else if title.contains("featured") {
         Some(2)
-    } else if title.contains("community") {
-        Some(7)
-    } else if title.contains("mix") {
-        Some(5)
-    } else if title.contains("trending") {
+    } else if title.contains("forgotten") {
+        Some(3)
+    } else if title.contains("new releases") {
         Some(8)
+    } else if title.contains("mood") || title.contains("genre") {
+        Some(5)
+    } else if title == "from the community" || title == "from community" {
+        Some(4)
+    } else if title.contains("cover") || title.contains("remix") {
+        Some(9)
+    } else if title.contains("community") {
+        Some(10)
+    } else if title.contains("mix") {
+        Some(7)
+    } else if title.contains("trending") {
+        Some(11)
     } else {
         None
     }
@@ -1067,14 +1077,17 @@ impl App {
 
     /// Browse section labels in the order we want them to appear in the
     /// picker. They correspond to the shelves `home_for_you_shelves` keeps.
-    pub const BROWSE_PICKER_LABELS: [&str; 9] = [
+    pub const BROWSE_PICKER_LABELS: [&str; 12] = [
         "Quick picks",
         "Your daily discover",
+        "Featured playlists for you",
+        "Forgotten favorites",
         "From the community",
         "Mood and Genres",
         "Discovery mix",
         "Mixed for you",
         "New releases",
+        "Covers and remixes",
         "Trending community playlists",
         "Trending songs",
     ];
@@ -2687,30 +2700,43 @@ mod browse_section_tests {
             [
                 "QUICK PICKS",
                 "DAILY DISCOVER",
+                "FEATURED FOR YOU",
+                "FORGOTTEN FAVORITES",
                 "FROM THE COMMUNITY",
                 "MOODS & GENRES",
                 "DISCOVERY MIX",
                 "MIXED FOR YOU",
                 "NEW RELEASES",
+                "COVERS & REMIXES",
                 "TRENDING PLAYLISTS",
                 "TRENDING SONGS",
             ]
         );
         assert_eq!(browse_section_for_title("Quick picks"), Some(0));
         assert_eq!(browse_section_for_title("Your daily discover"), Some(1));
-        assert_eq!(browse_section_for_title("From the community"), Some(2));
+        assert_eq!(
+            browse_section_for_title("Featured playlists for you"),
+            Some(2)
+        );
+        assert_eq!(
+            browse_section_for_title("Forgotten favorites"),
+            Some(3)
+        );
+        assert_eq!(browse_section_for_title("From the community"), Some(4));
         // Moods and genres merge into one slot.
-        assert_eq!(browse_section_for_title("Moods"), Some(3));
-        assert_eq!(browse_section_for_title("Genres"), Some(3));
-        // The specific mix name must win over the generic "mix".
-        assert_eq!(browse_section_for_title("Discovery mix"), Some(4));
-        assert_eq!(browse_section_for_title("Mixed for you"), Some(5));
-        assert_eq!(browse_section_for_title("New releases"), Some(6));
+        assert_eq!(browse_section_for_title("Moods"), Some(5));
+        assert_eq!(browse_section_for_title("Genres"), Some(5));
+        // The specific mix name must win over the generic "mix", and
+        // "remixes" must not be taken for a mix shelf.
+        assert_eq!(browse_section_for_title("Discovery mix"), Some(6));
+        assert_eq!(browse_section_for_title("Mixed for you"), Some(7));
+        assert_eq!(browse_section_for_title("New releases"), Some(8));
+        assert_eq!(browse_section_for_title("Covers and remixes"), Some(9));
         assert_eq!(
             browse_section_for_title("Trending community playlists"),
-            Some(7)
+            Some(10)
         );
-        assert_eq!(browse_section_for_title("Trending songs for you"), Some(8));
+        assert_eq!(browse_section_for_title("Trending songs for you"), Some(11));
         assert_eq!(browse_section_for_title("Listen again"), None);
     }
 }
