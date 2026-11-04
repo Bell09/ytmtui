@@ -1094,12 +1094,38 @@ fn shelf_title(shelf: &Value) -> Option<String> {
 
 fn parse_browse_item(item: &Value) -> Option<SearchHit> {
     if let Some(renderer) = item.get("musicTwoRowItemRenderer") {
-        return parse_playlist(renderer).map(SearchHit::Collection);
+        return parse_two_row_item(renderer);
     }
     if let Some(renderer) = item.get("musicResponsiveListItemRenderer") {
         return parse_item(renderer).map(SearchHit::Track);
     }
     None
+}
+
+/// Two-row tiles are mostly albums and playlists, but the home feed also
+/// renders song shelves such as "Your daily discover" this way. Songs carry
+/// a watch endpoint instead of a browse endpoint.
+fn parse_two_row_item(renderer: &Value) -> Option<SearchHit> {
+    if renderer.pointer("/navigationEndpoint/browseEndpoint").is_some() {
+        return parse_playlist(renderer).map(SearchHit::Collection);
+    }
+    let id = item_video_id(renderer)?;
+    let title = runs_text(renderer.get("title")).unwrap_or_else(|| "Unknown Title".to_string());
+    let subtitle = runs_text(renderer.get("subtitle")).unwrap_or_default();
+    let mut fields = subtitle.split('•').map(str::trim).filter(|s| !s.is_empty());
+    let artist = fields.next().unwrap_or_default().to_string();
+    let duration = fields.find(|field| is_duration(field)).map(str::to_string);
+    Some(SearchHit::Track(Track {
+        id,
+        title,
+        artist,
+        album: None,
+        duration,
+        thumbnail_url: renderer_thumb(renderer),
+        like: None,
+        downloaded: false,
+        set_video_id: None,
+    }))
 }
 
 /// Collect each labelled navigation grid on the moods/genres page.
@@ -1580,6 +1606,56 @@ mod browse_tests {
                 assert_eq!(track.id, "vid123");
                 assert_eq!(track.title, "Trending song");
                 assert_eq!(track.artist, "Some Artist");
+            }
+            other => panic!("expected track, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_song_tiles_in_daily_discover() {
+        let value = json!({
+            "header": {
+                "musicCarouselShelfBasicHeaderRenderer": {
+                    "title": { "runs": [{ "text": "Your daily discover" }] }
+                }
+            },
+            "contents": [{
+                "musicTwoRowItemRenderer": {
+                    "title": { "runs": [{ "text": "CHANGES" }] },
+                    "subtitle": {
+                        "runs": [
+                            { "text": "Denise Julia" },
+                            { "text": " • 2.6M plays" }
+                        ]
+                    },
+                    "thumbnailRenderer": {
+                        "musicThumbnailRenderer": {
+                            "thumbnail": {
+                                "thumbnails": [{
+                                    "url": "https://example.invalid/cover",
+                                    "width": 226
+                                }]
+                            }
+                        }
+                    },
+                    "navigationEndpoint": {
+                        "watchEndpoint": { "videoId": "vid-daily" }
+                    }
+                }
+            }]
+        });
+
+        let shelf = parse_browse_shelf(&value).expect("shelf");
+        assert_eq!(shelf.title, "Your daily discover");
+        match &shelf.items[0] {
+            SearchHit::Track(track) => {
+                assert_eq!(track.id, "vid-daily");
+                assert_eq!(track.title, "CHANGES");
+                assert_eq!(track.artist, "Denise Julia");
+                assert_eq!(
+                    track.thumbnail_url.as_deref(),
+                    Some("https://example.invalid/cover")
+                );
             }
             other => panic!("expected track, got {other:?}"),
         }
