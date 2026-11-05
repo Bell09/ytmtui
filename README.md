@@ -38,7 +38,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 | 🔍 **Innertube search** | Signed-in search with Top / Songs / Albums / Artists / Playlists filters |
 | 📚 **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
 | ✨ **For you** | Personal mixes, trending songs, community playlists, moods and genres on one page |
-| ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, buffering state |
+| ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, buffering state · `m` for a maximized cover + synced lyrics view |
 | 💫 **Extras** | Synced lyrics, queue, offline mode, like/unlike, MP3 download with cover art and `.lrc` lyrics |
 
 ---
@@ -189,13 +189,14 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 | `1`–`5` | Jump to **Trending / Mix / Community / Moods / Genres** |
 | `/` | Focus search bar |
 | `Tab` / `⇧Tab` | Cycle search filters |
-| `Esc` | Back / open queue |
+| `Esc` | Back / leave the maximized view |
 | `d` | Download highlighted song as MP3 with cover art and synced `.lrc` (or delete in queue) |
 | `a` | Add highlighted song to a library playlist — arrows scroll, `Enter` adds |
 | `r` | Remove highlighted song from the open playlist (rolls back on failure) |
 | `o` | Toggle offline mode |
 | `L` | Like / unlike current song — in Liked Music it targets the highlighted row |
 | `l` | Toggle lyrics pane |
+| `m` | Toggle maximized now playing view (large cover + full-height lyrics) |
 | `X` / `Z` | Queue next / append to queue |
 | `Ctrl+R` | Cycle repeat mode |
 | `Ctrl+S` | Toggle shuffle |
@@ -215,6 +216,7 @@ The window is deliberately chrome-free — no box borders, just hairlines, white
 - 📄 **Detail / results** — title, meta line and lazily-fetched track list (cached)
 - ✨ **For you** — press `b` for the shelf picker (**Quick picks · Your daily discover · Featured playlists for you · Forgotten favorites · From the community · Mood and Genres · Discovery mix · Mixed for you · New releases · Covers and remixes · Trending community playlists · Trending songs**) · `1`–`5` jump straight to the first five
 - 🎚️ **Playback bar** — indicator, track, time and a full-width progress bar that only advances while playing
+- 🖼️ **Now playing** — press `m` for a large centred cover beside full-height synced lyrics · `PgUp` / `PgDn` scrolls · `m` or `Esc` returns
 - ℹ️ **Footer** — status message and compact keybinding cheat-sheet
 
 ---
