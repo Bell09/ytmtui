@@ -270,6 +270,10 @@ pub struct App {
     /// a size change must retransmit).
     pub art_output: Vec<u8>,
     pub art_kitty_sent: Option<(String, u16, u16, u16, u16)>,
+    /// Erase the previous scaled-lyrics block before the next frame.
+    pub lyrics_clear: Vec<u8>,
+    /// Scaled lyrics (OSC 66) drawn after the frame.
+    pub lyrics_output: Vec<u8>,
     art_tx: tokio::sync::mpsc::UnboundedSender<(String, Option<image::RgbaImage>)>,
     art_rx: tokio::sync::mpsc::UnboundedReceiver<(String, Option<image::RgbaImage>)>,
     /// MPRIS visibility for desktop media widgets (Quickshell etc.):
@@ -547,6 +551,8 @@ impl App {
             art_fitted: None,
             art_output: Vec::new(),
             art_kitty_sent: None,
+            lyrics_clear: Vec::new(),
+            lyrics_output: Vec::new(),
             art_tx,
             art_rx,
             mpris,

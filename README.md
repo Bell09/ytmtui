@@ -238,7 +238,7 @@ The window is deliberately chrome-free — no box borders, just hairlines, white
 - 📄 **Detail / results** — title, meta line and lazily-fetched track list (cached)
 - ✨ **For you** — press `b` for the shelf picker (**Quick picks · Your daily discover · Featured playlists for you · Forgotten favorites · From the community · Mood and Genres · Discovery mix · Mixed for you · New releases · Covers and remixes · Trending community playlists · Trending songs**) · `1`–`5` jump straight to the first five
 - 🎚️ **Playback bar** — indicator, track, time and a full-width progress bar that only advances while playing
-- 🖼️ **Now playing** — press `m` for a large centred cover beside full-height synced lyrics · `PgUp` / `PgDn` scrolls · `m` or `Esc` returns
+- 🖼️ **Now playing** — press `m` for a large centred cover beside full-height synced lyrics (2× text in Kitty ≥ 0.40) · `PgUp` / `PgDn` scrolls · `m` or `Esc` returns
 - ℹ️ **Footer** — status message and compact keybinding cheat-sheet
 
 ---

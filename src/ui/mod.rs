@@ -67,6 +67,11 @@ fn sidebar_width(total: u16) -> u16 {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    // The previous frame's scaled-lyrics clear was flushed before this draw;
+    // start a fresh batch for the frame about to render.
+    app.lyrics_output.clear();
+    app.lyrics_clear.clear();
+
     // Title line, main (search line above the list and content, with
     // the lyrics pane running their full height beside them), one
     // playback line (track + connector bar), footer — compact: no
@@ -839,82 +844,49 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect, full_height: bool) {
         return;
     }
 
+    let (rows, current) = lyric_rows(app.position_secs_f64(), lyrics);
+
+    // In the maximized view a kitty terminal draws the lyrics at twice the
+    // cell size. The ratatui cells underneath stay blank; the escapes go out
+    // after the frame, like the album art.
+    if full_height && crate::art::text_scaling() {
+        draw_scaled_lyrics(f, app, inner, &rows, current);
+        return;
+    }
+
     // Long lines wrap; the row maths below counts wrapped rows so the
     // autoscroll can centre the current line.
     let wrap_w = inner.width as usize;
     let text_rows = |text: &str| -> usize { display_width(text).div_ceil(wrap_w).max(1) };
 
-    let (spans, centre_row, rows_total) = match lyrics {
-        crate::lyrics::Lyrics::Synced(lines) => {
-            // Bisect the timestamps using mpv's sub-second clock so a line
-            // flips exactly when its timestamp is reached, not up to a
-            // second late from integer truncation.
-            let pos = app.position_secs_f64();
-            let idx = lines.partition_point(|(ts, _)| *ts <= pos) as i64 - 1;
-            // A blank row only where the song pauses — verses stay
-            // together, sections get air — instead of doubling every line.
-            // Instrumental `♪` markers always close a section.
-            let gap_after: Vec<bool> = (0..lines.len().saturating_sub(1))
-                .map(|i| {
-                    let (ts, text) = &lines[i];
-                    lines[i + 1].0 - ts >= 6.0
-                        || text.trim() == "♪"
-                        || text.trim().is_empty()
-                })
-                .collect();
-            let gaps_before = |n: usize| gap_after.iter().take(n).filter(|g| **g).count();
-            let centre_row = lines
-                .iter()
-                .take(idx.max(0) as usize)
-                .map(|(_, text)| text_rows(text))
-                .sum::<usize>()
-                + gaps_before(idx.max(0) as usize);
-            let rows_total: usize = lines.iter().map(|(_, text)| text_rows(text)).sum::<usize>()
-                + gap_after.iter().filter(|g| **g).count();
-            let mut spans = Vec::with_capacity(lines.len() + 1);
-            for (i, (_, text)) in lines.iter().enumerate() {
-                let style = if (i as i64) < idx {
-                    Style::default().fg(t.dim) // played
-                } else if i as i64 == idx {
-                    Style::default().fg(t.accent) // current
-                } else {
-                    Style::default().fg(t.fg) // upcoming
+    let mut spans = Vec::with_capacity(rows.len());
+    let mut rows_total = 0usize;
+    let mut centre_row = 0usize;
+    for (i, row) in rows.iter().enumerate() {
+        match row {
+            LyricRow::Text(text) => {
+                if current == Some(i) {
+                    centre_row = rows_total;
+                }
+                rows_total += text_rows(text);
+                let mut style = match current {
+                    Some(c) if i < c => Style::default().fg(t.dim), // played
+                    Some(c) if i == c => Style::default().fg(t.accent), // current
+                    _ => Style::default().fg(t.fg),                 // upcoming
                 };
                 // The maximized view bolds the whole block: terminal fonts
                 // have one size, so weight and centring carry the emphasis.
-                let style = if full_height || i as i64 == idx {
-                    style.add_modifier(Modifier::BOLD)
-                } else {
-                    style
-                };
-                spans.push(Line::from(Span::styled(text.as_str(), style)));
-                if gap_after.get(i).copied().unwrap_or(false) {
-                    spans.push(Line::from(""));
-                }
-            }
-            (spans, centre_row, rows_total)
-        }
-        crate::lyrics::Lyrics::Unsynced(lines) => {
-            // Plain lyrics carry their own stanza breaks. Only when the
-            // source is one dense block do we separate every line.
-            let dense = !lines.iter().any(|l| l.trim().is_empty());
-            let gap = usize::from(dense);
-            let rows_total: usize = lines.iter().map(|t| text_rows(t)).sum::<usize>()
-                + lines.len().saturating_sub(1) * gap;
-            let mut spans = Vec::with_capacity(lines.len() * 2);
-            for (i, text) in lines.iter().enumerate() {
-                let mut style = Style::default().fg(t.fg);
-                if full_height {
+                if full_height || current == Some(i) {
                     style = style.add_modifier(Modifier::BOLD);
                 }
                 spans.push(Line::from(Span::styled(text.as_str(), style)));
-                if i + 1 < lines.len() && dense {
-                    spans.push(Line::from(""));
-                }
             }
-            (spans, 0, rows_total)
+            LyricRow::Gap => {
+                rows_total += 1;
+                spans.push(Line::from(""));
+            }
         }
-    };
+    }
 
     // The section hugs its content: the block is only as tall as the
     // wrapped lines (capped by the pane), so short lyrics and every
@@ -942,6 +914,247 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect, full_height: bool) {
         para = para.alignment(Alignment::Center);
     }
     f.render_widget(para, inner);
+}
+
+/// One logical lyric line, or the gap a stanza break leaves behind.
+enum LyricRow {
+    Text(String),
+    Gap,
+}
+
+/// Flatten synced or plain lyrics into rows and remember which row is current.
+fn lyric_rows(pos: f64, lyrics: &crate::lyrics::Lyrics) -> (Vec<LyricRow>, Option<usize>) {
+    match lyrics {
+        crate::lyrics::Lyrics::Synced(lines) => {
+            // Bisect the timestamps using mpv's sub-second clock so a line
+            // flips exactly when its timestamp is reached, not up to a
+            // second late from integer truncation.
+            let idx = lines.partition_point(|(ts, _)| *ts <= pos) as i64 - 1;
+            // A blank row only where the song pauses — verses stay
+            // together, sections get air — instead of doubling every line.
+            // Instrumental `♪` markers always close a section.
+            let gap_after: Vec<bool> = (0..lines.len().saturating_sub(1))
+                .map(|i| {
+                    let (ts, text) = &lines[i];
+                    lines[i + 1].0 - ts >= 6.0
+                        || text.trim() == "♪"
+                        || text.trim().is_empty()
+                })
+                .collect();
+            let mut rows = Vec::with_capacity(lines.len() * 2);
+            let mut current = None;
+            for (i, (_, text)) in lines.iter().enumerate() {
+                if i as i64 == idx {
+                    current = Some(rows.len());
+                }
+                rows.push(LyricRow::Text(text.clone()));
+                if gap_after.get(i).copied().unwrap_or(false) {
+                    rows.push(LyricRow::Gap);
+                }
+            }
+            (rows, current)
+        }
+        crate::lyrics::Lyrics::Unsynced(lines) => {
+            // Plain lyrics carry their own stanza breaks. Only when the
+            // source is one dense block do we separate every line.
+            let dense = !lines.iter().any(|l| l.trim().is_empty());
+            let mut rows = Vec::with_capacity(lines.len() * 2);
+            for (i, text) in lines.iter().enumerate() {
+                rows.push(LyricRow::Text(text.clone()));
+                if i + 1 < lines.len() && dense {
+                    rows.push(LyricRow::Gap);
+                }
+            }
+            (rows, None)
+        }
+    }
+}
+
+/// Which palette role a scaled lyric row uses.
+#[derive(Clone, Copy)]
+enum LyricKind {
+    Played,
+    Current,
+    Upcoming,
+}
+
+/// Draw the maximized lyrics through kitty's text sizing protocol (OSC 66).
+/// Each cell becomes a 2×2 block, so a line takes two terminal rows and half
+/// the horizontal cells; the wrapping and scroll maths use those units.
+fn draw_scaled_lyrics(
+    f: &mut Frame,
+    app: &mut App,
+    inner: Rect,
+    rows: &[LyricRow],
+    current: Option<usize>,
+) {
+    if inner.height < 2 || inner.width < 4 {
+        return;
+    }
+    // Keep ratatui's buffer blank so only the scaled text occupies the pane.
+    f.render_widget(Clear, inner);
+
+    let max_cells = (inner.width as usize / 2).max(1);
+    let mut scaled: Vec<(String, LyricKind)> = Vec::with_capacity(rows.len());
+    let mut centre_row = 0usize;
+    for (i, row) in rows.iter().enumerate() {
+        match row {
+            LyricRow::Text(text) => {
+                if current == Some(i) {
+                    centre_row = scaled.len();
+                }
+                let kind = match current {
+                    Some(c) if i < c => LyricKind::Played,
+                    Some(c) if i == c => LyricKind::Current,
+                    _ => LyricKind::Upcoming,
+                };
+                for chunk in wrap_cells(text, max_cells) {
+                    scaled.push((chunk, kind));
+                }
+            }
+            LyricRow::Gap => scaled.push((String::new(), LyricKind::Upcoming)),
+        }
+    }
+
+    let viewport = (inner.height as usize / 2).max(1);
+    let offset = lyrics_row_offset(&mut app.lyrics_scroll, centre_row, scaled.len(), viewport)
+        as usize;
+    app.lyrics_offset = offset as u16;
+
+    let t = &app.theme;
+    let mut out = Vec::new();
+    for (i, (text, kind)) in scaled.iter().enumerate().skip(offset).take(viewport) {
+        if text.is_empty() {
+            continue;
+        }
+        let width = display_width(text) * 2;
+        if width > inner.width as usize {
+            continue;
+        }
+        let y = inner.y + (i - offset) as u16 * 2;
+        if y + 2 > inner.y + inner.height {
+            break;
+        }
+        let x = inner.x + (inner.width - width as u16) / 2;
+        out.extend_from_slice(format!("\x1b[{};{}H", y + 1, x + 1).as_bytes());
+        let color = match kind {
+            LyricKind::Played => t.dim,
+            LyricKind::Current => t.accent,
+            LyricKind::Upcoming => t.fg,
+        };
+        out.extend_from_slice(b"\x1b[1m");
+        out.extend_from_slice(sgr_fg(color).as_bytes());
+        out.extend_from_slice(b"\x1b]66;s=2;");
+        push_safe(&mut out, text);
+        out.push(0x07);
+    }
+    out.extend_from_slice(b"\x1b[0m");
+
+    push_clear(&mut app.lyrics_clear, inner);
+    app.lyrics_output = out;
+}
+
+/// Wrap `text` into chunks that fit `max_cells` unscaled cells. Words are
+/// kept whole where possible; anything longer is split by display width.
+fn wrap_cells(text: &str, max_cells: usize) -> Vec<String> {
+    let max_cells = max_cells.max(1);
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut out = Vec::new();
+    let mut line = String::new();
+    let mut line_w = 0usize;
+    for word in text.split_whitespace() {
+        let word_w = display_width(word);
+        if word_w > max_cells {
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+                line_w = 0;
+            }
+            let mut chunk = String::new();
+            let mut chunk_w = 0usize;
+            for ch in word.chars() {
+                let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if chunk_w > 0 && chunk_w + ch_w > max_cells {
+                    out.push(std::mem::take(&mut chunk));
+                    chunk_w = 0;
+                }
+                chunk.push(ch);
+                chunk_w += ch_w;
+            }
+            if !chunk.is_empty() {
+                line = chunk;
+                line_w = chunk_w;
+            }
+            continue;
+        }
+        let sep = usize::from(line_w > 0);
+        if line_w > 0 && line_w + sep + word_w > max_cells {
+            out.push(std::mem::take(&mut line));
+            line_w = 0;
+        }
+        if line_w > 0 {
+            line.push(' ');
+            line_w += 1;
+        }
+        line.push_str(word);
+        line_w += word_w;
+    }
+    if !line.is_empty() || out.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+/// Erase a rectangle with ECH; this also removes any multicell glyph whose
+/// top row intersects the area.
+fn push_clear(out: &mut Vec<u8>, rect: Rect) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    for y in rect.y..rect.y + rect.height {
+        out.extend_from_slice(
+            format!("\x1b[{};{}H\x1b[{}X", y + 1, rect.x + 1, rect.width).as_bytes(),
+        );
+    }
+}
+
+/// Copy text into an OSC 66 payload, replacing control bytes that would end
+/// the escape early.
+fn push_safe(out: &mut Vec<u8>, text: &str) {
+    for ch in text.chars() {
+        if ch.is_control() {
+            out.push(b' ');
+        } else {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+}
+
+/// A foreground SGR sequence for a ratatui colour.
+fn sgr_fg(color: Color) -> String {
+    match color {
+        Color::Reset => "\x1b[39m".to_string(),
+        Color::Black => "\x1b[30m".to_string(),
+        Color::Red => "\x1b[31m".to_string(),
+        Color::Green => "\x1b[32m".to_string(),
+        Color::Yellow => "\x1b[33m".to_string(),
+        Color::Blue => "\x1b[34m".to_string(),
+        Color::Magenta => "\x1b[35m".to_string(),
+        Color::Cyan => "\x1b[36m".to_string(),
+        Color::Gray => "\x1b[37m".to_string(),
+        Color::DarkGray => "\x1b[90m".to_string(),
+        Color::LightRed => "\x1b[91m".to_string(),
+        Color::LightGreen => "\x1b[92m".to_string(),
+        Color::LightYellow => "\x1b[93m".to_string(),
+        Color::LightBlue => "\x1b[94m".to_string(),
+        Color::LightMagenta => "\x1b[95m".to_string(),
+        Color::LightCyan => "\x1b[96m".to_string(),
+        Color::White => "\x1b[97m".to_string(),
+        Color::Rgb(r, g, b) => format!("\x1b[38;2;{};{};{}m", r, g, b),
+        Color::Indexed(i) => format!("\x1b[38;5;{}m", i),
+    }
 }
 
 /// The row offset to render: a fresh manual scroll (autoscroll pauses

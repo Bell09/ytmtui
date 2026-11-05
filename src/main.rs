@@ -244,6 +244,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Main event loop
     while !app.should_quit {
         app.update();
+        // Scaled lyrics are multicell glyphs; erase the previous block before
+        // ratatui redraws underneath it, then draw the new block afterwards.
+        if !app.lyrics_clear.is_empty() {
+            let mut out = io::stdout();
+            let _ = out.write_all(&app.lyrics_clear);
+            let _ = out.flush();
+            app.lyrics_clear.clear();
+        }
         terminal.draw(|f| ui::draw(f, &mut app))?;
         // Kitty album art travels as escape bytes written after the frame
         // (the image floats above the cells ratatui keeps drawing).
@@ -252,6 +260,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = out.write_all(&app.art_output);
             let _ = out.flush();
             app.art_output.clear();
+        }
+        if !app.lyrics_output.is_empty() {
+            let mut out = io::stdout();
+            let _ = out.write_all(&app.lyrics_output);
+            let _ = out.flush();
+            app.lyrics_output.clear();
         }
 
         if event::poll(Duration::from_millis(100))? {

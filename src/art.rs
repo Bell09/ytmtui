@@ -28,6 +28,29 @@ pub fn graphics_mode() -> Graphics {
     }
 }
 
+/// Does the terminal support kitty's text sizing protocol (OSC 66)?
+/// Kitty only grew it in 0.40, so check the version once; an older kitty
+/// would otherwise swallow the scaled text and leave the pane blank.
+pub fn text_scaling() -> bool {
+    static SUPPORT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORT.get_or_init(|| {
+        if graphics_mode() != Graphics::Kitty {
+            return false;
+        }
+        let Ok(out) = std::process::Command::new("kitty").arg("--version").output() else {
+            return false;
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let Some(ver) = text.split_whitespace().nth(1) else {
+            return false;
+        };
+        let mut parts = ver.split('.');
+        let major = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+        let minor = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+        (major, minor) >= (0, 40)
+    })
+}
+
 /// The terminal's cell size in pixels, read straight from the kernel
 /// (TIOCGWINSZ — an ioctl, not an escape-code query, so no reply can
 /// ever reach the key loop). Album-art geometry uses it so a square
