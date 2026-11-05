@@ -552,7 +552,10 @@ impl YtmApi {
     /// aren't `SUCCEEDED` (ytmusicapi's `check_responses` rule) — fails
     /// with a body snippet so the server's complaint stays readable.
     fn edit_outcome(status: reqwest::StatusCode, body: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(status.is_success(), "HTTP {}", status);
+        if !status.is_success() {
+            let snippet: String = body.trim().chars().take(160).collect();
+            anyhow::bail!("HTTP {}: {}", status, snippet);
+        }
         let trimmed = body.trim();
         if trimmed.is_empty() {
             return Ok(());
@@ -600,7 +603,7 @@ impl YtmApi {
     pub async fn add_to_playlist(&self, playlist_id: &str, video_id: &str) -> anyhow::Result<()> {
         let body = json!({
             "context": context(),
-            "playlistId": playlist_id,
+            "playlistId": edit_playlist_id(playlist_id),
             "actions": [{
                 "action": "ACTION_ADD_VIDEO",
                 "addedVideoId": video_id,
@@ -621,7 +624,7 @@ impl YtmApi {
     ) -> anyhow::Result<()> {
         let body = json!({
             "context": context(),
-            "playlistId": playlist_id,
+            "playlistId": edit_playlist_id(playlist_id),
             "actions": [{
                 "action": "ACTION_REMOVE_VIDEO",
                 "setVideoId": set_video_id,
@@ -769,6 +772,11 @@ impl YtmApi {
             },
         ])
     }
+}
+
+/// Browse ids carry a `VL` prefix, but playlist edits want the bare id.
+fn edit_playlist_id(playlist_id: &str) -> &str {
+    playlist_id.strip_prefix("VL").unwrap_or(playlist_id)
 }
 
 fn context() -> Value {
@@ -1548,6 +1556,13 @@ fn is_duration(s: &str) -> bool {
 mod browse_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn strips_browse_prefix_for_playlist_edits() {
+        assert_eq!(edit_playlist_id("VLPLabc"), "PLabc");
+        assert_eq!(edit_playlist_id("PLabc"), "PLabc");
+        assert_eq!(edit_playlist_id("VLLM"), "LM");
+    }
 
     #[test]
     fn parses_home_shelf_with_collections_and_songs() {
