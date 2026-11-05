@@ -67,8 +67,7 @@ fn sidebar_width(total: u16) -> u16 {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    // The previous frame's scaled-lyrics clear was flushed before this draw;
-    // start a fresh batch for the frame about to render.
+    // Queues are flushed around this draw; start a fresh batch.
     app.lyrics_output.clear();
     app.lyrics_clear.clear();
 
@@ -1050,8 +1049,81 @@ fn draw_scaled_lyrics(
     }
     out.extend_from_slice(b"\x1b[0m");
 
-    push_clear(&mut app.lyrics_clear, inner);
+    // Leave the block alone unless the text, colours, or geometry changed;
+    // clearing and redrawing it every frame makes the lyrics flicker.
+    let area = (f.area().width, f.area().height);
+    let sig = overlay_sig(&out, f.area(), inner);
+    let rect = (inner.x, inner.y, inner.width, inner.height);
+    if app.lyrics_rect == Some(rect) && app.lyrics_sig == Some(sig) {
+        return;
+    }
+    // A resize already cleared the screen; don't erase over the new layout.
+    if app.lyrics_area == Some(area) {
+        if let Some((x, y, width, height)) = app.lyrics_rect {
+            push_clear(
+                &mut app.lyrics_clear,
+                Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+            );
+        }
+    }
     app.lyrics_output = out;
+    app.lyrics_sig = Some(sig);
+    app.lyrics_rect = Some(rect);
+    app.lyrics_area = Some(area);
+}
+
+/// Erase the scaled block before ratatui draws the next frame, once the
+/// maximized lyrics are no longer shown.
+pub fn prepare_lyrics(app: &mut App, area: (u16, u16)) {
+    if app.lyrics_rect.is_none() || scaled_view(app) {
+        return;
+    }
+    if app.lyrics_area == Some(area) {
+        if let Some((x, y, width, height)) = app.lyrics_rect {
+            push_clear(
+                &mut app.lyrics_clear,
+                Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+            );
+        }
+    }
+    app.lyrics_rect = None;
+    app.lyrics_sig = None;
+    app.lyrics_area = None;
+}
+
+/// Is the maximized lyrics overlay active this frame?
+fn scaled_view(app: &App) -> bool {
+    app.now_playing
+        && matches!(&app.lyrics_state, crate::lyrics::LyricsState::Ready(_))
+        && crate::art::text_scaling()
+}
+
+/// Hash the scaled output and its geometry so an identical block can be
+/// left on screen instead of being redrawn.
+fn overlay_sig(out: &[u8], area: Rect, inner: Rect) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    out.hash(&mut h);
+    (
+        area.width,
+        area.height,
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height,
+    )
+        .hash(&mut h);
+    h.finish()
 }
 
 /// Wrap `text` into chunks that fit `max_cells` unscaled cells. Words are

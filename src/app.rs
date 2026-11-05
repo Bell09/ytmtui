@@ -274,6 +274,12 @@ pub struct App {
     pub lyrics_clear: Vec<u8>,
     /// Scaled lyrics (OSC 66) drawn after the frame.
     pub lyrics_output: Vec<u8>,
+    /// Signature and rect of the scaled block currently on screen, so an
+    /// unchanged block is not erased and redrawn every frame.
+    pub lyrics_sig: Option<u64>,
+    pub lyrics_rect: Option<(u16, u16, u16, u16)>,
+    /// Terminal size when the block was drawn; a resize clears the screen.
+    pub lyrics_area: Option<(u16, u16)>,
     art_tx: tokio::sync::mpsc::UnboundedSender<(String, Option<image::RgbaImage>)>,
     art_rx: tokio::sync::mpsc::UnboundedReceiver<(String, Option<image::RgbaImage>)>,
     /// MPRIS visibility for desktop media widgets (Quickshell etc.):
@@ -553,6 +559,9 @@ impl App {
             art_kitty_sent: None,
             lyrics_clear: Vec::new(),
             lyrics_output: Vec::new(),
+            lyrics_sig: None,
+            lyrics_rect: None,
+            lyrics_area: None,
             art_tx,
             art_rx,
             mpris,

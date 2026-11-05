@@ -245,7 +245,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while !app.should_quit {
         app.update();
         // Scaled lyrics are multicell glyphs; erase the previous block before
-        // ratatui redraws underneath it, then draw the new block afterwards.
+        // ratatui redraws underneath it once the scaled view is left.
+        let size = terminal.size()?;
+        ui::prepare_lyrics(&mut app, (size.width, size.height));
         if !app.lyrics_clear.is_empty() {
             let mut out = io::stdout();
             let _ = out.write_all(&app.lyrics_clear);
@@ -261,10 +263,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = out.flush();
             app.art_output.clear();
         }
-        if !app.lyrics_output.is_empty() {
+        // Changed scaled lyrics: clear the old block and paint the new one in
+        // one write so the text never blinks out in between.
+        if !app.lyrics_clear.is_empty() || !app.lyrics_output.is_empty() {
+            let mut buf = Vec::with_capacity(app.lyrics_clear.len() + app.lyrics_output.len());
+            buf.extend_from_slice(&app.lyrics_clear);
+            buf.extend_from_slice(&app.lyrics_output);
             let mut out = io::stdout();
-            let _ = out.write_all(&app.lyrics_output);
+            let _ = out.write_all(&buf);
             let _ = out.flush();
+            app.lyrics_clear.clear();
             app.lyrics_output.clear();
         }
 
