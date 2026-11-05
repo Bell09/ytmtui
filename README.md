@@ -58,14 +58,36 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 
 ## 📦 Install
 
-### Arch Linux (AUR)
-AUR is not supported for now due to external reasons. Install with the script or the release binaries shown here.
+### One-line install (Linux x86_64)
 
 ```bash
-# Arch / CachyOS / Manjaro (AUR) 
-paru -S ytmtui
-yay -S ytmtui
+curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/main/install.sh | sh
 ```
+
+Installs to `~/.local/bin`. Use `sh install.sh --system` for `/usr/local/bin`, or pin a build with `YTMTUI_VERSION=0.1.4`. The script verifies the download checksum before installing.
+
+### Release binaries
+
+Download `ytmtui-x86_64-linux.tar.gz` from the [latest release](https://github.com/Bell09/ytmtui/releases/latest) and put the binary on your `PATH`.
+
+### Arch Linux (pacman repo)
+
+AUR is unavailable right now, so the package is published to a GitHub Pages repo. Add this to `/etc/pacman.conf`:
+
+```ini
+[ytmtui]
+SigLevel = Optional TrustAll
+Server = https://bell09.github.io/ytmtui/$arch
+```
+
+Then install and update normally:
+
+```bash
+sudo pacman -Sy ytmtui
+sudo pacman -Syu          # picks up future releases
+```
+
+Packages are unsigned, hence `TrustAll`.
 
 ### From source
 

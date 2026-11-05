@@ -1,0 +1,165 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (for example v0.1.4)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Linux binary
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Build
+        env:
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          set -eu
+          ver="${TAG#v}"
+          cargo build --release --locked
+          mkdir -p "dist/ytmtui-$ver-x86_64-linux"
+          cp target/release/ytmtui "dist/ytmtui-$ver-x86_64-linux/"
+          cp README.md LICENSE "dist/ytmtui-$ver-x86_64-linux/"
+          tar -C dist -czf dist/ytmtui-x86_64-linux.tar.gz "ytmtui-$ver-x86_64-linux"
+          (cd dist && sha256sum ytmtui-x86_64-linux.tar.gz > ytmtui-x86_64-linux.tar.gz.sha256)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: dist/*
+
+  package:
+    name: Build pacman package
+    needs: build
+    runs-on: ubuntu-22.04
+    container: archlinux:latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: dist
+
+      - name: Package
+        run: |
+          set -eu
+          pacman -Sy --noconfirm --needed libarchive zstd
+
+          ver="${TAG#v}"
+          pkgver="$ver-1"
+          out="ytmtui-$pkgver-x86_64.pkg.tar.zst"
+          root=/tmp/pkg
+          mkdir -p "$root/usr/bin" "$root/usr/share/doc/ytmtui" "$root/usr/share/licenses/ytmtui"
+
+          bin=$(find dist -type f -name ytmtui | head -n 1)
+          doc=$(find dist -type f -name README.md | head -n 1)
+          lic=$(find dist -type f -name LICENSE | head -n 1)
+          install -Dm755 "$bin" "$root/usr/bin/ytmtui"
+          install -Dm644 "$doc" "$root/usr/share/doc/ytmtui/README.md"
+          install -Dm644 "$lic" "$root/usr/share/licenses/ytmtui/LICENSE"
+
+          {
+            echo "pkgname = ytmtui"
+            echo "pkgbase = ytmtui"
+            echo "pkgver = $pkgver"
+            echo "pkgdesc = A full-featured YouTube Music TUI client written in Rust"
+            echo "url = https://github.com/Bell09/ytmtui"
+            echo "builddate = $(date +%s)"
+            echo "packager = Bell09 <176999700+Bell09@users.noreply.github.com>"
+            echo "size = $(du -sb "$root" | cut -f1)"
+            echo "arch = x86_64"
+            echo "license = MIT"
+            echo "depend = mpv"
+            echo "depend = yt-dlp"
+            echo "depend = ffmpeg"
+            echo "depend = sqlite"
+            echo "optdepend = libsecret: Chromium-based browser cookie decryption via secret-tool"
+          } > "$root/.PKGINFO"
+
+          (cd "$root" && LANG=C bsdtar -czf .MTREE --format=mtree \
+            --options='!all,use-set,type,uid,gid,mode,time,size,md5,sha256,link' \
+            .PKGINFO usr)
+
+          mkdir -p repo/x86_64
+          (cd "$root" && bsdtar -cf - .PKGINFO .MTREE usr | zstd -q -19 -o "/tmp/$out")
+          mv "/tmp/$out" repo/x86_64/
+
+          cd repo/x86_64
+          repo-add -q ytmtui.db.tar.gz "$out"
+          rm -f ytmtui.db ytmtui.files
+          cp ytmtui.db.tar.gz ytmtui.db
+          cp ytmtui.files.tar.gz ytmtui.files
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pacman-repo
+          path: repo
+
+  publish:
+    name: Publish release and pacman repo
+    needs: [build, package]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pacman-repo
+          path: repo
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/ytmtui-x86_64-linux.tar.gz
+            dist/ytmtui-x86_64-linux.tar.gz.sha256
+            repo/x86_64/*.pkg.tar.zst
+
+      - name: Publish pacman repo
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./repo
+          keep_files: true
