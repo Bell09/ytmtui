@@ -59,9 +59,10 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 ## 📦 Install
 
 ### Arch Linux (AUR)
+AUR is not supported for now due to external reasons. Install with the script or the release binaries shown here.
 
 ```bash
-# Arch / CachyOS / Manjaro (AUR)
+# Arch / CachyOS / Manjaro (AUR) 
 paru -S ytmtui
 yay -S ytmtui
 ```
