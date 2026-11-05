@@ -876,11 +876,16 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect, full_height: bool) {
                 let style = if (i as i64) < idx {
                     Style::default().fg(t.dim) // played
                 } else if i as i64 == idx {
-                    Style::default()
-                        .fg(t.accent)
-                        .add_modifier(Modifier::BOLD) // current
+                    Style::default().fg(t.accent) // current
                 } else {
                     Style::default().fg(t.fg) // upcoming
+                };
+                // The maximized view bolds the whole block: terminal fonts
+                // have one size, so weight and centring carry the emphasis.
+                let style = if full_height || i as i64 == idx {
+                    style.add_modifier(Modifier::BOLD)
+                } else {
+                    style
                 };
                 spans.push(Line::from(Span::styled(text.as_str(), style)));
                 if gap_after.get(i).copied().unwrap_or(false) {
@@ -898,10 +903,11 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect, full_height: bool) {
                 + lines.len().saturating_sub(1) * gap;
             let mut spans = Vec::with_capacity(lines.len() * 2);
             for (i, text) in lines.iter().enumerate() {
-                spans.push(Line::from(Span::styled(
-                    text.as_str(),
-                    Style::default().fg(t.fg),
-                )));
+                let mut style = Style::default().fg(t.fg);
+                if full_height {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                spans.push(Line::from(Span::styled(text.as_str(), style)));
                 if i + 1 < lines.len() && dense {
                     spans.push(Line::from(""));
                 }
@@ -929,12 +935,13 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect, full_height: bool) {
         inner.height as usize,
     );
     app.lyrics_offset = offset;
-    f.render_widget(
-        Paragraph::new(spans)
-            .wrap(Wrap { trim: false })
-            .scroll((offset, 0)),
-        inner,
-    );
+    let mut para = Paragraph::new(spans)
+        .wrap(Wrap { trim: false })
+        .scroll((offset, 0));
+    if full_height {
+        para = para.alignment(Alignment::Center);
+    }
+    f.render_widget(para, inner);
 }
 
 /// The row offset to render: a fresh manual scroll (autoscroll pauses
