@@ -1142,6 +1142,7 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
         ("n p", "skip"),
         ("L", "like"),
         ("l", "lyrics"),
+        ("m", "max art"),
         ("q", "quit"),
     ];
     let hints: Vec<(&str, &str)> = match app.current_page {
@@ -1155,6 +1156,7 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
             ("esc", "back"),
             ("L", "like"),
             ("l", "lyrics"),
+            ("m", "max art"),
             ("b", "browse"),
             ("q", "quit"),
         ],
@@ -1211,6 +1213,8 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
                 " dl".to_string()
             } else if ultra && *action == "lyrics" {
                 " lyr".to_string()
+            } else if ultra && *action == "max art" {
+                " art".to_string()
             } else {
                 format!(" {}", action)
             };
@@ -1235,11 +1239,12 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
         (area.width as usize).saturating_sub(hint_w + status_gap + 1);
     if compact && status_budget < 8 {
         let (ultra_spans, ultra_w) = build_hints(true, true);
-        let ultra_budget =
-            (area.width as usize).saturating_sub(ultra_w + status_gap + 1);
-        if ultra_budget > status_budget {
+        // Shorten even when the status still cannot fit: a guide that fits
+        // the row is worth more than one clipped mid-word.
+        if ultra_w < hint_w {
             hint_spans = ultra_spans;
-            status_budget = ultra_budget;
+            status_budget =
+                (area.width as usize).saturating_sub(ultra_w + status_gap + 1);
         }
     }
 
