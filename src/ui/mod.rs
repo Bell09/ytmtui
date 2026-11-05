@@ -86,6 +86,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ])
         .split(area);
 
+    if app.now_playing {
+        draw_now_playing(f, app, rows[0], rows[1]);
+        draw_playback_bar(f, app, rows[2]);
+        draw_footer_bar(f, app, rows[3]);
+        if app.picker_open {
+            draw_playlist_picker(f, app, rows[1]);
+        }
+        if app.browse_picker_open {
+            draw_browse_picker(f, app, rows[1]);
+        }
+        return;
+    }
+
     let sidebar_w = sidebar_width(rows[1].width);
     // With the lyrics pane open it claims the right edge — the
     // `[playlists | content | lyrics]` layout, borderless beside the content.
@@ -191,7 +204,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     draw_content(f, app, body[2]);
     if show_lyrics {
-        draw_lyrics(f, app, cols[3]);
+        draw_lyrics(f, app, cols[3], false);
     }
 
     draw_playback_bar(f, app, rows[2]);
@@ -280,6 +293,68 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
 
     // The underline rule below the input.
     f.render_widget(Paragraph::new(top_rule_line(input_w, t)), rows[1]);
+}
+
+/// Maximized "now playing": the usual title and search rows on top, then a
+/// large square cover on the left and the lyrics pane on the right.
+fn draw_now_playing(f: &mut Frame, app: &mut App, title: Rect, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // search input + rule
+            Constraint::Min(4),
+        ])
+        .split(area);
+    draw_header(f, app, title, rows[0]);
+
+    let body = rows[1];
+    if body.width < 24 || body.height < 4 {
+        return;
+    }
+    // Give the cover the width a square needs for the body height, but
+    // leave the lyrics a readable column on narrow terminals.
+    let min_lyrics = 24.min(body.width / 2);
+    let (cell_w, cell_h) = crate::art::cell_size();
+    let square_w = ((f32::from(body.height) * cell_h / cell_w).round() as u16).saturating_add(2);
+    let art_w = square_w
+        .max(body.width / 2)
+        .min(body.width.saturating_sub(min_lyrics + 1));
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(art_w),
+            Constraint::Length(1), // gap between cover and lyrics
+            Constraint::Min(10),
+        ])
+        .split(body);
+
+    draw_large_art(f, app, cols[0]);
+    draw_lyrics(f, app, cols[2], true);
+}
+
+/// Centre the biggest square cover that fits, then use the normal art
+/// renderer for it.
+fn draw_large_art(f: &mut Frame, app: &mut App, area: Rect) {
+    let (cell_w, cell_h) = crate::art::cell_size();
+    let max_w = area.width.saturating_sub(4);
+    let max_h = area.height.saturating_sub(4);
+    let from_height = (f32::from(max_h) * cell_h / cell_w).floor() as u16;
+    let core = max_w.min(from_height.max(1)) & !1;
+    if core < 4 {
+        draw_album_art(f, app, area);
+        return;
+    }
+    let rows = ((f32::from(core) * cell_w / cell_h).round() as u16)
+        .max(1)
+        .min(area.height);
+    // `draw_album_art` keeps one spare column on each side of the square.
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(core + 2) / 2,
+        y: area.y + area.height.saturating_sub(rows) / 2,
+        width: core + 2,
+        height: rows,
+    };
+    draw_album_art(f, app, rect);
 }
 
 /// The always-visible Library playlist list. Rows carry a kind glyph, the
@@ -414,7 +489,10 @@ fn draw_album_art(f: &mut Frame, app: &mut App, area: Rect) {
                     let core = w.saturating_sub(2);
                     let px = crate::art::fit_square(src, 720, 720);
                     if let Some(png) = crate::art::png_bytes(&px) {
-                        app.art_output = crate::art::kitty_transfer(
+                        // Drop the old placement first so switching track
+                        // or layout size never leaves a ghost cover behind.
+                        app.art_output = crate::art::kitty_cleanup();
+                        app.art_output.extend(crate::art::kitty_transfer(
                             area.x + (w - core) / 2,
                             area.y,
                             core,
@@ -422,7 +500,7 @@ fn draw_album_art(f: &mut Frame, app: &mut App, area: Rect) {
                             720,
                             720,
                             &png,
-                        );
+                        ));
                         app.art_kitty_sent = Some(key);
                     }
                 }
@@ -711,7 +789,7 @@ fn draw_playback_bar(f: &mut Frame, app: &App, area: Rect) {
 /// with the current one highlighted and the view scrolled to centre it.
 /// The section hugs its content — those rows only, never stretched to
 /// the pane's full height.
-fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
+fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect, full_height: bool) {
     let t = &app.theme;
 
     if area.height == 0 || area.width == 0 {
@@ -837,7 +915,11 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect) {
     // state leave the rest of the column free instead of padding out
     // to full height.
     let inner = Rect {
-        height: rows_total.min(inner.height as usize) as u16,
+        height: if full_height {
+            inner.height
+        } else {
+            rows_total.min(inner.height as usize) as u16
+        },
         ..inner
     };
     let offset = lyrics_row_offset(

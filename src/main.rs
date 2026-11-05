@@ -373,6 +373,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // Toggle the lyrics pane on the right.
                     KeyCode::Char('l') => app.toggle_lyrics(),
+                    // Maximized cover + lyrics view.
+                    KeyCode::Char('m') => app.toggle_now_playing(),
                     // Repeat / shuffle.
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.cycle_repeat()
@@ -392,14 +394,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Scroll the lyrics pane while it's open, otherwise the
                     // Library detail pane.
                     KeyCode::PageDown => {
-                        if app.lyrics_open {
+                        if app.lyrics_open || app.now_playing {
                             app.scroll_lyrics(10);
                         } else if app.current_page == Page::Library {
                             app.scroll_details(1);
                         }
                     }
                     KeyCode::PageUp => {
-                        if app.lyrics_open {
+                        if app.lyrics_open || app.now_playing {
                             app.scroll_lyrics(-10);
                         } else if app.current_page == Page::Library {
                             app.scroll_details(-1);
@@ -407,7 +409,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // Back from a collection; from search, back to the library.
                     KeyCode::Esc => {
-                        if app.current_page == Page::Browse {
+                        if app.now_playing {
+                            app.now_playing = false;
+                        } else if app.current_page == Page::Browse {
                             app.leave_browse();
                         } else if app.current_page == Page::Playlist {
                             app.current_page = app.playlist_return_page;

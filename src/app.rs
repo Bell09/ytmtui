@@ -288,6 +288,8 @@ pub struct App {
     pub details_viewport: u16,
     /// Lyrics pane (the right sidebar), toggled with `l`.
     pub lyrics_open: bool,
+    /// Maximized cover + lyrics view, toggled with `m`.
+    pub now_playing: bool,
     /// Video id the current lyrics state belongs to.
     pub lyrics_track: Option<String>,
     pub lyrics_state: crate::lyrics::LyricsState,
@@ -555,6 +557,7 @@ impl App {
             details_scroll_max: 0,
             details_viewport: 0,
             lyrics_open: false,
+            now_playing: false,
             lyrics_track: None,
             lyrics_state: crate::lyrics::LyricsState::default(),
             lyrics_scroll: None,
@@ -2022,6 +2025,16 @@ impl App {
         }
     }
 
+    /// `m`: swap the library/content view for a large cover and lyrics.
+    pub fn toggle_now_playing(&mut self) {
+        self.now_playing = !self.now_playing;
+        if self.now_playing {
+            self.lyrics_scroll = None;
+            self.lyrics_offset = 0;
+            self.sync_lyrics();
+        }
+    }
+
     /// `L`: like the currently-playing song — cycle between liked and no
     /// rating (a disliked track lands on LIKE). The flip is optimistic: the
     /// playback bar's heart and the status message change on the keypress
@@ -2171,7 +2184,7 @@ impl App {
 
     /// Start (or reuse) the background lyrics fetch for the pane.
     fn sync_lyrics(&mut self) {
-        if !self.lyrics_open {
+        if !self.lyrics_open && !self.now_playing {
             return;
         }
         let Some(track) = self.current_track.clone() else {
@@ -2201,7 +2214,7 @@ impl App {
     /// PgUp/PgDn on the open lyrics pane: shift the view by `delta` rows
     /// from the currently rendered offset; autoscroll resumes after 3s.
     pub fn scroll_lyrics(&mut self, delta: i32) {
-        if !self.lyrics_open {
+        if !self.lyrics_open && !self.now_playing {
             return;
         }
         let base = self.lyrics_offset;
