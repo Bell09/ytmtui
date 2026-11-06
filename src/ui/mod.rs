@@ -852,9 +852,8 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect, full_height: bool) {
                     centre_row = rows_total;
                 }
                 rows_total += text_rows(text);
-                // Fade fast: neighbours of the current line stay bright and
-                // further lines drop to dim within a few rows, so the eye
-                // tracks the line being sung instead of the whole block.
+                // Current line in the accent, past lines dim, upcoming in
+                // `fg` — three flat colours, no fade.
                 let dist = current.map_or(0, |c| i as i32 - c as i32);
                 let mut style = Style::default().fg(lyric_colour(t, dist));
                 // The maximized view bolds the whole block: terminal fonts
@@ -958,31 +957,14 @@ fn lyric_rows(pos: f64, lyrics: &crate::lyrics::Lyrics) -> (Vec<LyricRow>, Optio
 /// unit so verses read as separate blocks.
 const SCALED_LINE_H: usize = 3;
 
-/// Blend two colours; non-RGB values snap to `b` past the midpoint.
-fn blend(a: Color, b: Color, t: f32) -> Color {
-    match (a, b) {
-        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
-            let t = t.clamp(0.0, 1.0);
-            Color::Rgb(
-                (r1 as f32 + (r2 as f32 - r1 as f32) * t).round() as u8,
-                (g1 as f32 + (g2 as f32 - g1 as f32) * t).round() as u8,
-                (b1 as f32 + (b2 as f32 - b1 as f32) * t).round() as u8,
-            )
-        }
-        _ if t < 0.5 => a,
-        _ => b,
-    }
-}
-
-/// Fast fade: the current line glows in the accent, its nearest neighbours
-/// stay bright, and anything further out drops to dim within a few lines.
+/// Current line in the accent, past lines dim, upcoming lines in `fg`.
 fn lyric_colour(t: &crate::theme::Theme, dist: i32) -> Color {
     if dist == 0 {
         t.accent
-    } else if dist > 0 {
-        blend(t.fg, t.dim, (dist - 1) as f32 / 3.0)
+    } else if dist < 0 {
+        t.dim
     } else {
-        blend(t.fg, t.dim, (-dist - 1) as f32 / 1.5)
+        t.fg
     }
 }
 
