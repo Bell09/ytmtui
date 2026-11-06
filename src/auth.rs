@@ -34,8 +34,8 @@ pub fn config_dir() -> PathBuf {
     }
 }
 
-/// The app was called `ytm-tui` before; move that config directory across
-/// once so the rename doesn't cost the user their login or download list.
+/// The app was called `ytm-tui` before; move its config directory once so the
+/// rename keeps the user's login and download list.
 fn migrate_legacy() {
     let Some(dirs) = ProjectDirs::from("", "", "ytmtui") else {
         return;
@@ -139,12 +139,12 @@ fn strip_decoded_blocks(lines: Vec<String>) -> Vec<String> {
     out
 }
 
-/// Pre-process raw headers into `Name: Value` lines. Handles the three Chrome
-/// DevTools copy formats plus standard `Name: Value` lines.
+/// Normalize raw headers into `Name: Value` lines. Handles the three Chrome
+/// DevTools copy formats plus standard lines.
 pub fn normalize_raw_headers(raw: &str) -> String {
     // Terminals in bracketed-paste mode wrap pasted text in these markers;
-    // they are not part of the data and would otherwise be mistaken for the
-    // ESC-separated DevTools format below.
+    // they aren't data and would confuse the ESC-separated DevTools format
+    // below.
     let raw = raw.replace("\x1b[200~", "").replace("\x1b[201~", "");
     let raw = raw.as_str();
 
@@ -254,8 +254,8 @@ fn save_headers(headers: &Map<String, Value>) -> anyhow::Result<()> {
     let payload = serde_json::to_string_pretty(&Value::Object(headers.clone()))?;
     let path = auth_path();
     fs::write(&path, payload)?;
-    // Session cookies are credentials: keep them owner-only (0600) rather
-    // than leaving them at the umask default, which is usually world-readable.
+    // Session cookies are credentials: keep them owner-only (0600), not at the
+    // umask default, which is usually world-readable.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -268,9 +268,8 @@ fn save_headers(headers: &Map<String, Value>) -> anyhow::Result<()> {
 // Account probing
 // ---------------------------------------------------------------------------
 
-/// `Ok(Some(name))` = valid account; `Ok(None)` = server reachable but no
-/// usable account (e.g. an expired/invalid session); `Err` = could not reach
-/// the server at all.
+/// `Ok(Some(name))` = valid account, `Ok(None)` = server reachable but no
+/// usable account (e.g. expired session), `Err` = server unreachable.
 async fn account_name(headers: &Map<String, Value>) -> Result<Option<String>, ()> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(5))
@@ -280,9 +279,9 @@ async fn account_name(headers: &Map<String, Value>) -> Result<Option<String>, ()
     account_name_with(&client, headers).await
 }
 
-/// The same probe on a caller-supplied client. The TUI passes its API client
-/// so the account lookup shares the connection pool with the library request
-/// instead of opening a second TLS connection at startup.
+/// Same probe on a caller-supplied client. The TUI passes its API client so
+/// the lookup shares the connection pool instead of opening another TLS
+/// connection at startup.
 pub(crate) async fn account_name_with(
     client: &reqwest::Client,
     headers: &Map<String, Value>,
@@ -312,7 +311,7 @@ pub(crate) async fn account_name_with(
 
     let resp = req.send().await.map_err(|_| ())?;
     // A reachable server is not a network failure: an unauthenticated request
-    // returns a non-JSON (401/consent) body, which simply means "no account".
+    // returns a non-JSON (401/consent) body, which just means "no account".
     let text = resp.text().await.map_err(|_| ())?;
     match serde_json::from_str::<Value>(&text) {
         Ok(value) => Ok(find_account_name(&value)),
@@ -542,8 +541,8 @@ fn setup_manual() -> anyhow::Result<bool> {
                     break;
                 }
                 lines.push(trimmed.to_string());
-                // A single line that already carries the cookie credentials is
-                // a complete paste (bare cookie value or a lone cookie: line).
+                // A single line with cookie credentials is a complete paste
+                // (bare cookie value or lone cookie: line).
                 if lines.len() == 1 && looks_like_cookie_line(trimmed) {
                     break;
                 }
@@ -577,7 +576,7 @@ fn setup_manual() -> anyhow::Result<bool> {
             headers.insert(k, v);
         }
     } else if raw.contains("SAPISID=") {
-        // The user pasted only the Cookie value (no header name).
+        // User pasted only the Cookie value (no header name).
         let cookie = raw.split_whitespace().collect::<Vec<_>>().join("");
         headers.insert("cookie".into(), json!(cookie));
     } else {
@@ -598,7 +597,7 @@ fn setup_manual() -> anyhow::Result<bool> {
         return Ok(false);
     }
 
-    // Compute authorization from SAPISID when the paste didn't include one.
+    // Derive authorization from SAPISID when the paste didn't include one.
     if !headers.contains_key("authorization") {
         if let Some(cookie) = headers.get("cookie").and_then(|v| v.as_str()) {
             if let Some(sapisid) = sapisid_from_cookie(cookie) {

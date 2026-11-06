@@ -1,21 +1,17 @@
-//! Offline mode: the local music folder, the registry that remembers which
-//! video ids are saved on disk, and the scan that turns a folder into a
-//! library.
+//! Offline mode: the local music folder, the registry of saved video ids, and
+//! the scan that turns a folder into a library.
 //!
-//! Three things live here because they answer one question — *what is
-//! available without a network?*:
+//! Three pieces answer one question — *what is available without a network?*:
 //!
-//! * [`music_dir`] — where files go, from `config.json`, else
-//!   `$XDG_MUSIC_DIR`, else `~/Music`.
-//! * [`Registry`] — `downloads.json`: video id → file on disk, with the
-//!   metadata we already knew at download time. This is what makes a
-//!   check mark possible for a track that is still showing as an online
-//!   row.
-//! * [`scan`] — walk the folder and build [`Track`]s for every audio file
-//!   it holds, enriching any the registry already knows.
+//! * [`music_dir`] — `config.json`'s `music_dir`, else `$XDG_MUSIC_DIR`, else
+//!   `~/Music`.
+//! * [`Registry`] — `downloads.json`: video id → file, with the metadata known
+//!   at download time. That is what lets an online row show a check mark.
+//! * [`scan`] — walk the folder and build [`Track`]s for its audio files,
+//!   enriching any the registry knows.
 //!
-//! Local track ids carry a [`LOCAL_PREFIX`] so playback, artwork and the
-//! like-toggle can tell a file on disk apart from a YouTube video id.
+//! Local ids carry [`LOCAL_PREFIX`] so playback, art and the like-toggle can
+//! tell a disk file from a YouTube video id.
 
 use crate::models::{Playlist, PlaylistKind, Track};
 use serde::{Deserialize, Serialize};
@@ -25,7 +21,7 @@ use std::path::{Path, PathBuf};
 /// Marks a track id as a file on disk rather than a YouTube video id.
 pub const LOCAL_PREFIX: &str = "local:";
 
-/// Audio extensions worth picking up while scanning.
+/// Audio extensions picked up while scanning.
 const AUDIO_EXT: [&str; 9] = [
     "mp3", "flac", "ogg", "opus", "m4a", "aac", "wav", "webm", "mp4",
 ];
@@ -63,11 +59,11 @@ fn home_dir() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
 }
 
-/// Where offline music lives: `music_dir` in `config.json` if set, else
+/// Where offline music lives: `music_dir` in `config.json`, else
 /// `$XDG_MUSIC_DIR`, else `~/Music`.
 ///
-/// The file is read on every call so a config edit is picked up without a
-/// restart — it is two `stat`s and a tiny JSON parse.
+/// Read on every call so config edits apply without a restart — it is two
+/// `stat`s and a tiny JSON parse.
 pub fn music_dir() -> PathBuf {
     if let Ok(text) = std::fs::read_to_string(crate::auth::config_dir().join("config.json")) {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -86,9 +82,9 @@ pub fn music_dir() -> PathBuf {
     home_dir().join("Music")
 }
 
-/// One saved track: the video id it came from and where it now lives, plus
-/// the metadata the API already gave us (so an offline row keeps its real
-/// artist, album and duration without re-reading tags).
+/// One saved track: where the video id now lives on disk, plus the metadata the
+/// API already gave us (so offline rows keep real artist, album and duration
+/// without re-reading tags).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
     /// The YouTube video id it was downloaded from.
@@ -101,9 +97,8 @@ pub struct Entry {
     pub album: Option<String>,
     #[serde(default)]
     pub duration: Option<String>,
-    /// A cover file sitting beside the track, if one exists — `d` embeds
-    /// its cover into the audio instead of writing one, so this only ends
-    /// up set for a cover the user placed by hand.
+    /// Cover file beside the track, if any — `d` embeds the cover in the audio,
+    /// so this is only set for a cover the user placed by hand.
     #[serde(default)]
     pub art: Option<String>,
     /// Seconds since the epoch, newest first.
@@ -113,8 +108,8 @@ pub struct Entry {
 
 /// The `downloads.json` manifest, indexed by video id and by path.
 ///
-/// Prunes entries whose file has since been deleted, so a check mark never
-/// survives a file the user removed behind the app's back.
+/// Prunes entries whose file was deleted, so a check mark never outlives a file
+/// the user removed behind the app's back.
 pub struct Registry {
     entries: HashMap<String, Entry>,
     by_path: HashMap<PathBuf, String>,
@@ -129,9 +124,8 @@ impl Registry {
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
 
-        // Drop anything whose file is gone, noting whether anything moved —
-        // otherwise a first run would create an empty manifest just to say
-        // it has nothing in it.
+        // Drop entries whose file is gone; note whether anything changed, so a
+        // first run doesn't create an empty manifest just to say it has nothing.
         let before = entries.len();
         entries.retain(|_, e| Path::new(&e.path).is_file());
         let pruned = entries.len() != before;
@@ -177,11 +171,10 @@ impl Registry {
 
 /// Build a track for a file on disk.
 ///
-/// The registry wins when it knows the file — a `d` download stores the
-/// artist, album and duration the API reported, which we would otherwise
-/// have to probe out of the file. Loose files fall back to the path layout
-/// (`Artist/Album/01 - Title.ext`), which is how hand-copied libraries are
-/// usually shaped.
+/// The registry wins when it knows the file: a `d` download stored the artist,
+/// album and duration the API reported, which we'd otherwise have to probe from
+/// tags. Loose files fall back to the path layout (`Artist/Album/01 -
+/// Title.ext`), the usual shape of hand-copied libraries.
 fn track_for(path: &Path, registry: &Registry, root: &Path) -> Track {
     if let Some(e) = registry.entry_for_path(path) {
         return Track {
@@ -190,8 +183,8 @@ fn track_for(path: &Path, registry: &Registry, root: &Path) -> Track {
             artist: e.artist.clone(),
             album: e.album.clone(),
             duration: e.duration.clone(),
-            // A cover file beside the track, when there is one. Otherwise
-            // the art is embedded in the audio and read from it at render.
+            // Cover file beside the track if present; otherwise the art is
+            // embedded in the audio and read at render time.
             thumbnail_url: e
                 .art
                 .clone()
@@ -208,8 +201,8 @@ fn track_for(path: &Path, registry: &Registry, root: &Path) -> Track {
         title,
         artist,
         album,
-        // Unknown without reading tags; probing every file at scan time
-        // would stall startup, and downloaded files never land here.
+        // Unknown without reading tags, and probing every file at scan time
+        // would stall startup. Downloaded files never land here.
         duration: None,
         thumbnail_url: sidecar_art(path),
         downloaded: true,
@@ -218,18 +211,18 @@ fn track_for(path: &Path, registry: &Registry, root: &Path) -> Track {
     }
 }
 
-/// The leading track-number pattern, compiled once for the whole scan.
+/// Leading track-number pattern, compiled once per scan.
 fn track_number_re() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| regex::Regex::new(r"^\s*\d{1,3}\s*[-._)]\s*").expect("static pattern"))
 }
 
-/// Split a path into title/artist/album using the folder layout:
-/// `Music/Artist/Album/01 - Title.ext`. Missing levels simply collapse.
+/// Split a path into title/artist/album from `Music/Artist/Album/01 -
+/// Title.ext`; missing levels collapse.
 ///
 /// `root` is the music folder every scanned path came from, so stripping it
-/// needs no `canonicalize` per file — the paths are built by joining onto it
-/// in the first place, and can't have drifted.
+/// needs no per-file `canonicalize`: paths were built by joining onto it and
+/// can't have drifted.
 fn derive_metadata(path: &Path, root: &Path) -> (String, String, Option<String>) {
     let stem = path
         .file_stem()
@@ -263,7 +256,7 @@ fn derive_metadata(path: &Path, root: &Path) -> (String, String, Option<String>)
     }
 }
 
-/// The cover sitting next to an audio file, if one exists.
+/// Cover sitting next to an audio file, if any.
 fn sidecar_art(path: &Path) -> Option<String> {
     let dir = path.parent()?;
     let stem = path.file_stem()?;
@@ -324,8 +317,8 @@ pub fn scan(music_dir: &Path, registry: &Registry) -> Vec<Track> {
         .collect()
 }
 
-/// The folders holding local music, as sidebar entries. The first entry is
-/// "All tracks", so an unorganised folder is still browsable.
+/// Local music folders as sidebar entries, with "All tracks" first so an
+/// unorganised folder is still browsable.
 pub fn folders(tracks: &[Track], music_dir: &Path) -> Vec<Playlist> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut names: Vec<String> = Vec::new();
@@ -401,8 +394,8 @@ pub fn tracks_for(tracks: &[Track], playlist_id: &str, music_dir: &Path) -> Vec<
         .collect()
 }
 
-/// Make a string safe to use as a file or directory name — `Artist/Album/
-/// Title` — without losing what made it recognisable.
+/// Make a string safe as a file or directory name (`Artist/Album/Title`)
+/// without losing what made it recognisable.
 fn sanitise(text: &str) -> String {
     let cleaned: String = text
         .chars()
@@ -424,12 +417,12 @@ fn sanitise(text: &str) -> String {
 
 /// Run yt-dlp once for `template`, converting to mp3.
 ///
-/// `embed` adds `--embed-thumbnail`, which puts the cover *inside* the file
-/// so other players show it too. There is deliberately no `--write-thumbnail`
-/// — a download must leave exactly one file behind, the audio. yt-dlp reaches
-/// for ffmpeg when the Python tag library isn't installed, so embedding still
-/// works without it; if it fails after the audio is already on disk the
-/// caller retries without it rather than lose the song.
+/// `embed` adds `--embed-thumbnail`, putting the cover *inside* the file so
+/// other players show it too. There is deliberately no `--write-thumbnail`: a
+/// download must leave exactly one file behind, the audio. yt-dlp reaches for
+/// ffmpeg when the Python tag library isn't installed, so embedding still
+/// works; if it fails after the audio is on disk, the caller retries without it
+/// rather than lose the song.
 fn ytdlp(
     url: &str,
     template: &str,
@@ -439,10 +432,10 @@ fn ytdlp(
     let mut cmd = std::process::Command::new("yt-dlp");
     cmd.args(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
         .args(["--no-playlist", "--no-warnings"])
-        // Machine-readable progress on one line per update, so the row can
-        // show a live percentage instead of an indefinite "Downloading…".
-        // The part before the colon names the template; only the text after
-        // it is printed, hence the explicit `PCT` marker.
+        // Machine-readable progress, one line per update, so the row can show
+        // a live percentage instead of an indefinite "Downloading…". The prefix
+        // before the colon names the template; only the text after is printed,
+        // hence the `PCT` marker.
         .args([
             "--newline",
             "--progress-template",
@@ -458,8 +451,8 @@ fn ytdlp(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
-    // Drain stderr on its own thread: a chatty ffmpeg failure must not fill
-    // the pipe and stall the child while we read progress.
+    // Drain stderr on its own thread: a chatty ffmpeg failure must not fill the
+    // pipe and stall the child while we read progress.
     let stderr = child.stderr.take().map(|mut pipe| {
         std::thread::spawn(move || {
             use std::io::Read;
@@ -480,8 +473,8 @@ fn ytdlp(
                 continue;
             };
             let pct = pct.round().clamp(0.0, 100.0) as u8;
-            // yt-dlp repeats the same percentage on every tick; the UI
-            // only needs one update per whole percent.
+            // yt-dlp repeats the same percentage every tick; the UI needs one
+            // update per whole percent.
             if pct != last {
                 last = pct;
                 progress(pct);
@@ -502,14 +495,12 @@ fn ytdlp(
     anyhow::bail!("{}", text)
 }
 
-/// Download one song into the music folder, its cover embedded in the
-/// audio file.
+/// Download one song into the music folder, cover embedded in the audio.
 ///
 /// Layout is `Artist/Album/Title.mp3` (`Artist/Title.mp3` when the album is
-/// unknown), which [`scan`] can read back with no metadata of its own, and
-/// which happens to be how hand-copied libraries are already shaped. The
-/// returned [`Entry`] is what makes the row show a check mark later: it ties
-/// the video id to the file that now exists.
+/// unknown), which [`scan`] can read back with no metadata of its own and which
+/// matches hand-copied libraries. The returned [`Entry`] ties the video id to
+/// the new file, so the row can show a check mark.
 ///
 /// `progress` is called from the blocking download thread with yt-dlp's
 /// percentage (0–100), so the row can show how far along it is.
@@ -525,7 +516,7 @@ where
     let artist = sanitise(&track.artist);
     let stem = sanitise(&track.title);
     // A known album nests under it; an unknown one doesn't invent a folder —
-    // `Artist/Title.mp3` is how a single actually sits on disk.
+    // `Artist/Title.mp3` is how a single sits on disk.
     let out_dir = match track.album.as_deref().filter(|a| !a.trim().is_empty()) {
         Some(album) => music_dir.join(&artist).join(sanitise(album)),
         None => music_dir.join(&artist),
@@ -534,15 +525,15 @@ where
     let template = out_dir.join(format!("{}.%(ext)s", stem));
     let audio = out_dir.join(format!("{}.mp3", stem));
 
-    // An interrupted download leaves its file behind but never reached the
-    // registry. Adopting it beats fetching the same bytes again — and it
-    // means `d` after a crash repairs the check mark instead of erroring.
+    // An interrupted download leaves its file behind but never reaches the
+    // registry. Adopting it beats fetching the bytes again, and lets `d` after a
+    // crash repair the check mark instead of erroring.
     if audio.is_file() {
         return Ok(entry_for(audio, track));
     }
 
-    // yt-dlp and ffmpeg are blocking child processes; keep them off the
-    // async runtime's threads so frames keep drawing while it downloads.
+    // yt-dlp and ffmpeg are blocking child processes; keep them off the async
+    // runtime's threads so frames keep drawing while it downloads.
     let progress = std::sync::Arc::new(progress);
     let attempt = {
         let url = url.to_string();
@@ -571,9 +562,8 @@ where
 
     // `-x --audio-format mp3` plus the template fixes the name exactly.
     if !audio.is_file() {
-        // A title colliding with an existing file can leave yt-dlp nothing
-        // to rename; take the newest mp3 it wrote rather than fail a
-        // download that actually succeeded.
+        // A title collision can leave yt-dlp nothing to rename; take the newest
+        // mp3 it wrote rather than fail a download that actually succeeded.
         let newest = std::fs::read_dir(&out_dir)?
             .flatten()
             .map(|e| e.path())
@@ -589,9 +579,9 @@ where
 
 /// Build the registry entry for a freshly downloaded file.
 ///
-/// There is no image to record — the cover was embedded into the audio —
-/// but a `cover.jpg` the user put beside the track by hand is still worth
-/// remembering, since it renders without having to open the file.
+/// No image is recorded — the cover was embedded in the audio — but a
+/// `cover.jpg` the user placed beside the track is still worth remembering,
+/// since it renders without opening the file.
 fn entry_for(path: PathBuf, track: &Track) -> Entry {
     Entry {
         id: track.id.clone(),

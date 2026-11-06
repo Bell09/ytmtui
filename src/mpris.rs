@@ -1,10 +1,9 @@
 //! MPRIS — the freedesktop `org.mpris.MediaPlayer2` D-Bus service.
 //!
-//! Desktop media widgets (Quickshell, playerctld, panel bars) discover
-//! players through this bus; without it ytmtui is invisible to them.
-//! The UI loop mirrors playback into [`MprisState`] on every tick and
-//! diffs become `PropertiesChanged` / `Seeked` signals; widget actions
-//! arrive as [`MprisCmd`]s on a channel the loop drains.
+//! Desktop media widgets (Quickshell, playerctld, panel bars) discover players
+//! through this bus; without it ytmtui is invisible. Each tick the UI loop
+//! mirrors playback into [`MprisState`]; diffs become `PropertiesChanged` /
+//! `Seeked` signals, and widget actions arrive as [`MprisCmd`]s on a channel.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -29,7 +28,7 @@ pub enum MprisCmd {
     SetPosition(i64),
 }
 
-/// The playback picture advertised over D-Bus.
+/// Playback picture advertised over D-Bus.
 #[derive(Default)]
 pub struct MprisState {
     pub status: String,
@@ -42,7 +41,7 @@ pub struct MprisState {
     pub pos_us: i64,
 }
 
-/// One tick's worth of playback truth, fed to [`MprisHandle::apply`].
+/// One tick of playback truth, fed to [`MprisHandle::apply`].
 pub struct Snapshot<'a> {
     pub status: &'a str,
     pub track_key: &'a str,
@@ -54,8 +53,8 @@ pub struct Snapshot<'a> {
     pub pos_us: i64,
 }
 
-/// An `OwnedValue` for anything that converts into a D-Bus value
-/// (strings, arrays of strings, …). Only exotic types can fail here.
+/// `OwnedValue` for anything convertible to a D-Bus value (strings, string
+/// arrays, …). Only exotic types can fail.
 fn ov<T: Into<Value<'static>>>(v: T) -> OwnedValue {
     OwnedValue::try_from(v.into()).expect("basic D-Bus values convert infallibly")
 }
@@ -68,7 +67,7 @@ fn set_string(dst: &mut String, value: &str) {
     }
 }
 
-/// Everything the D-Bus side shares with the UI loop.
+/// Everything shared between the D-Bus side and the UI loop.
 #[derive(Default)]
 pub struct MprisHandle {
     state: RwLock<MprisState>,
@@ -116,20 +115,19 @@ impl MprisHandle {
         m
     }
 
-    /// Mirror this tick's state; push signals for whatever changed.
+    /// Mirror this tick's state and emit signals for whatever changed.
     pub fn apply(&self, s: Snapshot<'_>) {
         let (track_changed, status_changed, seek_pos) = {
             let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
             let track_changed = st.track_key != s.track_key;
             let status_changed = st.status != s.status;
-            // A discontinuity beyond normal ticking means a seek (or a
-            // track cut, handled by the id change below).
+            // A jump beyond normal ticking means a seek (or a track cut,
+            // handled by the id change below).
             let jumped = !track_changed
                 && (s.pos_us + 1_500_000 < st.pos_us || s.pos_us > st.pos_us + 2_000_000);
-            // These fields are usually stable, so only rewrite the strings
-            // when they actually change. The D-Bus mirror is fed at 10Hz;
-            // unconditionally reallocating six strings every tick is pure
-            // churn while a song is playing.
+            // These fields are usually stable, so rewrite the strings only when
+            // changed. The mirror runs at 10Hz; reallocating six strings every
+            // tick is pure churn while a song plays.
             set_string(&mut st.status, s.status);
             set_string(&mut st.track_key, s.track_key);
             set_string(&mut st.title, s.title);
@@ -189,8 +187,8 @@ impl MprisHandle {
     }
 }
 
-/// A valid D-Bus object path for a track id (ids may contain `-`, which
-/// object paths do not allow).
+/// Valid D-Bus object path for a track id (ids may contain `-`, which object
+/// paths don't allow).
 fn track_path(key: &str) -> String {
     let safe: String = key
         .chars()
@@ -330,8 +328,8 @@ impl Player {
     }
 }
 
-/// Claim `org.mpris.MediaPlayer2.ytmtui` on the session bus and serve
-/// both interfaces from one object. Fails only when there is no bus.
+/// Claim `org.mpris.MediaPlayer2.ytmtui` on the session bus and serve both
+/// interfaces from one object. Fails only when there's no bus.
 pub async fn serve(
     handle: Arc<MprisHandle>,
     tx: UnboundedSender<MprisCmd>,

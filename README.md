@@ -40,8 +40,8 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 | 🔐 **Auth wizard** | `ytmtui setup` auto-detects your browser and extracts cookies |
 | 🔍 **Innertube search** | Signed-in search with Top / Songs / Albums / Artists / Playlists filters |
 | 📚 **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
-| ✨ **For you** | Personal mixes, trending songs, community playlists, moods and genres on one page |
-| ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, buffering state · `m` for a maximized cover + synced lyrics view |
+| ✨ **For you** | Personal mixes, subscriptions, trending songs, community playlists, activity mixes, moods, genres, and country/global charts |
+| ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, next-track prefetch, automatic retry/skip on stream failures · `m` for a maximized cover + synced lyrics view |
 | 💫 **Extras** | Synced lyrics, queue, offline mode, like/unlike, MP3 download with cover art and `.lrc` lyrics |
 
 ---
@@ -67,7 +67,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/main/install.sh | sh
 ```
 
-Installs to `~/.local/bin`. Use `sh install.sh --system` for `/usr/local/bin`, or pin a build with `YTMTUI_VERSION=0.1.4`. The script verifies the download checksum before installing.
+Installs to `~/.local/bin`. Use `sh install.sh --system` for `/usr/local/bin`, or pin a build with `YTMTUI_VERSION=0.1.5`. The script verifies the download checksum before installing.
 
 ### Release binaries
 
@@ -239,9 +239,9 @@ The window is deliberately chrome-free — no box borders, just hairlines, white
 - 📂 **Playlist sidebar** — always-visible library of playlists, albums, artists & channels  
   `↑`/`↓` moves the `▌` cursor · `Enter` opens the selection
 - 📄 **Detail / results** — title, meta line and lazily-fetched track list (cached)
-- ✨ **For you** — press `b` for the shelf picker (**Quick picks · Your daily discover · Featured playlists for you · Forgotten favorites · From the community · Mood and Genres · Discovery mix · Mixed for you · New releases · Covers and remixes · Trending community playlists · Trending songs**) · `1`–`5` jump straight to the first five
+- ✨ **For you** — press `b` for the shelf picker (**Quick picks · Your daily discover · Featured playlists for you · My subscriptions · Forgotten favorites · From the community · Moods & genres · Activity mixes · Discovery mix · Mixed for you · New releases · Covers and remixes · Trending community playlists · Trending songs · Country charts · Global charts**) · `1`–`5` jump straight to the first five
 - 🎚️ **Playback bar** — indicator, track, time and a full-width progress bar that only advances while playing
-- 🖼️ **Now playing** — press `m` for a large centred cover beside full-height synced lyrics (2× text in Kitty ≥ 0.40) · `PgUp` / `PgDn` scrolls · `m` or `Esc` returns
+- 🖼️ **Now playing** — press `m` for a large centred cover beside full-height, left-aligned synced lyrics (2× text in Kitty ≥ 0.40) · `PgUp` / `PgDn` scrolls · `m` or `Esc` returns
 - ℹ️ **Footer** — status message and compact keybinding cheat-sheet
 
 ---

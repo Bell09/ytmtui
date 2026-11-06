@@ -1,6 +1,6 @@
-//! Lyrics — YouTube Music's timed model first, then LRCLIB for a synced
-//! fallback, and finally plain text. Parsing covers both LRC and YouTube
-//! Music's timed formats, and titles are sanitised for the LRCLIB lookup.
+//! Lyrics — YTM's timed model first, then LRCLIB for a synced fallback, and
+//! finally plain text. Parses LRC and YTM's timed formats, and sanitises titles
+//! for the LRCLIB lookup.
 
 use crate::api::YtmApi;
 use serde_json::Value;
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Duration;
 
-/// Parsed lyrics: timestamp-synced (YTM's timed model or LRC) or plain.
+/// Parsed lyrics: timestamp-synced (YTM timed or LRC) or plain.
 #[derive(Debug, Clone)]
 pub enum Lyrics {
     Synced(Vec<(f64, String)>),
@@ -23,7 +23,7 @@ pub enum YtLyrics {
     None,
 }
 
-/// The panel's state for the current track.
+/// Panel state for the current track.
 #[derive(Debug, Clone, Default)]
 pub enum LyricsState {
     Loading,
@@ -33,7 +33,7 @@ pub enum LyricsState {
     Failed,
 }
 
-/// What a finished fetch sends back over the channel: video id + outcome.
+/// Finished fetch sent back over the channel: video id + outcome.
 pub type LyricsMsg = (String, Result<Option<Lyrics>, ()>);
 
 /// One fetch for a track: timed lyrics first, LRCLIB next, plain text last.
@@ -44,8 +44,8 @@ pub async fn fetch_for_track(
     artist: &str,
     duration_secs: Option<u64>,
 ) -> Result<Option<Lyrics>, ()> {
-    // A downloaded track carries its own `.lrc` sidecar, which keeps synced
-    // lyrics working offline and avoids a pointless network round trip.
+    // Downloaded tracks carry a `.lrc` sidecar, keeping synced lyrics offline
+    // and avoiding a pointless network round trip.
     let local = crate::offline::local_path(video_id);
     if let Some(path) = local {
         if let Some(lyrics) = sidecar_lyrics(path) {
@@ -53,21 +53,18 @@ pub async fn fetch_for_track(
         }
     }
 
-    // A local file has no video id to ask YouTube about, so skip that call
-    // and let the title/artist sources answer — the only ones that can when
-    // there's no network either.
+    // A local file has no video id to ask YouTube about, so skip that call and
+    // let title/artist sources answer — the only ones possible with no network.
     let yt = if local.is_some() {
         YtLyrics::None
     } else {
         api.get_lyrics(video_id).await.map_err(|_| ())?
     };
 
-    // Timed lyrics from YTM: use them immediately.
     if let YtLyrics::Timed(lines) = &yt {
         return Ok(Some(Lyrics::Synced(lines.clone())));
     }
 
-    // LRCLIB fallback for synced lyrics.
     if !title.is_empty() && !artist.is_empty() {
         if let Some(lrc) = lrclib_synced(title, artist, duration_secs).await {
             let synced = parse_lrc(&lrc);
@@ -77,7 +74,7 @@ pub async fn fetch_for_track(
         }
     }
 
-    // The plain text might still be LRC; otherwise show it line by line.
+    // Plain text may still be LRC; otherwise show it line by line.
     match yt {
         YtLyrics::Text(text) => {
             let synced = parse_lrc(&text);
@@ -162,8 +159,7 @@ static NOISE: LazyLock<regex::Regex> = LazyLock::new(|| {
 static SQUEEZE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"\s{2,}").expect("valid squeeze regex"));
 
-/// Strip common noise from a track title for better LRCLIB matching —
-/// same behaviour as `sanitize_title_for_lyric_lookup`.
+/// Strip common title noise for better LRCLIB matching.
 pub fn sanitize_title_for_lyric_lookup(title: &str, artist: &str) -> String {
     if title.is_empty() {
         return title.to_string();
@@ -211,15 +207,15 @@ pub fn parse_lrc(raw: &str) -> Vec<(f64, String)> {
 // LRC sidecars — synced lyrics saved beside a downloaded track.
 // ---------------------------------------------------------------------------
 
-/// The `.lrc` file that belongs next to an audio file.
+/// The `.lrc` file next to an audio file.
 fn sidecar_path(audio: &Path) -> PathBuf {
     audio.with_extension("lrc")
 }
 
-/// Read synced lyrics saved beside a local audio file.
+/// Read synced lyrics beside a local audio file.
 ///
-/// Only timestamped LRC counts as synced; a plain-text sidecar is ignored
-/// so callers can fall back to their normal sources.
+/// Only timestamped LRC counts; plain-text sidecars are ignored so callers can
+/// fall back to their normal sources.
 pub fn sidecar_lyrics(audio: &Path) -> Option<Lyrics> {
     let text = std::fs::read_to_string(sidecar_path(audio)).ok()?;
     let lines = parse_lrc(&text);
@@ -230,8 +226,8 @@ pub fn sidecar_lyrics(audio: &Path) -> Option<Lyrics> {
     }
 }
 
-/// Serialise synced lyrics as LRC, or `None` for plain text (which has no
-/// timestamps to write).
+/// Serialise synced lyrics as LRC, or `None` for plain text (no timestamps to
+/// write).
 pub fn to_lrc(lyrics: &Lyrics) -> Option<String> {
     let Lyrics::Synced(lines) = lyrics else {
         return None;
@@ -239,8 +235,8 @@ pub fn to_lrc(lyrics: &Lyrics) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
-    // YTM's model is already ordered, but a hand-built list may not be;
-    // LRC readers expect timestamps to climb.
+    // YTM's list is already ordered, but a hand-built one may not be; LRC
+    // readers expect timestamps to climb.
     let mut sorted = lines.clone();
     sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -269,9 +265,9 @@ fn lrc_timestamp(seconds: f64) -> String {
 
 /// Write synced lyrics next to `audio` as `<stem>.lrc`.
 ///
-/// Returns `Ok(None)` when there is nothing synced to write, and
-/// `Ok(Some(path))` for a saved (or already present) sidecar. An existing
-/// non-empty `.lrc` is never clobbered — it may be the user's own file.
+/// `Ok(None)` when there's nothing synced, `Ok(Some(path))` for a saved or
+/// existing sidecar. Never clobbers an existing non-empty `.lrc` — it may be
+/// the user's own file.
 pub fn write_sidecar(audio: &Path, lyrics: &Lyrics) -> std::io::Result<Option<PathBuf>> {
     let Some(text) = to_lrc(lyrics) else {
         return Ok(None);
@@ -285,7 +281,7 @@ pub fn write_sidecar(audio: &Path, lyrics: &Lyrics) -> std::io::Result<Option<Pa
 }
 
 /// `[(h:)mm:ss(.fff)]` at the line's start → seconds + remainder.
-/// Minute/second digit counts are `1-2` and `2`.
+/// Minutes are 1-2 digits, seconds exactly 2.
 fn split_timestamp(line: &str) -> Option<(f64, &str)> {
     let rest = line.strip_prefix('[')?;
     let close = rest.find(']')?;

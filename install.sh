@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/main/install.sh | sh
 #   sh install.sh --system
-#   YTMTUI_VERSION=0.1.4 sh install.sh
+#   YTMTUI_VERSION=0.1.5 sh install.sh
 set -eu
 
 REPO="Bell09/ytmtui"
@@ -17,7 +17,7 @@ usage() {
 Usage: install.sh [--system] [--version VERSION]
 
   --system            install to /usr/local/bin (uses sudo when needed)
-  --version VERSION   install a specific release, for example 0.1.4
+  --version VERSION   install a specific release, for example 0.1.5
 
 Environment:
   YTMTUI_INSTALL_DIR  destination directory (default: ~/.local/bin)

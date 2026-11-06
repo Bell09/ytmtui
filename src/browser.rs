@@ -1,8 +1,8 @@
 //! Browser cookie extraction (Firefox family first, then Chromium family).
 //!
 //! Reads each browser's SQLite cookie store, decrypting Chromium cookies with
-//! the platform key where possible. Falls back gracefully: any browser whose
-//! store can't be read is skipped so the caller can try the next one.
+//! the platform key where possible. Unreadable stores are skipped so the caller
+//! can try the next browser.
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
@@ -120,7 +120,7 @@ fn root_paths(spec: &BrowserSpec) -> Vec<PathBuf> {
     spec.roots.iter().map(|r| home.join(r)).collect()
 }
 
-/// Cookie DB candidate files for a browser root.
+/// Cookie DB candidates under a browser root.
 fn db_candidates(root: &Path, kind: Kind) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if !root.exists() {
@@ -170,7 +170,7 @@ fn db_candidates(root: &Path, kind: Kind) -> Vec<PathBuf> {
 }
 
 /// Open a private copy of *src* (plus WAL/journal sidecars) so a running
-/// browser's locks never block us and recent WAL data is included.
+/// browser's locks can't block us and recent WAL data comes along.
 fn open_db_copy(src: &Path) -> Option<Connection> {
     let mut hasher = DefaultHasher::new();
     src.hash(&mut hasher);
@@ -214,8 +214,8 @@ fn chrome_key() -> [u8; 16] {
     key
 }
 
-/// Retrieve the "Chrome Safe Storage" secret from the login keyring if
-/// available; otherwise Chrome's hard-coded Linux fallback.
+/// Pull "Chrome Safe Storage" from the login keyring, else Chrome's hard-coded
+/// Linux fallback.
 fn chrome_password() -> String {
     for args in [
         ["lookup", "application", "chrome"].as_slice(),
@@ -344,13 +344,13 @@ fn try_browser(spec: &BrowserSpec) -> Option<Vec<(String, String)>> {
     None
 }
 
-/// Extract YouTube cookies from a specific named browser.
+/// Extract YouTube cookies from a named browser.
 pub fn extract_from_browser(name: &str) -> Option<Vec<(String, String)>> {
     let spec = BROWSERS.iter().find(|b| b.name == name)?;
     try_browser(spec)
 }
 
-/// Auto-detect a browser that holds YouTube credentials.
+/// Auto-detect a browser holding YouTube credentials.
 pub fn detect_browser() -> Option<(String, Vec<(String, String)>)> {
     for spec in BROWSERS {
         if let Some(cookies) = try_browser(spec) {

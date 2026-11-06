@@ -8,33 +8,31 @@ use std::time::{Duration, Instant, SystemTime};
 
 type PreviewResult = (String, Result<Vec<Track>, String>);
 
-/// A finished library fetch: the generation it was started for, and the
-/// playlists (or an error). The generation lets a newer request supersede one
-/// that is still in flight, e.g. when switching back online.
+/// Finished library fetch: its generation plus playlists or an error. The
+/// generation lets a newer request supersede an in-flight one, e.g. when
+/// switching back online.
 type LibraryResult = (u64, Result<Vec<Playlist>, String>);
 
-/// The heart key's outcome: video id, the rating that was requested,
-/// which press asked for it (so an older reply can't clobber a newer
-/// press), and whether the API call succeeded.
+/// Heart key outcome: video id, requested rating, the press that asked for
+/// it (so an older reply can't clobber a newer one), and the API result.
 type LikeResult = (String, bool, u64, Result<(), String>);
 
-/// One queued "add to playlist" command: the server's playlist id, the
-/// playlist title (for the status line), the track's video id and title.
+/// Queued "add to playlist": playlist id, playlist title for the status
+/// line, and the track's video id and title.
 type AddCmd = (String, String, String, String);
 
-/// A finished add-to-playlist: the playlist title, the track title, and
-/// whether the API call succeeded.
+/// Finished add-to-playlist: playlist title, track title, API result.
 type AddResult = (String, String, Result<(), String>);
 
-/// One queued "remove from playlist" command: the playlist id and name
-/// (status), the track with the row it occupied (for the rollback breath
-/// if the server refuses), and its video id under the hood.
+/// Queued "remove from playlist": playlist id and name (for the status
+/// line), the track plus its row index (to put it back if the server
+/// refuses), and its video id.
 type RmCmd = (String, String, Track, usize);
 type RmResult = (String, String, Track, usize, Result<(), String>);
 
-/// Labels for the browse sections, top to bottom in the `b` picker. The
-/// matching shelves are found by title, so the API can return them in any
-/// order or name them slightly differently.
+/// Browse section labels, in `b` picker order. Shelves are matched by
+/// title, so the API may return them in any order or name them slightly
+/// differently.
 pub const BROWSE_SECTIONS: [&str; 16] = [
     "QUICK PICKS",
     "DAILY DISCOVER",
@@ -54,8 +52,8 @@ pub const BROWSE_SECTIONS: [&str; 16] = [
     "GLOBAL CHARTS",
 ];
 
-/// Which browse section a shelf header belongs to. Some titles overlap, so
-/// the specific checks come before the generic ones.
+/// Which browse section a shelf header belongs to. Titles overlap, so
+/// specific checks run before generic ones.
 fn browse_section_for_title(title: &str) -> Option<usize> {
     let title = title.to_lowercase();
     if title.contains("quick") {
@@ -95,34 +93,34 @@ fn browse_section_for_title(title: &str) -> Option<usize> {
     }
 }
 
-/// A queued `L` press: (video id, want like, generation).
+/// Queued `L` press: (video id, want like, generation).
 type LikeRequest = (String, bool, u64);
 
-/// A background re-fetch of the liked-songs list, for the delayed
-/// server re-sync after a rating change.
+/// Background refetch of the liked-songs list, used by the delayed server
+/// re-sync after a rating change.
 type LikeRefreshResult = Result<Vec<Track>, String>;
 
-/// A finished (or failed) `d` download: the video id it was for, and the
-/// registry entry to save — or why it couldn't.
+/// Finished (or failed) `d` download: video id, and the registry entry to
+/// save or the reason there isn't one.
 type DownloadResult = (String, Result<crate::offline::Entry, String>);
 
-/// A background home-feed refresh for the browse picker.
+/// Background home-feed refresh for the browse picker.
 type BrowseResult = Result<Vec<BrowseShelf>, String>;
 
-/// A resolved stream URL for the next queue track, or why it failed.
+/// Resolved stream URL for the next queue track, or why it failed.
 type PrefetchResult = (String, Result<String, String>);
 
-/// How many times a failed track is restarted before it is skipped.
+/// Restarts before a failed track is skipped.
 const MAX_PLAYBACK_RETRIES: u8 = 2;
-/// Prefetched URLs are short-lived; older ones fall back to a fresh resolve.
+/// Prefetched URLs expire; older ones fall back to a fresh resolve.
 const PREFETCH_TTL: Duration = Duration::from_secs(15 * 60);
-/// A track that never starts producing audio is treated as failed after this.
+/// A track that never produces audio is treated as failed after this.
 const BUFFER_WATCHDOG: Duration = Duration::from_secs(25);
-/// A playing track whose clock stops moving is restarted after this.
+/// A playing track whose clock stops is restarted after this.
 const STALL_WATCHDOG: Duration = Duration::from_secs(30);
 
-/// Filters shown in the search bar, in display order. Only the ones the
-/// Innertube response actually advertises are kept.
+/// Search-bar filters in display order. Only filters the Innertube
+/// response advertises are kept.
 const SEARCH_FILTER_ORDER: [&str; 5] = [
     "Songs",
     "Albums",
@@ -131,14 +129,13 @@ const SEARCH_FILTER_ORDER: [&str; 5] = [
     "Featured playlists",
 ];
 
-/// The "Liked Music" auto-playlist's id — the list the `L` heart keeps
-/// in step with the server while it's on screen.
+/// Id of the "Liked Music" auto-playlist — the list the `L` heart keeps in
+/// sync with the server while it's on screen.
 const LIKED_PLAYLIST: &str = "VLLM";
 
-/// How many playlist previews the Library keeps cached. Every entry is a
-/// full `Vec<Track>` (title / artist / album strings each), so an unbounded
-/// cache quietly grows with every playlist visited. Six covers the
-/// back-and-forth case with room to spare.
+/// Playlist previews kept cached. Each entry is a full `Vec<Track>`, so an
+/// unbounded cache grows with every playlist visited; six covers the
+/// back-and-forth case.
 const PREVIEW_CACHE_CAP: usize = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,8 +152,7 @@ pub enum InputMode {
     Search,
 }
 
-/// Repeat behaviour for queue advancement (cycled with Ctrl+R,
-/// honoured at end-of-file).
+/// Repeat behaviour for queue advancement (Ctrl+R, honoured at end of file).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepeatMode {
     Off,
@@ -187,8 +183,7 @@ pub struct App {
     pub input_mode: InputMode,
     pub search_query: String,
     pub search_results: Vec<SearchHit>,
-    /// Index 0 is always "Top" (default search); the rest mirror
-    /// `search_filters`.
+    /// Index 0 is always "Top" (default search); the rest mirror `search_filters`.
     pub search_filter: usize,
     pub search_filters: Vec<SearchFilter>,
 
@@ -196,36 +191,35 @@ pub struct App {
     pub library_loaded: bool,
     pub current_playlist: Option<Playlist>,
     pub playlist_tracks: Vec<Track>,
-    /// Where `Esc` returns to after viewing a collection.
+    /// Where `Esc` returns to after a collection.
     pub playlist_return_page: Page,
-    /// The row to reselect when returning from a collection.
+    /// Row to reselect when returning from a collection.
     pub playlist_return_index: usize,
 
-    /// The "For you" browse page: flattened section headers and rows. The
-    /// selection cursor only lands on `BrowseRow::Item`.
+    /// "For you" browse rows: section headers plus items, flattened. The
+    /// cursor only lands on `BrowseRow::Item`.
     pub browse_rows: Vec<BrowseRow>,
     pub browse_loaded: bool,
-    /// Root shelves, indexed by section; `None` if that section was not
-    /// present in the feed.
+    /// Root shelves by section; `None` if the feed lacked that section.
     pub browse_shelves: Vec<Option<BrowseShelf>>,
-    /// Active section while browsing.
+    /// Active browse section.
     pub browse_section: Option<usize>,
     browse_return_page: Page,
     browse_return_index: usize,
-    /// One level of history for opening a mood/genre category: the root
-    /// rows and the row that opened it.
+    /// One level of history inside a mood/genre category: the root rows
+    /// and the row that opened it.
     browse_back: Option<(Vec<BrowseRow>, usize)>,
 
-    /// Lazily-fetched preview of the highlighted library entry, plus a cache so
-    /// moving back to a previously seen entry is instant.
+    /// Lazily fetched preview of the highlighted library entry, cached so
+    /// revisiting one is instant.
     pub preview_tracks: Vec<Track>,
     pub preview_for: Option<String>,
     preview_cache: HashMap<String, Vec<Track>>,
     preview_tx: tokio::sync::mpsc::UnboundedSender<PreviewResult>,
     preview_rx: tokio::sync::mpsc::UnboundedReceiver<PreviewResult>,
 
-    /// Library fetches run in the background so the first frame is never
-    /// blocked on the network. Only the newest generation may apply.
+    /// Library fetches run in the background so the first frame never waits
+    /// on the network. Only the newest generation is applied.
     library_tx: tokio::sync::mpsc::UnboundedSender<LibraryResult>,
     library_rx: tokio::sync::mpsc::UnboundedReceiver<LibraryResult>,
     library_generation: u64,

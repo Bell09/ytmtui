@@ -4,20 +4,19 @@ use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// What mpv says about the current timeline.
+/// Current timeline reported by mpv.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Timeline {
-    /// Playback clock in seconds; `None` until a file is loaded.
+    /// Playback position in seconds; `None` until a file loads.
     pub position: Option<f64>,
-    /// Total duration in seconds, when the stream reports one.
+    /// Total duration in seconds, when known.
     pub duration: Option<f64>,
 }
 
-/// A thin wrapper around an `mpv` process.
+/// Thin wrapper around an `mpv` process.
 ///
-/// `mpv` is launched with an IPC socket so that playback can be paused and
-/// resumed in place (instead of killing and restarting the process, which
-/// would lose the playback position).
+/// mpv runs with an IPC socket so pause/resume works in place. Killing and
+/// restarting would lose the playback position.
 pub struct Player {
     process: Option<Child>,
     socket_path: String,
@@ -36,19 +35,16 @@ impl Player {
         self.play_with(track_id, None)
     }
 
-    /// Start `track_id`, using an already-resolved stream URL when one is
-    /// available. A prefetched URL saves mpv the yt-dlp round-trip and makes
-    /// the next song start almost immediately.
+    /// Start `track_id`, using a prefetched stream URL when available. That
+    /// skips the yt-dlp round-trip, so the next song starts almost instantly.
     pub fn play_with(&mut self, track_id: &str, stream_url: Option<&str>) -> anyhow::Result<()> {
         self.stop();
-        // A stale socket left behind by a previous process would make mpv fail
-        // to bind; remove it first.
+        // Remove a socket left by a previous process; otherwise mpv can't bind.
         let _ = std::fs::remove_file(&self.socket_path);
 
-        // Offline rows carry a `local:` prefix naming a file on disk; every
-        // other id is a YouTube video. mpv takes either as its final
-        // argument, so the rest of the command line is shared — and the
-        // queue can mix both across an `o` toggle.
+        // Offline ids carry a `local:` prefix and map to a file; everything
+        // else is a YouTube video. mpv accepts either, so the queue can mix
+        // both across an `o` toggle.
         let target = match stream_url {
             Some(url) => url.to_string(),
             None => match crate::offline::local_path(track_id) {
@@ -60,15 +56,13 @@ impl Player {
             .arg("--no-video")
             .arg("--audio-display=no")
             .arg("--no-terminal")
-            // Run libmpv with no user config or scripts, with the best
-            // available audio stream and no album-art decode path. Cache is
-            // re-enabled explicitly below: it keeps network playback smooth
-            // while local files still open directly with no startup delay.
+            // No user config or scripts, best audio stream only. Cache is
+            // enabled below for smooth network playback; local files still
+            // open instantly.
             .arg("--no-config")
             .arg("--load-scripts=no")
             .arg("--cache=auto")
-            // Only ever consulted for URLs; a local path simply skips the
-            // ytdl hook, so this stays harmless offline.
+            // Only used for URLs; local paths skip the ytdl hook.
             .arg("--ytdl-format=bestaudio/best")
             .arg(format!("--input-ipc-server={}", self.socket_path))
             .arg(&target)
@@ -83,26 +77,24 @@ impl Player {
                 Ok(())
             }
             Err(e) => {
-                // If mpv is not installed, fail gracefully or try another backend
+                // mpv missing: fail with a clear message.
                 anyhow::bail!("Failed to start mpv (is mpv installed?): {}", e)
             }
         }
     }
 
-    /// Toggle pause/resume on the running mpv process via its IPC socket.
+    /// Toggle pause/resume via mpv's IPC socket.
     pub fn pause(&mut self) {
         if let Ok(mut stream) = UnixStream::connect(&self.socket_path) {
             let _ = stream.write_all(b"{\"command\":[\"cycle\",\"pause\"]}\n");
         }
     }
 
-    /// Ask mpv where playback actually is. The UI clock is slaved to this
-    /// instead of a wall-clock guess, so a slow stream start or a seek can
-    /// never leave the progress bar and lyrics out of step with the audio.
+    /// Ask mpv where playback really is. The UI clock follows this instead of
+    /// guessing, so slow starts and seeks keep progress and lyrics in sync.
     ///
-    /// Every call uses a short-lived IPC connection with tight read/write
-    /// timeouts; a missing or wedged mpv returns `None` without stalling a
-    /// frame.
+    /// Short-lived IPC connection with tight timeouts; a missing or wedged
+    /// mpv returns `None` without stalling a frame.
     pub fn timeline(&self) -> Option<Timeline> {
         let mut stream = UnixStream::connect(&self.socket_path).ok()?;
         let _ = stream.set_read_timeout(Some(Duration::from_millis(25)));
@@ -126,8 +118,8 @@ impl Player {
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            // mpv interleaves unsolicited events (start-file, file-loaded,
-            // playback-restart) with replies; only the request ids matter.
+            // mpv interleaves unsolicited events with replies; match only
+            // request ids.
             match value.get("request_id").and_then(Value::as_u64) {
                 Some(1) => {
                     timeline.position = value.get("data").and_then(Value::as_f64);
@@ -154,9 +146,8 @@ impl Player {
         }
     }
 
-    /// Non-blocking check for the mpv process ending on its own: a clean
-    /// exit (status 0) is a normal end-of-file, anything else an error.
-    /// Returns `None` while mpv is still alive or when nothing is playing.
+    /// Non-blocking check for mpv exiting on its own: status 0 is a normal
+    /// end-of-file, anything else an error. `None` while alive or idle.
     pub fn poll_exited(&mut self) -> Option<std::process::ExitStatus> {
         let status = match self.process.as_mut() {
             Some(p) => match p.try_wait() {
@@ -185,8 +176,8 @@ impl Drop for Player {
     }
 }
 
-/// Resolve a video's direct audio URL so it can be handed to mpv later.
-/// Local files are already playable and return their path unchanged.
+/// Resolve a video's direct audio URL for later playback. Local files are
+/// already playable and return their path unchanged.
 pub fn resolve_stream(track_id: &str) -> anyhow::Result<String> {
     if let Some(path) = crate::offline::local_path(track_id) {
         return Ok(path.display().to_string());

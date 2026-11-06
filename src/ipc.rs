@@ -1,10 +1,7 @@
-//! A tiny Unix-socket bridge so external tools can query and control the
-//! running TUI — most importantly Quickshell's media widget, which polls
-//! `ytmtui --json queue` / `ytmtui --json now` and jumps with
-//! `ytmtui jump <i>`.
+//! Tiny Unix-socket bridge for external tools, mainly Quickshell's media
+//! widget: it polls `ytmtui --json queue` / `now` and jumps with `ytmtui jump <i>`.
 //!
-//! Newline-delimited JSON: one `{"command": …, "args": …}` request in, one
-//! response line out, so the same widget works unchanged.
+//! Newline-delimited JSON: one request in, one response line out.
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -21,8 +18,7 @@ pub struct QueueRow {
     pub thumbnail_url: String,
 }
 
-/// The queue facts mirrored to external clients, diffed and rewritten by
-/// the app on every tick.
+/// Queue facts mirrored to external clients, rewritten by the app each tick.
 #[derive(Default)]
 pub struct IpcState {
     pub tracks: Vec<QueueRow>,
@@ -50,8 +46,8 @@ fn socket_path() -> PathBuf {
         .join("ytmtui.sock")
 }
 
-/// Serve the bridge until the process exits. Refuses to fight a live
-/// instance: if the socket already answers, another ytmtui owns it.
+/// Serve the bridge until exit. If the socket already answers, another
+/// ytmtui owns it.
 pub async fn serve(state: IpcHandle, tx: UnboundedSender<IpcCmd>) {
     let path = socket_path();
     if UnixStream::connect(&path).await.is_ok() {
@@ -62,7 +58,7 @@ pub async fn serve(state: IpcHandle, tx: UnboundedSender<IpcCmd>) {
         Ok(l) => l,
         Err(_) => return,
     };
-    // Same privacy stance: only the user may query the player.
+    // Only the user may query the player.
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
 
@@ -106,7 +102,7 @@ fn route(line: &str, state: &IpcHandle, tx: &UnboundedSender<IpcCmd>) -> String 
 
     let guard = state.read().unwrap();
     match command {
-        // The widget's queue poll: { tracks, current_index, repeat, shuffle }.
+        // Queue poll: { tracks, current_index, repeat, shuffle }.
         "queue" => {
             let tracks: Vec<serde_json::Value> = guard
                 .tracks
@@ -129,7 +125,7 @@ fn route(line: &str, state: &IpcHandle, tx: &UnboundedSender<IpcCmd>) -> String 
                 "shuffle": guard.shuffle,
             }))
         }
-        // The widget's now-playing poll (drives the like chip only).
+        // Now-playing poll (drives the like chip only).
         "now" => ok(serde_json::json!({
             "track": {
                 "title": "",

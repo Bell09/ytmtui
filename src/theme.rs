@@ -1,10 +1,10 @@
-//! Colour theme: a 16-colour palette detected from the desktop's wallpaper
-//! theming tool, mapped onto semantic UI roles so every palette slot has a job.
+//! Colour theme: a 16-colour palette from the desktop's wallpaper theming tool,
+//! mapped onto semantic UI roles.
 //!
-//! pywal, wallust and matugen all produce compatible palettes. We look in
-//! their cache/config directories (and at JSON template outputs declared in
-//! their configs), pick the newest valid palette, and watch it live. If none
-//! is present we fall back to a green-focused built-in palette.
+//! pywal, wallust and matugen all produce compatible palettes. We look in their
+//! cache/config dirs (and JSON outputs declared in their configs), pick the
+//! newest valid palette, and watch it live. With none present, we fall back to
+//! a green-focused built-in palette.
 
 use ratatui::style::Color;
 use serde_json::{Map, Value};
@@ -18,7 +18,7 @@ pub struct Theme {
     // -- Text hierarchy -------------------------------------------------
     /// Primary text (color7).
     pub fg: Color,
-    /// Emphasis text — titles that should pop (color15).
+    /// Emphasis text — titles (color15).
     pub bright: Color,
     /// Secondary text: meta, counts, artists, hairlines, status (color8).
     pub dim: Color,
@@ -30,9 +30,9 @@ pub struct Theme {
     pub accent_bright: Color,
     /// Kind glyphs and footer key hints (color6).
     pub accent2: Color,
-    /// Artists, status numbers and the search `▸` marker (color5).
+    /// Artists, status numbers and the search `▸` (color5).
     pub mark: Color,
-    /// The app name in the header (color13).
+    /// App name in the header (color13).
     pub brand: Color,
 
     // -- Playback states ------------------------------------------------
@@ -57,8 +57,7 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Load the newest palette, returning the file it came from so the live
-    /// watcher can follow it.
+    /// Load the newest palette and return its file so the watcher can follow it.
     pub fn load_with_source() -> Option<(Self, PathBuf)> {
         for (path, _) in palette_files_by_mtime() {
             if let Some(theme) = Self::reload_from(&path) {
@@ -68,9 +67,9 @@ impl Theme {
         None
     }
 
-    /// No palette from wallpaper tools: use a green-focused built-in theme.
+    /// Built-in green theme when no wallpaper palette exists.
     pub fn fallback() -> Self {
-        // Green terminal theme — dark forest background, bright emerald accents.
+        // Dark forest background, bright emerald accents.
         let p = [
             Color::Rgb(10, 22, 12),    // 0  selection_fg / bg
             Color::Rgb(220, 60, 60),   // 1  stop
@@ -92,9 +91,8 @@ impl Theme {
         Self::from_palette(p)
     }
 
-    /// Map a 16-colour palette onto the semantic roles above. colour0 is
-    /// the selection foreground; colour14 currently has no role (row
-    /// durations are deliberately left plain).
+    /// Map a 16-colour palette onto the roles above. color0 is the selection
+    /// foreground; color14 has no role (row durations stay plain).
     fn from_palette(p: [Color; 16]) -> Self {
         Self {
             fg: p[7],
@@ -116,9 +114,9 @@ impl Theme {
         }
     }
 
-    /// The newest palette file that actually parses. Used by the UI poller;
-    /// validation is cached by mtime, so a file being rewritten in place is
-    /// skipped until the write finishes without re-parsing every tick.
+    /// Newest palette file that actually parses. Validation is cached by mtime,
+    /// so a file being rewritten is skipped until the write finishes without
+    /// re-parsing every tick.
     pub fn source_file() -> Option<PathBuf> {
         palette_files_by_mtime()
             .into_iter()
@@ -126,9 +124,8 @@ impl Theme {
             .map(|(path, _)| path)
     }
 
-    /// The newest existing palette candidate, whether or not it parses right
-    /// now. The poller uses this to distinguish "no theming tool at all" from
-    /// "the newest file is still being written".
+    /// Newest existing palette candidate, parseable or not. The poller uses it
+    /// to tell "no theming tool" from "the newest file is still being written".
     pub fn latest_file() -> Option<PathBuf> {
         palette_files_by_mtime()
             .into_iter()
@@ -136,10 +133,10 @@ impl Theme {
             .map(|(path, _)| path)
     }
 
-    /// Re-read one specific palette file. `None` when it can't be parsed:
-    /// tools rewrite their cache in place, so a read racing the write sees a
-    /// partial file — callers keep the current theme instead of flashing to
-    /// the fallback, and retry once the write lands.
+    /// Re-read one palette file. `None` when it can't parse: tools rewrite their
+    /// cache in place, so a read racing the write sees a partial file. Callers
+    /// keep the current theme instead of flashing to the fallback, and retry
+    /// once the write lands.
     pub fn reload_from(path: &Path) -> Option<Self> {
         load_file(path).map(Self::from_palette)
     }
@@ -151,12 +148,11 @@ impl Default for Theme {
     }
 }
 
-/// Candidate palette files from the common wallpaper tools.
+/// Candidate palette files from common wallpaper tools.
 ///
-/// The paths derive from XDG directories and config files that do not move
-/// while the app runs, so build them once. `palette_files_by_mtime` still
-/// stats every candidate, but it no longer rebuilds and re-deduplicates the
-/// path list on each poll.
+/// Paths derive from XDG dirs and config files that don't move while the app
+/// runs, so build them once. `palette_files_by_mtime` still stats every
+/// candidate, but no longer rebuilds and re-deduplicates this list on each poll.
 fn palette_files() -> &'static [PathBuf] {
     static CACHE: OnceLock<Vec<PathBuf>> = OnceLock::new();
     CACHE
@@ -184,8 +180,8 @@ fn palette_files() -> &'static [PathBuf] {
         .as_slice()
 }
 
-/// Existing candidates, newest first. Ties are broken by path so selection is
-/// deterministic when two tools write in the same timestamp tick.
+/// Existing candidates, newest first. Ties break by path so selection is
+/// deterministic when two tools write in the same tick.
 fn palette_files_by_mtime() -> Vec<(PathBuf, SystemTime)> {
     let mut found = Vec::new();
     for path in palette_files() {
@@ -204,9 +200,9 @@ fn palette_files_by_mtime() -> Vec<(PathBuf, SystemTime)> {
     found
 }
 
-/// Output files declared in matugen/wallust configs, filtered to formats a
-/// palette can live in. Read once at startup: new output paths need a restart,
-/// while palette contents keep reloading live.
+/// Output files declared in matugen/wallust configs, filtered to
+/// palette-capable formats. Read once at startup: new output paths need a
+/// restart, but palette contents keep reloading live.
 fn tool_config_outputs() -> Vec<PathBuf> {
     static CACHE: OnceLock<Vec<PathBuf>> = OnceLock::new();
     CACHE
@@ -227,9 +223,9 @@ fn tool_config_outputs() -> Vec<PathBuf> {
         .clone()
 }
 
-/// Pull output paths out of the `[templates]` section (and wallust's old
-/// `[[entry]]` sections). This is intentionally a small TOML-line scanner
-/// rather than a full parser: template output paths are simple quoted strings.
+/// Pull output paths from the `[templates]` section (and wallust's old
+/// `[[entry]]` sections). A small TOML-line scanner, not a full parser:
+/// template output paths are simple quoted strings.
 fn config_outputs(path: &Path, keys: &[&str]) -> Vec<PathBuf> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -320,8 +316,8 @@ fn toml_string(value: &str) -> Option<String> {
     None
 }
 
-/// Expand `~` and resolve relative output paths against the config's folder.
-/// Only JSON files (and extensionless `colors` files) can be palettes.
+/// Expand `~`/`$HOME` and resolve relative output paths against the config's
+/// folder. Only JSON files (and extensionless `colors` files) can be palettes.
 fn resolve_output_path(raw: &str, config_dir: &Path) -> Option<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -379,8 +375,8 @@ fn dedup(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// Cached parse success, keyed by file mtime. Failed parses are deliberately
-/// not cached: a writer can finish within the same timestamp tick, and we want
-/// the next poll to retry rather than ignore the finished palette forever.
+/// not cached: a writer can finish within the same timestamp tick, so the next
+/// poll retries instead of ignoring the finished palette forever.
 fn is_valid_palette(path: &Path, mtime: SystemTime) -> bool {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, SystemTime>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -401,7 +397,7 @@ fn is_valid_palette(path: &Path, mtime: SystemTime) -> bool {
     valid
 }
 
-/// Parse one palette file, trying the JSON forms first.
+/// Parse one palette file, trying JSON forms first.
 fn load_file(path: &Path) -> Option<[Color; 16]> {
     load_json(path).or_else(|| load_plain(path))
 }
@@ -481,7 +477,7 @@ fn base16_slots(object: &Map<String, Value>) -> Option<[Option<Color>; 16]> {
             .and_then(|(_, value)| json_color(value));
     }
 
-    // A partial or unrelated object should not masquerade as a palette.
+    // A partial or unrelated object should not pass as a palette.
     if slots.iter().filter(|slot| slot.is_some()).count() < 8 {
         return None;
     }
@@ -554,8 +550,8 @@ fn role(object: &Map<String, Value>, keys: &[&str]) -> Option<Color> {
         .find_map(|key| object.get(*key).and_then(json_color))
 }
 
-/// Read a colour from a JSON string or from matugen's nested
-/// `{ "default": { "hex": "#..." } }` / `{ "dark": { "hex": ... } }` forms.
+/// Read a colour from a JSON string, or matugen's nested
+/// `{"default":{"hex":"#..."}}` / `{"dark":{"hex":...}}` forms.
 fn json_color(value: &Value) -> Option<Color> {
     match value {
         Value::String(text) => parse_hex(text),

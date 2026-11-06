@@ -8,23 +8,18 @@ pub struct Track {
     pub album: Option<String>,
     pub duration: Option<String>,
     pub thumbnail_url: Option<String>,
-    /// Like state carried by the row's menu button: `Some(true)` when the
-    /// account has the song liked, `Some(false)` when not, `None` when the
-    /// response didn't say (search rows, offline fallbacks).
+    /// Like state from the row's menu button: `Some(true)` liked,
+    /// `Some(false)` not liked, `None` unknown (search rows, offline fallbacks).
     #[serde(default)]
     pub like: Option<bool>,
-    /// Whether a copy of this track sits in the local music folder, drawn as
-    /// a check mark. Stamped from the download registry whenever a list is
-    /// stored and re-stamped the moment a download lands, so an online row
-    /// lights up without a re-navigation. Local scans set it directly: every
-    /// file they report is, by definition, already offline.
+    /// Track exists in the local music folder (draws a check mark). Stamped
+    /// from the download registry when lists are stored and when a download
+    /// lands, so rows update without re-navigation. Local scans set it directly.
     #[serde(default)]
     pub downloaded: bool,
-    /// The row's playlist membership token (`setVideoId`), parsed off the
-    /// row's own "remove from playlist" menu entry. YouTube's modern
-    /// `browse/edit_playlist` removal is addressed with it, not the video
-    /// id — server tracks without it (search rows, offline copies) can't
-    /// be removed and the caller must say so.
+    /// Playlist membership token (`setVideoId`) parsed from the row's
+    /// "remove from playlist" menu entry. `browse/edit_playlist` removal
+    /// needs this, not the video id, so rows without it can't be removed.
     #[serde(default)]
     pub set_video_id: Option<String>,
 }
@@ -35,10 +30,10 @@ pub enum PlaylistKind {
     Album,
     Artist,
     Channel,
-    /// A mood button on the "Moods & genres" browse page. Its id carries the
-    /// Innertube category link, not a playlist id.
+    /// Mood button on the "Moods & genres" page. Its id holds an Innertube
+    /// category link, not a playlist id.
     Mood,
-    /// A genre button on the "Moods & genres" browse page.
+    /// Genre button on the "Moods & genres" page.
     Genre,
 }
 
@@ -65,8 +60,8 @@ impl Playlist {
     }
 }
 
-/// One row in a search result: either a playable song or an openable
-/// collection (album / artist / playlist).
+/// One search result: a playable song or an openable collection
+/// (album / artist / playlist).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SearchHit {
     Track(Track),
@@ -89,15 +84,14 @@ impl SearchHit {
     }
 }
 
-/// A titled group of rows on the "For you" browse page.
+/// A titled group of rows on the "For you" page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowseShelf {
     pub title: String,
     pub items: Vec<SearchHit>,
 }
 
-/// One displayed line on the browse page. Headers are drawn but skipped by
-/// the selection cursor.
+/// One line on the browse page. Headers render but the cursor skips them.
 #[derive(Debug, Clone)]
 pub enum BrowseRow {
     Header(String),

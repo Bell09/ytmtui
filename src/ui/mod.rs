@@ -1,7 +1,6 @@
-//! Minimal, chrome-free rendering: no box borders anywhere. Structure comes
-//! from thin hairlines, whitespace and right-aligned metadata; a one-cell
-//! gutter keeps everything off the terminal edges; colour comes from the
-//! pywal palette (accent for active things, dim for everything secondary).
+//! Chrome-free rendering: no box borders. Structure comes from hairlines,
+//! whitespace and right-aligned metadata; a one-cell gutter keeps content off
+//! the terminal edges; the pywal palette colours active vs. secondary things.
 
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -19,9 +18,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// Decorative rule under the search input.
 const TOP_RULE: &str = "°𝄞·──────°,─────────｡“─────────────˚｡────────────˳◜───────────｡`──────────°,──────────,'─────────`,────────.`───────',──────⸝'─────`.────.ᐣ───ᐟ.──.ᐟ─~";
 
-/// Colour for one glyph of the top rule. The dashes stay on the secondary
-/// accent; the punctuation ticks borrow the rest of the palette so the rule
-/// reads as a little pywal-coloured stitch rather than one flat hairline.
+/// Colour for one glyph of the top rule: dashes use the secondary accent, the
+/// punctuation ticks pull other palette colours so the rule looks stitched,
+/// not like one flat hairline.
 fn rule_char_style(c: char, t: &Theme) -> Style {
     match c {
         ',' => Style::default().fg(t.accent_bright),
@@ -32,8 +31,8 @@ fn rule_char_style(c: char, t: &Theme) -> Style {
     }
 }
 
-/// The top rule as one line of spans, with runs of same-coloured glyphs
-/// merged so a full-width rule costs only a handful of spans.
+/// The top rule as spans, with same-coloured runs merged so a full-width rule
+/// costs only a few spans.
 fn top_rule_line(width: usize, t: &Theme) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut current: Option<(Style, String)> = None;
@@ -71,11 +70,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.lyrics_output.clear();
     app.lyrics_clear.clear();
 
-    // Title line, main (search line above the list and content, with
-    // the lyrics pane running their full height beside them), one
-    // playback line (track + connector bar), footer — compact: no
-    // padding on the top or bottom edge, a one-cell gutter left and
-    // right.
+    // Vertical stack: title, main (search line over list/content, lyrics
+    // beside them at full height), playback (track + connector bar), footer.
+    // No top/bottom padding; one-cell gutter left and right.
     let area = f.area().inner(Margin {
         horizontal: 1,
         vertical: 0,
@@ -104,10 +101,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     let sidebar_w = sidebar_width(rows[1].width);
-    // With the lyrics pane open it claims the right edge — the
-    // `[playlists | content | lyrics]` layout, borderless beside the content.
-    // It only appears when there is room for a readable pane plus the
-    // content's minimum width.
+    // With the lyrics pane open it takes the right edge: playlists | content |
+    // lyrics, borderless. It only shows when there's room for a readable pane
+    // plus the content's minimum width.
     let lyrics_w = if app.lyrics_open {
         rows[1]
             .width
@@ -130,10 +126,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .constraints(col_constraints)
         .split(rows[1]);
 
-    // Left of the lyrics the search line and its rule take the top two
-    // rows of the main area; the list and content keep their rows below
-    // them. The pane runs the main area's full height — its first line
-    // lands level with the search input, not under the header.
+    // Left of the lyrics, the search line and rule take the top two rows;
+    // list and content sit below. The pane spans the main area's full height,
+    // so its first line is level with the search input, not the header.
     let left = Rect {
         width: (cols[2].x + cols[2].width).saturating_sub(rows[1].x),
         ..rows[1]
@@ -156,28 +151,25 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ])
         .split(left_rows[1]);
 
-    // Sidebar column: the list on top, cover art below it — the art sits
-    // directly above the playback line while a track is loaded, and the
-    // list reclaims the space whenever there is no art to show.
+    // Sidebar: list on top, cover art below. The art sits just above the
+    // playback line while a track is loaded; otherwise the list takes the
+    // space.
     let mut list_area = body[0];
     let mut art_area: Option<Rect> = None;
     let current_id = app.current_track.as_ref().map(|t| t.id.as_str());
     if app.art_track.as_deref().is_some_and(|id| Some(id) == current_id) {
-        // A floating look: the picture keeps a two-cell margin of empty
-        // space around its block plus a one-cell inset inside it, and is
-        // capped small enough to read as a card, never touching the list
-        // above or the playback line below.
+        // Floating look: two cells of empty margin around the block, one cell
+        // of inset inside it, and a small cap so it reads as a card and never
+        // touches the list above or the playback line below.
         const PAD: u16 = 2;
         const MAX_W: u16 = 22;
         let (cw, ch) = (body[0].width, body[0].height);
         let art_w = cw.saturating_sub(PAD * 2).min(MAX_W) & !1; // even → clean aspect
-        // The square core: the picture keeps one empty column of side
-        // margin inside the block, and its height in rows follows the
-        // terminal's real cell proportions — cols·cell_w = rows·cell_h —
-        // so the cover lands square on screen. Cells twice as tall as
-        // wide (the classic assumption) give the familiar rows = cols/2;
-        // a proportional font's taller cells get fewer rows, which is
-        // what keeps kitty from letterboxing dead bands around it.
+        // Square core: one empty column of side margin inside the block.
+        // Height in rows follows real cell proportions (cols·cell_w =
+        // rows·cell_h), so the cover is square on screen. Cells twice as tall
+        // as wide give rows = cols/2; taller cells get fewer rows, which stops
+        // kitty from letterboxing dead bands around the image.
         let core = art_w.saturating_sub(2);
         let (cell_w, cell_h) = crate::art::cell_size();
         let art_rows = ((f32::from(core) * cell_w / cell_h).round() as u16)
@@ -217,16 +209,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_playlist_picker(f, app, rows[1]);
     }
     if app.browse_picker_open {
-        // Same area as the add-to-playlist picker, so both cards centre on
-        // the whole main region rather than just the content column.
+        // Same area as the add picker, so both cards centre on the whole main
+        // region, not just the content column.
         draw_browse_picker(f, app, rows[1]);
     }
 }
 
-/// Header: the title line (app name + signed-in account) and the search
-/// input box. They are separate areas — the title spans the full width,
-/// the search line only the columns left of the lyrics pane, so the
-/// pane's first line lands level with the input.
+/// Header: title line (app name + account) and search input, as separate
+/// areas. The title spans the full width; the search line only the columns
+/// left of the lyrics pane, so the pane's first line is level with the input.
 fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
     let t = &app.theme;
     let rows = Layout::default()
@@ -237,9 +228,8 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
         ])
         .split(search);
 
-    // Title line: app name left. The offline chip sits
-    // against the app name while it's on, so the source of music on screen
-    // is never in doubt.
+    // Title line: app name left, with an offline chip beside it while on, so
+    // the music source is never in doubt.
     let mut title_spans = vec![Span::styled(
         " YTMTUI ⟢ Qu!m Ashley Cast!ll0",
         Style::default().fg(t.brand).add_modifier(Modifier::BOLD),
@@ -252,10 +242,9 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
     }
     f.render_widget(Paragraph::new(Line::from(title_spans)), title);
 
-    // The search input — a text line sitting on an underline rule; no
-    // left/right/top borders. The rule spans the header width, capped at one
-    // full copy of the decorative motif so ultra-wide terminals keep its
-    // intended shape.
+    // Search input: a text line on an underline rule, no side or top borders.
+    // The rule spans the header width, capped at one copy of the motif so
+    // ultra-wide terminals keep its intended shape.
     let focused = app.input_mode == InputMode::Search;
     let input_w = usize::from(rows[0].width).min(TOP_RULE.chars().count());
 
@@ -275,8 +264,8 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
             Style::default().fg(t.mark).add_modifier(Modifier::BOLD),
         ),
     ];
-    // label + arrow reserve nine columns; keep a margin before the rule's
-    // end so the text never sits flush against it.
+    // Label + arrow reserve nine columns; leave a margin before the rule's
+    // end so text never sits flush against it.
     let text_budget = input_w.saturating_sub(10);
     let cursor_w = usize::from(focused);
     if app.search_query.is_empty() && !focused {
@@ -295,12 +284,11 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
     }
     f.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
 
-    // The underline rule below the input.
     f.render_widget(Paragraph::new(top_rule_line(input_w, t)), rows[1]);
 }
 
-/// Maximized "now playing": the usual title and search rows on top, then a
-/// large square cover on the left and the lyrics pane on the right.
+/// Maximized "now playing": title and search rows on top, a large square
+/// cover on the left, lyrics on the right.
 fn draw_now_playing(f: &mut Frame, app: &mut App, title: Rect, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -315,8 +303,8 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, title: Rect, area: Rect) {
     if body.width < 24 || body.height < 4 {
         return;
     }
-    // Give the cover the width a square needs for the body height, but
-    // leave the lyrics a readable column on narrow terminals.
+    // Give the cover the width a square needs at this height, but keep a
+    // readable lyrics column on narrow terminals.
     let min_lyrics = 24.min(body.width / 2);
     let (cell_w, cell_h) = crate::art::cell_size();
     let square_w = ((f32::from(body.height) * cell_h / cell_w).round() as u16).saturating_add(2);
@@ -336,8 +324,8 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, title: Rect, area: Rect) {
     draw_lyrics(f, app, cols[2], true);
 }
 
-/// Centre the biggest square cover that fits, then use the normal art
-/// renderer for it.
+/// Centre the biggest square cover that fits and draw it with the normal art
+/// renderer.
 fn draw_large_art(f: &mut Frame, app: &mut App, area: Rect) {
     let (cell_w, cell_h) = crate::art::cell_size();
     let max_w = area.width.saturating_sub(4);
@@ -361,14 +349,13 @@ fn draw_large_art(f: &mut Frame, app: &mut App, area: Rect) {
     draw_album_art(f, app, rect);
 }
 
-/// The always-visible Library playlist list. Rows carry a kind glyph, the
-/// name, and a right-aligned track count; the selected row gets a `▌` cursor
-/// and the pywal selection colours.
+/// Always-visible Library playlist list: kind glyph, name, right-aligned track
+/// count. The selected row gets a `▌` cursor and selection colours.
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
 
-    // The cursor only makes sense on the Library page, where the list is what
-    // the selection controls; elsewhere the sidebar is informational.
+    // Cursor only makes sense on Library, where this list is what selection
+    // controls; elsewhere the sidebar is informational.
     let show_cursor = app.current_page == Page::Library && !app.playlists.is_empty();
 
     // Item text width: minus the 2-column cursor column and a left pad.
@@ -418,8 +405,8 @@ fn sidebar_item(
     text_w: usize,
     is_selected: bool,
 ) -> ListItem<'static> {
-    // When selected, spans leave the foreground unset so they inherit the
-    // highlight colours set by the list.
+    // Selected spans leave the foreground unset so they inherit the list's
+    // highlight colours.
     let name_style = if is_selected {
         Style::default()
     } else {
@@ -440,7 +427,6 @@ fn sidebar_item(
 
     let prefix = format!(" {} ", kind_glyph(playlist.kind));
     let prefix_w = display_width(&prefix);
-    // The track count, right-aligned.
     let meta = match playlist.track_count {
         Some(n) => n.to_string(),
         None => String::new(),
@@ -467,34 +453,30 @@ fn sidebar_item(
     ListItem::new(Line::from(spans))
 }
 
-/// Cover art in the sidebar column, flush above the playback line. In a
-/// kitty terminal it is a true inline image (graphics protocol); in
-/// other terminals it is drawn with quadrant blocks at two pixels per
-/// cell in both axes. The cover keeps its own colours — it is a photo,
-/// not a palette element. While the fetch is still in flight the space
-/// holds a dim cover glyph.
+/// Cover art in the sidebar, flush above the playback line. Kitty shows a
+/// true inline image (graphics protocol); other terminals get quadrant blocks
+/// at two pixels per cell on both axes. The photo keeps its own colours, not
+/// the palette. While fetching, a dim cover glyph holds the space.
 fn draw_album_art(f: &mut Frame, app: &mut App, area: Rect) {
     let (w, rows) = (area.width, area.height);
 
     if crate::art::graphics_mode() == crate::art::Graphics::Kitty {
         // True inline image: transmit once per (track, cell size, terminal
-        // size); kitty keeps it placed between frames — but drops every
-        // placement when the window is resized, so a fullscreen toggle
-        // must retransmit. The escape bytes are flushed after each frame
-        // is written (see main's event loop).
+        // size). Kitty keeps it placed between frames but drops all
+        // placements on resize, so a fullscreen toggle must retransmit. The
+        // escape bytes are flushed after each frame (see main's event loop).
         if let Some(id) = app.art_track.clone() {
             if let Some(src) = app.art_source.as_ref() {
                 let frame = f.area();
                 let key = (id, w, rows, frame.width, frame.height);
                 if app.art_kitty_sent.as_ref() != Some(&key) {
-                    // The square cover shows in full — it occupies the
-                    // block's square core (cells are ~2:1), letterboxed
-                    // by the empty columns on either side.
+                    // The square cover fills the block's square core (cells
+                    // are ~2:1), letterboxed by empty columns either side.
                     let core = w.saturating_sub(2);
                     let px = crate::art::fit_square(src, 720, 720);
                     if let Some(png) = crate::art::png_bytes(&px) {
-                        // Drop the old placement first so switching track
-                        // or layout size never leaves a ghost cover behind.
+                        // Drop the old placement first so a track or size
+                        // change never leaves a ghost cover.
                         app.art_output = crate::art::kitty_cleanup();
                         app.art_output.extend(crate::art::kitty_transfer(
                             area.x + (w - core) / 2,
@@ -515,9 +497,9 @@ fn draw_album_art(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Quadrant blocks: the canvas carries two pixels per cell in both
-    // axes. The square cover fills the block's square core — letterboxed
-    // by untouched (background-coloured) cells on either side.
+    // Quadrant blocks: two pixels per cell on both axes. The square cover
+    // fills the block's square core, letterboxed by untouched background
+    // cells either side.
     let core = w.saturating_sub(2);
     if app.art_fitted.as_ref().map(|(key, _)| *key) != Some((core, rows)) {
         app.art_fitted = None;
@@ -576,10 +558,9 @@ fn draw_art_placeholder(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// One terminal cell assembled from four pixels: the majority colour
-/// becomes the background, the minority pixels are painted with a
-/// quadrant (or half-block) glyph in the foreground. Three-of-a-kind
-/// flips the roles so a lone pixel can still be shown exactly.
+/// One cell from four pixels: majority colour becomes the background, the
+/// minority is painted with a quadrant/half-block glyph in the foreground.
+/// Three-of-a-kind flips the roles so a lone pixel still shows exactly.
 fn quadrant_span(p: &[image::Rgba<u8>; 4]) -> Span<'static> {
     let color = |c: &image::Rgba<u8>| Color::Rgb(c[0], c[1], c[2]);
 
@@ -628,18 +609,16 @@ fn quadrant_span(p: &[image::Rgba<u8>; 4]) -> Span<'static> {
     )
 }
 
-/// Playback, all on one line: indicator + track, with the progress bar
-/// running out of the artist's name into the time readout — the bar *is*
-/// the connector. The bar is always present: dim and empty when nothing is
-/// playing, so the line keeps its shape. The title gives up characters
-/// before the bar ever gets too short to read.
+/// Playback on one line: indicator + track, with the progress bar running
+/// from the artist's name into the time readout — the bar *is* the connector.
+/// It is always present (dim and empty when idle) so the line keeps its
+/// shape. The title gives up characters before the bar gets too short.
 fn draw_playback_bar(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let width = area.width as usize;
 
-    // The indicator and its colour come straight from the playback state:
-    // buffering = yellow, playing = bright green, paused = bright yellow,
-    // stopped = red.
+    // Indicator and colour follow playback state: buffering = yellow,
+    // playing = bright green, paused = bright yellow, stopped = red.
     let (indicator, indicator_style) = match app.playback_state {
         PlaybackState::Buffering => (
             "⏳",
@@ -662,8 +641,8 @@ fn draw_playback_bar(f: &mut Frame, app: &App, area: Rect) {
     let (title, artist, time_label, ratio) = if let Some(ref cur) = app.current_track {
         let total_elapsed = app.position_secs_f64();
         let total = app.playback_duration_secs;
-        // The elapsed clock only advances while actually playing (see above),
-        // so the ratio can be computed directly — including while paused.
+        // The clock only advances while playing, so the ratio can be computed
+        // directly, including while paused.
         let ratio = if total > 0 {
             (total_elapsed / total as f64).clamp(0.0, 1.0)
         } else {
@@ -702,8 +681,8 @@ fn draw_playback_bar(f: &mut Frame, app: &App, area: Rect) {
     };
     let time_w = display_width(&right);
 
-    // Track text gets everything left over once the time and a minimum
-    // connector length are reserved — the bar never shrinks below this.
+    // Track text gets what's left after the time and a minimum connector
+    // length are reserved; the bar never shrinks below that.
     let bar_min = if width >= 80 {
         28
     } else if width >= 50 {
@@ -718,9 +697,8 @@ fn draw_playback_bar(f: &mut Frame, app: &App, area: Rect) {
     let mut used = ind_w;
 
     if let Some(cur) = &app.current_track {
-        // The heart: the like indicator — accent when liked,
-        // muted otherwise (`h` toggles it). It owns two columns of the
-        // text budget.
+        // Like indicator: accent when liked, muted otherwise (`h` toggles);
+        // it takes two columns of the text budget.
         let heart = "♥ ";
         let heart_style = if cur.like == Some(true) {
             Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
@@ -788,11 +766,9 @@ fn draw_playback_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// The lyrics pane — the right sidebar, borderless beside the
-/// content: a one-line status while loading/missing, otherwise the lines
-/// with the current one highlighted and the view scrolled to centre it.
-/// The section hugs its content — those rows only, never stretched to
-/// the pane's full height.
+/// Lyrics pane, borderless at the right: a one-line status while
+/// loading/missing, otherwise lines with the current one highlighted and
+/// scrolled to centre. It hugs its content, never stretched to full height.
 fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect, full_height: bool) {
     let t = &app.theme;
 
@@ -800,7 +776,7 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect, full_height: bool) {
         return;
     }
 
-    // No header — the pane opens straight with the status or the lines.
+    // No header: the pane opens straight with status or lines.
     let body = area;
 
     // One-line centred status, dim.
@@ -2054,8 +2030,8 @@ fn track_line(
     playing: bool,
     pct: Option<u8>,
 ) -> Line<'static> {
-    // When selected, spans leave the foreground unset so they inherit the
-    // highlight colours set by the list.
+    // Selected spans leave the foreground unset so they inherit the list's
+    // highlight colours.
     let title_style = if is_selected {
         Style::default()
     } else if playing && number == 0 {

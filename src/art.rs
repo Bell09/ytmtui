@@ -1,12 +1,11 @@
-//! Album art: download the current track's cover and hand it to the
-//! renderer as a square RGBA image. In a kitty terminal the cover is
-//! shown as a true inline image (graphics protocol); elsewhere it is
-//! drawn with quadrant blocks at two pixels per cell in both axes.
+//! Album art: fetch the current track's cover and hand it to the renderer as
+//! square RGBA. Kitty shows a true inline image (graphics protocol); elsewhere
+//! it is drawn with quadrant blocks at two pixels per cell in both axes.
 
 use crate::models::Track;
 use image::RgbaImage;
 
-/// How the album art can be shown in this terminal.
+/// How album art can be rendered in this terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Graphics {
     /// Kitty's inline image protocol: a real, high-resolution picture.
@@ -15,9 +14,8 @@ pub enum Graphics {
     Blocks,
 }
 
-/// Detect the terminal's capability from the environment only — the
-/// protocol alternatives all require *querying* the terminal, and its
-/// reply would be swallowed by the key-reading event loop.
+/// Detect terminal capability from the environment. Protocol queries need a
+/// terminal reply, which the key-reading event loop would swallow.
 pub fn graphics_mode() -> Graphics {
     let kitty = std::env::var_os("KITTY_WINDOW_ID").is_some()
         || std::env::var("TERM").is_ok_and(|t| t.contains("kitty"));
@@ -28,9 +26,9 @@ pub fn graphics_mode() -> Graphics {
     }
 }
 
-/// Does the terminal support kitty's text sizing protocol (OSC 66)?
-/// Kitty only grew it in 0.40, so check the version once; an older kitty
-/// would otherwise swallow the scaled text and leave the pane blank.
+/// Whether the terminal supports kitty's text sizing protocol (OSC 66).
+/// Kitty added it in 0.40; older versions swallow the scaled text and leave
+/// the pane blank.
 pub fn text_scaling() -> bool {
     static SUPPORT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SUPPORT.get_or_init(|| {
@@ -51,13 +49,11 @@ pub fn text_scaling() -> bool {
     })
 }
 
-/// The terminal's cell size in pixels, read straight from the kernel
-/// (TIOCGWINSZ — an ioctl, not an escape-code query, so no reply can
-/// ever reach the key loop). Album-art geometry uses it so a square
-/// cover lands square on screen whatever the font's proportions: cells
-/// are twice as tall as wide on classic terminals, but proportional
-/// fonts (or HiDPI setups) skew that. Falls back to 2:1 when the
-/// terminal reports no pixel dimensions.
+/// Terminal cell size in pixels, read straight from the kernel via TIOCGWINSZ.
+/// An ioctl, not an escape query, so no reply can reach the key loop. Needed
+/// to keep square covers square across fonts — classic cells are 2:1, but
+/// proportional fonts and HiDPI skew that. Falls back to 2:1 when the terminal
+/// reports no pixel size.
 pub fn cell_size() -> (f32, f32) {
     if let Ok(ws) = crossterm::terminal::window_size() {
         if ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0 {
@@ -70,11 +66,11 @@ pub fn cell_size() -> (f32, f32) {
     (1.0, 2.0)
 }
 
-/// The best single cover URL for a track — the video's largest still,
-/// also what MPRIS advertises as `mpris:artUrl`.
+/// Best single cover URL for a track: the video's largest still, also what
+/// MPRIS advertises as `mpris:artUrl`.
 pub fn primary_cover_url(t: &Track) -> String {
-    // A local track's art is the cover file beside it, which MPRIS wants
-    // spelled as a `file://` URI.
+    // Local art is the cover file beside the track, spelled as a `file://`
+    // URI for MPRIS.
     if crate::offline::is_local(&t.id) {
         return t
             .thumbnail_url
@@ -89,15 +85,12 @@ pub fn primary_cover_url(t: &Track) -> String {
     t.thumbnail_url.clone().unwrap_or_default()
 }
 
-/// Candidate cover URLs for a track, largest first: the max-res still,
-/// then the smaller ones, and finally the API thumbnail. The renderer
-/// centre-crops to a square, which strips letterbox bars off music-video
-/// frames (album art is centred, so the crop lands on the cover).
+/// Candidate cover URLs, largest first: maxres, smaller stills, then the API
+/// thumbnail. The renderer centre-crops to a square, cutting letterbox bars
+/// off music-video frames (album art stays centred).
 pub fn cover_urls(t: &Track) -> Vec<String> {
-    // A local row has no video id to build a thumbnail URL from and no
-    // network to fetch one with. Its cover lives inside the audio —
-    // `d` embeds it — so the file itself is the candidate; a cover the
-    // user placed beside the track is tried first.
+    // Local rows have no video id and no network. The cover is embedded in
+    // the audio (or placed beside it), so try that file first.
     if crate::offline::is_local(&t.id) {
         let mut urls: Vec<String> = t
             .thumbnail_url
@@ -124,8 +117,8 @@ pub fn cover_urls(t: &Track) -> Vec<String> {
     urls
 }
 
-/// Decode whatever a path on disk holds: an image file if it is one,
-/// otherwise the cover embedded in the audio file's tag.
+/// Decode a path: an image file if possible, otherwise the cover embedded in
+/// the audio tag.
 fn cover_from_disk(path: &str) -> Option<RgbaImage> {
     if let Ok(rgba) = image::open(path) {
         return Some(rgba.to_rgba8());
@@ -133,9 +126,9 @@ fn cover_from_disk(path: &str) -> Option<RgbaImage> {
     embedded_cover(path)
 }
 
-/// Pull the cover straight out of an audio file's tag. A download keeps
-/// its art inside the mp3 (`--embed-thumbnail`), so the music folder
-/// holds only audio and the cover still has to be renderable offline.
+/// Pull the cover from an audio file's tag. Downloads embed art in the mp3
+/// (`--embed-thumbnail`), so the music folder stays audio-only while covers
+/// still render offline.
 fn embedded_cover(path: &str) -> Option<RgbaImage> {
     use lofty::file::TaggedFileExt;
     let tagged = lofty::read_from_path(path).ok()?;
@@ -143,8 +136,7 @@ fn embedded_cover(path: &str) -> Option<RgbaImage> {
     image::load_from_memory(picture.data()).ok().map(|img| img.to_rgba8())
 }
 
-/// Centre-crop to a square: strips the letterbox bars off music-video
-/// frames (album art is centred, so the crop lands on the cover).
+/// Centre-crop to a square, trimming letterbox bars (album art is centred).
 fn center_square(rgba: RgbaImage) -> Option<RgbaImage> {
     let side = rgba.width().min(rgba.height());
     if side == 0 {
@@ -155,21 +147,19 @@ fn center_square(rgba: RgbaImage) -> Option<RgbaImage> {
     Some(image::imageops::crop_imm(&rgba, x, y, side, side).to_image())
 }
 
-/// Fetch and decode the first working cover, centre-cropped to a square.
-/// All candidates are fetched at once (ordered largest → smallest) and
-/// the biggest one that answered wins — a slow or rate-limited CDN on
-/// one URL can't hold the art back. Returns `None` when every candidate
-/// fails — the caller drops the panel.
+/// Fetch and decode the first working cover, centre-cropped. Candidates are
+/// fetched concurrently (largest first); the biggest that answered wins, so a
+/// slow or rate-limited CDN URL can't hold the art back. `None` when all fail
+/// and the caller drops the panel.
 pub async fn fetch_cover(urls: Vec<String>) -> Option<RgbaImage> {
     let mut remote = Vec::new();
     for url in urls {
         if url.starts_with("http://") || url.starts_with("https://") {
             remote.push(url);
         } else if !url.is_empty() {
-            // Anything else is a path on disk: open it directly and never
-            // go near the network, which is the whole point offline. A
-            // downloaded track keeps its cover inside the audio file, so
-            // when the path isn't an image itself, read the tag.
+            // Anything else is a disk path: open it locally, never the
+            // network — that's the point offline. Downloads keep the cover
+            // in the audio tag.
             if let Some(rgba) = cover_from_disk(&url) {
                 if let Some(square) = center_square(rgba) {
                     return Some(square);
@@ -195,17 +185,15 @@ pub async fn fetch_cover(urls: Vec<String>) -> Option<RgbaImage> {
                 if !resp.status().is_success() {
                     return None;
                 }
-                // Bytes only — decoding is the memory-heavy step and is
-                // done one candidate at a time below.
+                // Fetch bytes only; decoding is memory-heavy and happens one
+                // candidate at a time below.
                 resp.bytes().await.ok()
             })
         })
         .collect();
-    // Decode candidates strictly one at a time, largest first. A
-    // maxresdefault frame decodes to ~3.5 MB of RGBA; holding every
-    // answered candidate as a decoded image (the old behaviour) kept
-    // several of those alive at once for no benefit — the first success
-    // wins either way.
+    // Decode strictly one at a time, largest first. A maxres frame is ~3.5 MB
+    // of RGBA; keeping every answered candidate decoded (the old behaviour)
+    // wasted memory since the first success wins anyway.
     for task in tasks {
         let Some(bytes) = task.await.ok().flatten() else {
             continue;
@@ -220,8 +208,8 @@ pub async fn fetch_cover(urls: Vec<String>) -> Option<RgbaImage> {
     None
 }
 
-/// Resize the whole cover to an exact pixel canvas (Lanczos3) — never
-/// cropped: the art block letterboxes whatever doesn't fit.
+/// Resize the cover to an exact pixel canvas (Lanczos3), never cropping: the
+/// art block letterboxes whatever doesn't fit.
 pub fn fit_square(src: &RgbaImage, px_w: u32, px_h: u32) -> RgbaImage {
     image::imageops::resize(
         src,
@@ -231,12 +219,12 @@ pub fn fit_square(src: &RgbaImage, px_w: u32, px_h: u32) -> RgbaImage {
     )
 }
 
-/// Encode an image as PNG bytes (the kitty protocol's preferred payload).
+/// Encode an image as PNG bytes (kitty's preferred payload).
 pub fn png_bytes(img: &RgbaImage) -> Option<Vec<u8>> {
     use image::ImageEncoder;
     let mut buf = Vec::new();
-    // Encode straight from the borrowed pixel buffer: building a
-    // `DynamicImage` here used to clone the whole canvas first.
+    // Encode from the borrowed pixel buffer; building a `DynamicImage` used
+    // to clone the whole canvas.
     image::codecs::png::PngEncoder::new(&mut buf)
         .write_image(
             img.as_raw(),
@@ -248,7 +236,7 @@ pub fn png_bytes(img: &RgbaImage) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Base64 without extra dependencies (needed for kitty payloads).
+/// Base64 for kitty payloads; avoids an extra dependency.
 fn base64(data: &[u8]) -> String {
     const TABLE: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -273,14 +261,13 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
-/// The escape bytes that show `png` as an inline image covering the
-/// `cols`×`rows` cell area whose top-left cell is (`x`, `y`). Chunked per
-/// the kitty spec; kitty scales the `px_w`×`px_h` pixels onto the cell
-/// block, so one high-res payload works at any terminal size.
+/// Escape bytes that draw `png` inline over a `cols`×`rows` cell area at
+/// (`x`, `y`), chunked per the kitty spec. Kitty scales the `px_w`×`px_h`
+/// pixels to the cell block, so one high-res payload works at any size.
 pub fn kitty_transfer(x: u16, y: u16, cols: u16, rows: u16, px_w: u32, px_h: u32, png: &[u8]) -> Vec<u8> {
     let payload = base64(png);
     let mut out = Vec::with_capacity(payload.len() + 128);
-    // Move the cursor to the art area's top-left cell (1-based CUP).
+    // Move the cursor to the art's top-left cell (1-based CUP).
     out.extend_from_slice(format!("\x1b[{};{}H", y + 1, x + 1).as_bytes());
     let mut chunks = payload.as_bytes().chunks(4096).peekable();
     let mut first = true;
@@ -305,7 +292,7 @@ pub fn kitty_transfer(x: u16, y: u16, cols: u16, rows: u16, px_w: u32, px_h: u32
     out
 }
 
-/// Delete every visible inline image (terminal cleanup on exit).
+/// Delete all visible inline images (terminal cleanup on exit).
 pub fn kitty_cleanup() -> Vec<u8> {
     b"\x1b_Ga=d,d=A\x1b\\".to_vec()
 }
