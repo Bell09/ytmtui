@@ -27,7 +27,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 
 </div>
 
-> **Solo project** — Built and maintained by me alone.  
+> **Solo project** — Built and maintained by me.  
 > Pull requests are not accepted. Issues for bugs are welcome.  
 
 ---
