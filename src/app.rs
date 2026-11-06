@@ -35,51 +35,61 @@ type RmResult = (String, String, Track, usize, Result<(), String>);
 /// Labels for the browse sections, top to bottom in the `b` picker. The
 /// matching shelves are found by title, so the API can return them in any
 /// order or name them slightly differently.
-pub const BROWSE_SECTIONS: [&str; 12] = [
+pub const BROWSE_SECTIONS: [&str; 16] = [
     "QUICK PICKS",
     "DAILY DISCOVER",
     "FEATURED FOR YOU",
+    "MY SUBSCRIPTIONS",
     "FORGOTTEN FAVORITES",
     "FROM THE COMMUNITY",
     "MOODS & GENRES",
+    "ACTIVITY MIXES",
     "DISCOVERY MIX",
     "MIXED FOR YOU",
     "NEW RELEASES",
     "COVERS & REMIXES",
     "TRENDING PLAYLISTS",
     "TRENDING SONGS",
+    "COUNTRY CHARTS",
+    "GLOBAL CHARTS",
 ];
 
-/// Which browse section a shelf header belongs to. The order of the checks
-/// matters: "Discovery mix" must beat the generic "mix", "Covers and remixes"
-/// must beat it too ("remixes" contains "mix"), and the exact "from the
-/// community" title must beat "trending community playlists".
+/// Which browse section a shelf header belongs to. Some titles overlap, so
+/// the specific checks come before the generic ones.
 fn browse_section_for_title(title: &str) -> Option<usize> {
     let title = title.to_lowercase();
     if title.contains("quick") {
         Some(0)
+    } else if title.contains("activity") {
+        Some(7)
     } else if title.contains("discovery") {
-        Some(6)
+        Some(8)
     } else if title.contains("daily discover") {
         Some(1)
     } else if title.contains("featured") {
         Some(2)
-    } else if title.contains("forgotten") {
+    } else if title.contains("subscription") {
         Some(3)
-    } else if title.contains("new releases") {
-        Some(8)
-    } else if title.contains("mood") || title.contains("genre") {
-        Some(5)
-    } else if title == "from the community" || title == "from community" {
+    } else if title.contains("forgotten") {
         Some(4)
-    } else if title.contains("cover") || title.contains("remix") {
-        Some(9)
-    } else if title.contains("community") {
+    } else if title.contains("new releases") {
         Some(10)
-    } else if title.contains("mix") {
-        Some(7)
-    } else if title.contains("trending") {
+    } else if title.contains("mood") || title.contains("genre") {
+        Some(6)
+    } else if title == "from the community" || title == "from community" {
+        Some(5)
+    } else if title.contains("cover") || title.contains("remix") {
         Some(11)
+    } else if title.contains("global chart") {
+        Some(15)
+    } else if title.contains("country chart") || title.contains("charts") {
+        Some(14)
+    } else if title.contains("community") {
+        Some(12)
+    } else if title.contains("mix") {
+        Some(9)
+    } else if title.contains("trending") {
+        Some(13)
     } else {
         None
     }
@@ -98,6 +108,18 @@ type DownloadResult = (String, Result<crate::offline::Entry, String>);
 
 /// A background home-feed refresh for the browse picker.
 type BrowseResult = Result<Vec<BrowseShelf>, String>;
+
+/// A resolved stream URL for the next queue track, or why it failed.
+type PrefetchResult = (String, Result<String, String>);
+
+/// How many times a failed track is restarted before it is skipped.
+const MAX_PLAYBACK_RETRIES: u8 = 2;
+/// Prefetched URLs are short-lived; older ones fall back to a fresh resolve.
+const PREFETCH_TTL: Duration = Duration::from_secs(15 * 60);
+/// A track that never starts producing audio is treated as failed after this.
+const BUFFER_WATCHDOG: Duration = Duration::from_secs(25);
+/// A playing track whose clock stops moving is restarted after this.
+const STALL_WATCHDOG: Duration = Duration::from_secs(30);
 
 /// Filters shown in the search bar, in display order. Only the ones the
 /// Innertube response actually advertises are kept.
@@ -243,6 +265,18 @@ pub struct App {
     mpv_seen: bool,
     pub playback_duration_secs: u64,
     pub buffering_timer: Option<Instant>,
+    /// Retry counter for the current track; reset whenever a new track starts.
+    playback_retries: u8,
+    /// When the current track was handed to mpv, and the last time its clock
+    /// moved. Together they drive the buffer and stall watchdogs.
+    play_started_at: Option<Instant>,
+    last_progress_at: Option<Instant>,
+    audio_started: bool,
+    /// Next track's resolved stream, keyed by video id and when it arrived.
+    prefetch: Option<(String, String, Instant)>,
+    prefetch_inflight: Option<String>,
+    prefetch_tx: tokio::sync::mpsc::UnboundedSender<PrefetchResult>,
+    prefetch_rx: tokio::sync::mpsc::UnboundedReceiver<PrefetchResult>,
     /// Colour theme (from pywal, wallust or matugen, reloaded live when the
     /// wallpaper tool rewrites its palette).
     pub theme: crate::theme::Theme,
@@ -396,6 +430,7 @@ impl App {
         let (preview_tx, preview_rx) = tokio::sync::mpsc::unbounded_channel();
         let (library_tx, library_rx) = tokio::sync::mpsc::unbounded_channel();
         let (browse_refresh_tx, browse_refresh_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (prefetch_tx, prefetch_rx) = tokio::sync::mpsc::unbounded_channel();
         let (account_tx, account_rx) = tokio::sync::mpsc::unbounded_channel();
         let (art_tx, art_rx) = tokio::sync::mpsc::unbounded_channel();
         let (lyrics_tx, lyrics_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -546,6 +581,14 @@ impl App {
             mpv_seen: false,
             playback_duration_secs: 210,
             buffering_timer: None,
+            playback_retries: 0,
+            play_started_at: None,
+            last_progress_at: None,
+            audio_started: false,
+            prefetch: None,
+            prefetch_inflight: None,
+            prefetch_tx,
+            prefetch_rx,
             theme,
             theme_src,
             theme_mtime,
@@ -760,6 +803,15 @@ impl App {
                 Err(e) => self.status_message = format!("Download failed: {}", e),
             }
         }
+        // A resolved next-track stream is kept until `play_track` uses it.
+        while let Ok((id, result)) = self.prefetch_rx.try_recv() {
+            if self.prefetch_inflight.as_deref() == Some(id.as_str()) {
+                self.prefetch_inflight = None;
+            }
+            if let Ok(url) = result {
+                self.prefetch = Some((id, url, Instant::now()));
+            }
+        }
         // Widget actions (MPRIS + queue IPC) apply before this tick's own
         // transitions.
         self.apply_mpris_commands();
@@ -778,8 +830,11 @@ impl App {
                 }
             }
         }
+        // A stream that never starts, or one that stops advancing mid-track,
+        // is retried and then skipped instead of leaving playback stuck.
+        self.check_playback_health();
         // mpv ending on its own means the track finished (or the stream
-        // failed): step the queue forward.
+        // failed): step the queue forward or recover.
         if let Some(status) = self.player.poll_exited() {
             let was_active = matches!(
                 self.playback_state,
@@ -789,9 +844,7 @@ impl App {
                 if status.success() {
                     self.advance_on_end();
                 } else {
-                    self.position_sampled_at = None;
-                    self.playback_state = PlaybackState::Stopped;
-                    self.status_message = "Playback error: stream failed".to_string();
+                    self.recover_playback("stream failed");
                 }
             }
         }
@@ -1110,19 +1163,23 @@ impl App {
 
     /// Browse section labels in the order we want them to appear in the
     /// picker. They correspond to the shelves `home_for_you_shelves` keeps.
-    pub const BROWSE_PICKER_LABELS: [&str; 12] = [
+    pub const BROWSE_PICKER_LABELS: [&str; 16] = [
         "Quick picks",
         "Your daily discover",
         "Featured playlists for you",
+        "My subscriptions",
         "Forgotten favorites",
         "From the community",
-        "Mood and Genres",
+        "Moods & genres",
+        "Activity mixes",
         "Discovery mix",
         "Mixed for you",
         "New releases",
         "Covers and remixes",
         "Trending community playlists",
         "Trending songs",
+        "Country charts",
+        "Global charts",
     ];
 
     /// `b` on any page: overlay the browse section picker. The feed is
@@ -1447,13 +1504,14 @@ impl App {
         let Ok(text) = std::fs::read_to_string(Self::browse_cache_path()) else {
             return;
         };
-        let Ok(mut cached) = serde_json::from_str::<Vec<Option<BrowseShelf>>>(&text) else {
+        let Ok(cached) = serde_json::from_str::<Vec<Option<BrowseShelf>>>(&text) else {
             return;
         };
-        if cached.len() < BROWSE_SECTIONS.len() {
-            cached.resize(BROWSE_SECTIONS.len(), None);
+        // A cache from an older section list would put shelves in the wrong
+        // slots; drop it and let the network fill the new layout.
+        if cached.len() != BROWSE_SECTIONS.len() {
+            return;
         }
-        cached.truncate(BROWSE_SECTIONS.len());
         if cached
             .iter()
             .any(|slot| slot.as_ref().is_some_and(|shelf| !shelf.items.is_empty()))
@@ -1903,6 +1961,10 @@ impl App {
             return;
         }
         self.status_message = format!("Loading '{}'...", playlist.title);
+        if playlist.kind == PlaylistKind::Artist {
+            self.open_artist(playlist).await;
+            return;
+        }
         match self.api.playlist_tracks(&playlist.id).await {
             Ok(mut tracks) if !tracks.is_empty() => {
                 Self::mark(&self.registry, &mut tracks);
@@ -1910,6 +1972,35 @@ impl App {
             }
             Ok(_) => self.status_message = format!("'{}' is empty", playlist.title),
             Err(e) => self.status_message = format!("Failed to load: {}", e),
+        }
+    }
+
+    /// Show an artist as shelves: top songs, then their albums and singles.
+    /// The artist page replaces the current browse rows rather than opening
+    /// a flat track list, so the releases stay reachable.
+    async fn open_artist(&mut self, artist: Playlist) {
+        match self.api.artist_sections(&artist.id).await {
+            Ok(shelves) if !shelves.is_empty() => {
+                let was_browse = self.current_page == Page::Browse;
+                if was_browse {
+                    self.browse_back = Some((self.browse_rows.clone(), self.selected_index));
+                } else {
+                    self.browse_return_page = self.current_page;
+                    self.browse_return_index = self.selected_index;
+                    self.browse_back = None;
+                }
+                let mut rows = Vec::new();
+                for shelf in shelves {
+                    rows.push(BrowseRow::Header(shelf.title));
+                    rows.extend(shelf.items.into_iter().map(BrowseRow::Item));
+                }
+                self.browse_section = None;
+                self.current_page = Page::Browse;
+                self.set_browse_rows(rows);
+                self.status_message = format!("{} · albums & singles", artist.title);
+            }
+            Ok(_) => self.status_message = format!("No releases for {}", artist.title),
+            Err(e) => self.status_message = format!("Failed to load {}: {}", artist.title, e),
         }
     }
 
@@ -1946,21 +2037,149 @@ impl App {
     /// that audio is actually running; the duration is corrected from mpv
     /// once the file is loaded.
     fn play_track(&mut self, t: Track) {
-        self.status_message = "buffer♪ng".to_string();
-        if let Err(e) = self.player.play(&t.id) {
-            self.status_message = format!("Playback error: {}", e);
-            self.playback_state = PlaybackState::Stopped;
+        self.playback_retries = 0;
+        self.start_track(t, false);
+    }
+
+    /// Shared entry point for fresh tracks and retries. A retry deliberately
+    /// skips the prefetched URL, since that URL is the one that just failed.
+    fn start_track(&mut self, t: Track, retry: bool) {
+        self.status_message = if retry {
+            "Retrying…".to_string()
+        } else {
+            "buffer♪ng".to_string()
+        };
+        let prefetched = if retry { None } else { self.take_prefetch(&t.id) };
+        let result = match self.player.play_with(&t.id, prefetched.as_deref()) {
+            Err(_) if prefetched.is_some() => self.player.play(&t.id),
+            other => other,
+        };
+        if let Err(e) = result {
+            if self.playback_retries < MAX_PLAYBACK_RETRIES {
+                self.playback_retries += 1;
+                self.status_message = format!(
+                    "Playback error: {} — retrying ({}/{})",
+                    e, self.playback_retries, MAX_PLAYBACK_RETRIES
+                );
+                self.start_track(t, true);
+            } else {
+                self.playback_retries = 0;
+                self.playback_state = PlaybackState::Stopped;
+                self.status_message = format!("Playback error: {}", e);
+            }
             return;
         }
         self.playback_position = 0.0;
         self.position_sampled_at = None;
         self.mpv_seen = false;
+        self.audio_started = false;
+        self.play_started_at = Some(Instant::now());
+        self.last_progress_at = Some(Instant::now());
         self.playback_duration_secs = parse_duration(&t.duration).unwrap_or(210);
         self.current_track = Some(t);
         self.playback_state = PlaybackState::Buffering;
         self.buffering_timer = Some(Instant::now());
         self.sync_art();
         self.sync_lyrics();
+        self.prefetch_next();
+    }
+
+    /// Resolve the upcoming queue track in the background so the next song
+    /// starts without waiting for yt-dlp.
+    fn prefetch_next(&mut self) {
+        if self.repeat == RepeatMode::One {
+            return;
+        }
+        let Some(index) = self.next_queue_index() else {
+            return;
+        };
+        let Some(track) = self.queue.get(index) else {
+            return;
+        };
+        if crate::offline::is_local(&track.id) {
+            return;
+        }
+        if self.prefetch.as_ref().is_some_and(|(id, _, at)| {
+            id == &track.id && at.elapsed() < PREFETCH_TTL
+        }) {
+            return;
+        }
+        if self.prefetch_inflight.as_deref() == Some(track.id.as_str()) {
+            return;
+        }
+        let video = track.id.clone();
+        self.prefetch_inflight = Some(video.clone());
+        let tx = self.prefetch_tx.clone();
+        tokio::spawn(async move {
+            let id = video.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::player::resolve_stream(&video).map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            let _ = tx.send((id, result));
+        });
+    }
+
+    /// Hand back the prefetched URL for `id` if it is still fresh.
+    fn take_prefetch(&mut self, id: &str) -> Option<String> {
+        let (cached_id, url, at) = self.prefetch.take()?;
+        (cached_id == id && at.elapsed() < PREFETCH_TTL).then_some(url)
+    }
+
+    /// Retry the current track, then skip it if it keeps failing.
+    fn recover_playback(&mut self, reason: &str) {
+        self.player.stop();
+        self.position_sampled_at = None;
+        self.buffering_timer = None;
+        self.audio_started = false;
+        let Some(track) = self.current_track.clone() else {
+            self.playback_state = PlaybackState::Stopped;
+            return;
+        };
+        if self.playback_retries < MAX_PLAYBACK_RETRIES {
+            self.playback_retries += 1;
+            self.status_message = format!(
+                "{} — retrying ({}/{})",
+                reason, self.playback_retries, MAX_PLAYBACK_RETRIES
+            );
+            self.start_track(track, true);
+            return;
+        }
+        self.playback_retries = 0;
+        self.status_message = format!("{} — skipping", reason);
+        match self.next_queue_index() {
+            Some(index) if index < self.queue.len() => self.jump_to(index),
+            _ => {
+                self.playback_state = PlaybackState::Stopped;
+                self.status_message = format!("Playback error: {}", reason);
+            }
+        }
+    }
+
+    /// Watch the two failure modes mpv cannot report on its own: a stream
+    /// that never starts and one that silently stops mid-track.
+    fn check_playback_health(&mut self) {
+        if !matches!(
+            self.playback_state,
+            PlaybackState::Buffering | PlaybackState::Playing | PlaybackState::Paused
+        ) {
+            return;
+        }
+        let Some(started) = self.play_started_at else {
+            return;
+        };
+        if !self.audio_started && started.elapsed() >= BUFFER_WATCHDOG {
+            self.recover_playback("stream stalled");
+            return;
+        }
+        if self.playback_state == PlaybackState::Playing
+            && self
+                .last_progress_at
+                .is_some_and(|at| at.elapsed() >= STALL_WATCHDOG)
+        {
+            self.recover_playback("playback stalled");
+        }
     }
 
     /// Read mpv's authoritative timeline. While buffering, the first
@@ -1979,10 +2198,17 @@ impl App {
         };
         self.mpv_seen = true;
         if let Some(position) = timeline.position.filter(|p| p.is_finite()) {
-            self.playback_position = position.max(0.0);
+            let position = position.max(0.0);
+            if (position - self.playback_position).abs() > 0.05 {
+                self.last_progress_at = Some(Instant::now());
+            }
+            self.playback_position = position;
             self.position_sampled_at = Some(Instant::now());
-            if self.playback_state == PlaybackState::Buffering && position > 0.0 {
-                self.finish_buffering();
+            if position > 0.0 {
+                self.audio_started = true;
+                if self.playback_state == PlaybackState::Buffering {
+                    self.finish_buffering();
+                }
             }
         }
         if let Some(duration) = timeline.duration.filter(|d| d.is_finite() && *d > 0.0) {
@@ -2860,15 +3086,19 @@ mod browse_section_tests {
                 "QUICK PICKS",
                 "DAILY DISCOVER",
                 "FEATURED FOR YOU",
+                "MY SUBSCRIPTIONS",
                 "FORGOTTEN FAVORITES",
                 "FROM THE COMMUNITY",
                 "MOODS & GENRES",
+                "ACTIVITY MIXES",
                 "DISCOVERY MIX",
                 "MIXED FOR YOU",
                 "NEW RELEASES",
                 "COVERS & REMIXES",
                 "TRENDING PLAYLISTS",
                 "TRENDING SONGS",
+                "COUNTRY CHARTS",
+                "GLOBAL CHARTS",
             ]
         );
         assert_eq!(browse_section_for_title("Quick picks"), Some(0));
@@ -2877,25 +3107,29 @@ mod browse_section_tests {
             browse_section_for_title("Featured playlists for you"),
             Some(2)
         );
+        assert_eq!(browse_section_for_title("My subscriptions"), Some(3));
         assert_eq!(
             browse_section_for_title("Forgotten favorites"),
-            Some(3)
+            Some(4)
         );
-        assert_eq!(browse_section_for_title("From the community"), Some(4));
+        assert_eq!(browse_section_for_title("From the community"), Some(5));
         // Moods and genres merge into one slot.
-        assert_eq!(browse_section_for_title("Moods"), Some(5));
-        assert_eq!(browse_section_for_title("Genres"), Some(5));
+        assert_eq!(browse_section_for_title("Moods"), Some(6));
+        assert_eq!(browse_section_for_title("Genres"), Some(6));
+        assert_eq!(browse_section_for_title("Activity mixes"), Some(7));
         // The specific mix name must win over the generic "mix", and
         // "remixes" must not be taken for a mix shelf.
-        assert_eq!(browse_section_for_title("Discovery mix"), Some(6));
-        assert_eq!(browse_section_for_title("Mixed for you"), Some(7));
-        assert_eq!(browse_section_for_title("New releases"), Some(8));
-        assert_eq!(browse_section_for_title("Covers and remixes"), Some(9));
+        assert_eq!(browse_section_for_title("Discovery mix"), Some(8));
+        assert_eq!(browse_section_for_title("Mixed for you"), Some(9));
+        assert_eq!(browse_section_for_title("New releases"), Some(10));
+        assert_eq!(browse_section_for_title("Covers and remixes"), Some(11));
         assert_eq!(
             browse_section_for_title("Trending community playlists"),
-            Some(10)
+            Some(12)
         );
-        assert_eq!(browse_section_for_title("Trending songs for you"), Some(11));
+        assert_eq!(browse_section_for_title("Trending songs for you"), Some(13));
+        assert_eq!(browse_section_for_title("Country charts"), Some(14));
+        assert_eq!(browse_section_for_title("Global charts"), Some(15));
         assert_eq!(browse_section_for_title("Listen again"), None);
     }
 }

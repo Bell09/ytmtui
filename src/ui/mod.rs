@@ -874,7 +874,7 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect, full_height: bool) {
                     _ => Style::default().fg(t.fg),                 // upcoming
                 };
                 // The maximized view bolds the whole block: terminal fonts
-                // have one size, so weight and centring carry the emphasis.
+                // have one size, so weight carries the emphasis.
                 if full_height || current == Some(i) {
                     style = style.add_modifier(Modifier::BOLD);
                 }
@@ -910,7 +910,7 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect, full_height: bool) {
         .wrap(Wrap { trim: false })
         .scroll((offset, 0));
     if full_height {
-        para = para.alignment(Alignment::Center);
+        para = para.alignment(Alignment::Left);
     }
     f.render_widget(para, inner);
 }
@@ -1034,7 +1034,7 @@ fn draw_scaled_lyrics(
         if y + 2 > inner.y + inner.height {
             break;
         }
-        let x = inner.x + (inner.width - width as u16) / 2;
+        let x = inner.x;
         out.extend_from_slice(format!("\x1b[{};{}H", y + 1, x + 1).as_bytes());
         let color = match kind {
             LyricKind::Played => t.dim,

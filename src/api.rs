@@ -227,14 +227,16 @@ impl YtmApi {
     }
 
     async fn for_you_with_pages(&self, max_pages: usize) -> anyhow::Result<Vec<BrowseShelf>> {
-        // The home walk is the slow part (one request per continuation
-        // page); run the other three endpoints alongside it instead of
-        // after it so opening the picker waits for the longest, not the sum.
-        let (home, trending, categories, discovery) = tokio::join!(
+        // Every endpoint runs alongside the slow home walk so opening the
+        // picker waits for the longest request, not the sum.
+        let (home, trending, categories, discovery, subscriptions, charts, featured) = tokio::join!(
             self.home_for_you_shelves(max_pages),
             self.trending_songs_shelf(),
             self.moods_and_genres_shelves(),
             self.discovery_mix_shelf(),
+            self.subscriptions_shelf(),
+            self.charts_shelves(),
+            self.featured_playlists_shelf(),
         );
         let mut shelves = home.unwrap_or_default();
         if let Ok(Some(shelf)) = trending {
@@ -246,9 +248,195 @@ impl YtmApi {
         if let Ok(Some(shelf)) = discovery {
             shelves.push(shelf);
         }
+        if let Ok(Some(shelf)) = subscriptions {
+            shelves.push(shelf);
+        }
+        if let Ok(charts) = charts {
+            shelves.extend(charts);
+        }
+        // The home feed usually carries the editorial shelf; the search-backed
+        // fallback only fills in when it did not.
+        if !shelves
+            .iter()
+            .any(|shelf| shelf.title.to_lowercase().contains("featured"))
+        {
+            if let Ok(Some(shelf)) = featured {
+                shelves.push(shelf);
+            }
+        }
         shelves.retain(|shelf| !shelf.items.is_empty());
         if shelves.is_empty() {
             anyhow::bail!("nothing to browse yet");
+        }
+        Ok(shelves)
+    }
+
+    /// Artists the account subscribes to, as openable artist entries.
+    async fn subscriptions_shelf(&self) -> anyhow::Result<Option<BrowseShelf>> {
+        let mut body = json!({
+            "context": context(),
+            "browseId": "FEmusic_library_corpus_artists",
+        });
+        let mut value = self.browse(&body).await?;
+        let mut seen_tokens = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut items = Vec::new();
+        loop {
+            let mut hits = Vec::new();
+            collect_search_hits(&value, &mut hits);
+            for hit in hits {
+                if let Some(playlist) = hit.collection() {
+                    let wanted = matches!(
+                        playlist.kind,
+                        PlaylistKind::Artist | PlaylistKind::Channel
+                    );
+                    if wanted && seen.insert(playlist.id.clone()) {
+                        items.push(hit);
+                    }
+                }
+            }
+            match find_next_continuation(&value) {
+                Some(token) if !seen_tokens.contains(&token) => {
+                    seen_tokens.push(token.clone());
+                    body = json!({ "context": context(), "continuation": token });
+                    match self.browse(&body).await {
+                        Ok(next) => value = next,
+                        Err(_) => break,
+                    }
+                }
+                _ => break,
+            }
+        }
+        if items.is_empty() {
+            return Ok(None);
+        }
+        items.truncate(60);
+        Ok(Some(BrowseShelf {
+            title: "My subscriptions".to_string(),
+            items,
+        }))
+    }
+
+    /// Both chart pages: the account's own country and the global list.
+    async fn charts_shelves(&self) -> anyhow::Result<Vec<BrowseShelf>> {
+        let (local, global) = tokio::join!(
+            self.chart_shelf(None, "Country charts"),
+            self.chart_shelf(Some("ZZ"), "Global charts"),
+        );
+        let mut shelves = Vec::new();
+        for shelf in [local, global].into_iter().flatten().flatten() {
+            shelves.push(shelf);
+        }
+        Ok(shelves)
+    }
+
+    async fn chart_shelf(
+        &self,
+        country: Option<&str>,
+        label: &str,
+    ) -> anyhow::Result<Option<BrowseShelf>> {
+        let mut body = json!({ "context": context(), "browseId": "FEmusic_charts" });
+        if let Some(country) = country {
+            body["formData"] = json!({ "selectedValues": [country] });
+        }
+        let value = self.browse(&body).await?;
+        let mut playlists = Vec::new();
+        collect_two_row_playlists(&value, &mut playlists);
+        let mut seen = std::collections::HashSet::new();
+        playlists.retain(|playlist| {
+            matches!(playlist.kind, PlaylistKind::Playlist | PlaylistKind::Album)
+                && seen.insert(playlist.id.clone())
+        });
+        playlists.truncate(20);
+        if playlists.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(BrowseShelf {
+            title: label.to_string(),
+            items: playlists
+                .into_iter()
+                .map(SearchHit::Collection)
+                .collect(),
+        }))
+    }
+
+    /// Editorial playlists, used when the home feed has no featured shelf.
+    async fn featured_playlists_shelf(&self) -> anyhow::Result<Option<BrowseShelf>> {
+        const FEATURED_PLAYLISTS: &str = "EgeKAQQoADgBagwQDhAKEAMQBBAJEAU=";
+        let results = self.search("music", Some(FEATURED_PLAYLISTS)).await?;
+        let mut seen = std::collections::HashSet::new();
+        let mut items: Vec<SearchHit> = results
+            .hits
+            .into_iter()
+            .filter(|hit| match hit.collection() {
+                Some(playlist) => {
+                    playlist.kind == PlaylistKind::Playlist
+                        && seen.insert(playlist.id.clone())
+                }
+                None => false,
+            })
+            .collect();
+        items.truncate(12);
+        if items.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(BrowseShelf {
+            title: "Featured playlists for you".to_string(),
+            items,
+        }))
+    }
+
+    /// An artist page's top songs plus its Albums and Singles shelves. The
+    /// carousel's "more" endpoint fills in the full release lists.
+    pub async fn artist_sections(&self, channel_id: &str) -> anyhow::Result<Vec<BrowseShelf>> {
+        let value = self
+            .browse(&json!({ "context": context(), "browseId": channel_id }))
+            .await?;
+        let mut shelves = Vec::new();
+
+        let mut top = Vec::new();
+        collect_renderers(&value, "musicResponsiveListItemRenderer", &mut top);
+        if !top.is_empty() {
+            shelves.push(BrowseShelf {
+                title: "Top songs".to_string(),
+                items: top.into_iter().map(SearchHit::Track).collect(),
+            });
+        }
+
+        let mut carousels = Vec::new();
+        collect_browse_shelves(&value, &mut carousels);
+        for (needle, label) in [("album", "Albums"), ("single", "Singles & EPs")] {
+            let Some(shelf) = carousels
+                .iter()
+                .find(|shelf| shelf.title.to_lowercase().contains(needle))
+            else {
+                continue;
+            };
+            let mut releases: Vec<Playlist> = shelf
+                .items
+                .iter()
+                .filter_map(|item| item.collection().cloned())
+                .collect();
+            if let Some((browse_id, params)) = carousel_more(&value, needle) {
+                if let Ok(more) = self.category_playlists(&browse_id, &params).await {
+                    let mut seen: std::collections::HashSet<String> =
+                        releases.iter().map(|p| p.id.clone()).collect();
+                    for release in more {
+                        if seen.insert(release.id.clone()) {
+                            releases.push(release);
+                        }
+                    }
+                }
+            }
+            if !releases.is_empty() {
+                shelves.push(BrowseShelf {
+                    title: label.to_string(),
+                    items: releases
+                        .into_iter()
+                        .map(SearchHit::Collection)
+                        .collect(),
+                });
+            }
         }
         Ok(shelves)
     }
@@ -345,6 +533,9 @@ impl YtmApi {
 
     /// Moods and genres are navigation grids, not playlists. Keep the two
     /// labelled grids and turn each button into an openable category.
+    /// Activity mixes get their own shelf: use an explicit grid when the
+    /// response has one, otherwise pull the activity buttons out of the
+    /// mood grid.
     async fn moods_and_genres_shelves(&self) -> anyhow::Result<Vec<BrowseShelf>> {
         let value = self.browse(&json!({
             "context": context(),
@@ -353,9 +544,27 @@ impl YtmApi {
         let mut grids = Vec::new();
         collect_navigation_grids(&value, &mut grids);
         let mut shelves = Vec::new();
+        let mut activity_items = Vec::new();
+        let mut has_activity_grid = false;
+        const ACTIVITY_LABELS: [&str; 10] = [
+            "workout",
+            "focus",
+            "sleep",
+            "commute",
+            "party",
+            "energize",
+            "gaming",
+            "romance",
+            "chill",
+            "feel good",
+        ];
         for (title, buttons) in grids {
             let lower = title.to_lowercase();
-            let (label, kind) = if lower.contains("mood") {
+            let activity = lower.contains("activit");
+            let (label, kind) = if activity {
+                has_activity_grid = true;
+                ("Activity mixes", PlaylistKind::Mood)
+            } else if lower.contains("mood") {
                 ("Moods", PlaylistKind::Mood)
             } else if lower.contains("genre") {
                 ("Genres", PlaylistKind::Genre)
@@ -364,9 +573,19 @@ impl YtmApi {
             };
             let mut items = Vec::new();
             for button in buttons {
-                if let Some(playlist) = parse_category_button(button, kind) {
-                    items.push(SearchHit::Collection(playlist));
+                let Some(playlist) = parse_category_button(button, kind) else {
+                    continue;
+                };
+                let is_activity = activity || {
+                    let label = runs_text(button.get("buttonText"))
+                        .unwrap_or_default()
+                        .to_lowercase();
+                    ACTIVITY_LABELS.contains(&label.as_str())
+                };
+                if is_activity {
+                    activity_items.push(SearchHit::Collection(playlist.clone()));
                 }
+                items.push(SearchHit::Collection(playlist));
             }
             if !items.is_empty() {
                 shelves.push(BrowseShelf {
@@ -374,6 +593,12 @@ impl YtmApi {
                     items,
                 });
             }
+        }
+        if !has_activity_grid && !activity_items.is_empty() {
+            shelves.push(BrowseShelf {
+                title: "Activity mixes".to_string(),
+                items: activity_items,
+            });
         }
         Ok(shelves)
     }
@@ -1086,6 +1311,33 @@ fn collect_browse_shelves(value: &Value, out: &mut Vec<BrowseShelf>) {
     }
 }
 
+/// The "more" endpoint of a carousel whose header contains `needle`.
+fn carousel_more(value: &Value, needle: &str) -> Option<(String, String)> {
+    fn walk(value: &Value, needle: &str) -> Option<(String, String)> {
+        match value {
+            Value::Object(map) => {
+                if let Some(shelf) = map.get("musicCarouselShelfRenderer") {
+                    let matches = shelf_title(shelf)
+                        .is_some_and(|title| title.to_lowercase().contains(needle));
+                    if matches {
+                        let endpoint = shelf.pointer(
+                            "/header/musicCarouselShelfBasicHeaderRenderer/moreContentButton\
+                             /buttonRenderer/navigationEndpoint/browseEndpoint",
+                        )?;
+                        let id = endpoint.get("browseId")?.as_str()?.to_string();
+                        let params = endpoint.get("params")?.as_str()?.to_string();
+                        return Some((id, params));
+                    }
+                }
+                map.values().find_map(|v| walk(v, needle))
+            }
+            Value::Array(arr) => arr.iter().find_map(|v| walk(v, needle)),
+            _ => None,
+        }
+    }
+    walk(value, needle)
+}
+
 fn parse_browse_shelf(shelf: &Value) -> Option<BrowseShelf> {
     let title = shelf_title(shelf)?;
     let mut items = Vec::new();
@@ -1720,5 +1972,21 @@ mod browse_tests {
             category_parts(&playlist.id),
             Some(("FEmusic_moods_and_genres_category", "category-params"))
         );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_artist_sections() {
+        let api = YtmApi::new();
+        let shelves = api
+            .artist_sections("UC0076UMUgEng8HORUw_MYHA")
+            .await
+            .unwrap();
+        for shelf in &shelves {
+            println!("{}: {}", shelf.title, shelf.items.len());
+        }
+        assert!(shelves.iter().any(|s| s.title == "Albums"));
+        assert!(shelves.iter().any(|s| s.title == "Singles & EPs"));
+        assert!(shelves.iter().any(|s| s.title == "Top songs"));
     }
 }

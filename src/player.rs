@@ -33,6 +33,13 @@ impl Player {
     }
 
     pub fn play(&mut self, track_id: &str) -> anyhow::Result<()> {
+        self.play_with(track_id, None)
+    }
+
+    /// Start `track_id`, using an already-resolved stream URL when one is
+    /// available. A prefetched URL saves mpv the yt-dlp round-trip and makes
+    /// the next song start almost immediately.
+    pub fn play_with(&mut self, track_id: &str, stream_url: Option<&str>) -> anyhow::Result<()> {
         self.stop();
         // A stale socket left behind by a previous process would make mpv fail
         // to bind; remove it first.
@@ -42,9 +49,12 @@ impl Player {
         // other id is a YouTube video. mpv takes either as its final
         // argument, so the rest of the command line is shared — and the
         // queue can mix both across an `o` toggle.
-        let target = match crate::offline::local_path(track_id) {
-            Some(path) => path.display().to_string(),
-            None => format!("https://www.youtube.com/watch?v={}", track_id),
+        let target = match stream_url {
+            Some(url) => url.to_string(),
+            None => match crate::offline::local_path(track_id) {
+                Some(path) => path.display().to_string(),
+                None => format!("https://www.youtube.com/watch?v={}", track_id),
+            },
         };
         let child = Command::new("mpv")
             .arg("--no-video")
@@ -173,4 +183,31 @@ impl Drop for Player {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// Resolve a video's direct audio URL so it can be handed to mpv later.
+/// Local files are already playable and return their path unchanged.
+pub fn resolve_stream(track_id: &str) -> anyhow::Result<String> {
+    if let Some(path) = crate::offline::local_path(track_id) {
+        return Ok(path.display().to_string());
+    }
+    let output = Command::new("yt-dlp")
+        .arg("--no-warnings")
+        .arg("-f")
+        .arg("bestaudio/best")
+        .arg("-g")
+        .arg(format!("https://www.youtube.com/watch?v={}", track_id))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("yt-dlp exited with {}", output.status);
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("http"))
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("yt-dlp returned no stream URL"))
 }
