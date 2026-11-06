@@ -320,33 +320,41 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, title: Rect, area: Rect) {
         ])
         .split(body);
 
-    draw_large_art(f, app, cols[0]);
-    draw_lyrics(f, app, cols[2], true);
+    // The lyrics block shares the cover's height: computing one square
+    // rect keeps both columns lined up instead of lyrics filling the
+    // whole body while the art floats in the middle.
+    let art_rect = large_art_rect(cols[0]);
+    draw_album_art(f, app, art_rect);
+    let lyrics_rect = Rect {
+        x: cols[2].x,
+        y: art_rect.y,
+        width: cols[2].width,
+        height: art_rect.height,
+    };
+    draw_lyrics(f, app, lyrics_rect, true);
 }
 
-/// Centre the biggest square cover that fits and draw it with the normal art
-/// renderer.
-fn draw_large_art(f: &mut Frame, app: &mut App, area: Rect) {
+/// Centre the biggest square cover that fits inside `area`. Shared with the
+/// lyrics column so both come out the same height.
+fn large_art_rect(area: Rect) -> Rect {
     let (cell_w, cell_h) = crate::art::cell_size();
     let max_w = area.width.saturating_sub(4);
     let max_h = area.height.saturating_sub(4);
     let from_height = (f32::from(max_h) * cell_h / cell_w).floor() as u16;
     let core = max_w.min(from_height.max(1)) & !1;
     if core < 4 {
-        draw_album_art(f, app, area);
-        return;
+        return area;
     }
     let rows = ((f32::from(core) * cell_w / cell_h).round() as u16)
         .max(1)
         .min(area.height);
     // `draw_album_art` keeps one spare column on each side of the square.
-    let rect = Rect {
+    Rect {
         x: area.x + area.width.saturating_sub(core + 2) / 2,
         y: area.y + area.height.saturating_sub(rows) / 2,
         width: core + 2,
         height: rows,
-    };
-    draw_album_art(f, app, rect);
+    }
 }
 
 /// Always-visible Library playlist list: kind glyph, name, right-aligned track
@@ -844,11 +852,11 @@ fn draw_lyrics(f: &mut Frame, app: &mut App, area: Rect, full_height: bool) {
                     centre_row = rows_total;
                 }
                 rows_total += text_rows(text);
-                let mut style = match current {
-                    Some(c) if i < c => Style::default().fg(t.dim), // played
-                    Some(c) if i == c => Style::default().fg(t.accent), // current
-                    _ => Style::default().fg(t.fg),                 // upcoming
-                };
+                // Fade fast: neighbours of the current line stay bright and
+                // further lines drop to dim within a few rows, so the eye
+                // tracks the line being sung instead of the whole block.
+                let dist = current.map_or(0, |c| i as i32 - c as i32);
+                let mut style = Style::default().fg(lyric_colour(t, dist));
                 // The maximized view bolds the whole block: terminal fonts
                 // have one size, so weight carries the emphasis.
                 if full_height || current == Some(i) {
@@ -945,12 +953,37 @@ fn lyric_rows(pos: f64, lyrics: &crate::lyrics::Lyrics) -> (Vec<LyricRow>, Optio
     }
 }
 
-/// Which palette role a scaled lyric row uses.
-#[derive(Clone, Copy)]
-enum LyricKind {
-    Played,
-    Current,
-    Upcoming,
+/// Terminal rows one scaled lyric line occupies: two for the 2× glyphs
+/// plus one blank row of air between lines. Stanza gaps get an extra
+/// unit so verses read as separate blocks.
+const SCALED_LINE_H: usize = 3;
+
+/// Blend two colours; non-RGB values snap to `b` past the midpoint.
+fn blend(a: Color, b: Color, t: f32) -> Color {
+    match (a, b) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            let t = t.clamp(0.0, 1.0);
+            Color::Rgb(
+                (r1 as f32 + (r2 as f32 - r1 as f32) * t).round() as u8,
+                (g1 as f32 + (g2 as f32 - g1 as f32) * t).round() as u8,
+                (b1 as f32 + (b2 as f32 - b1 as f32) * t).round() as u8,
+            )
+        }
+        _ if t < 0.5 => a,
+        _ => b,
+    }
+}
+
+/// Fast fade: the current line glows in the accent, its nearest neighbours
+/// stay bright, and anything further out drops to dim within a few lines.
+fn lyric_colour(t: &crate::theme::Theme, dist: i32) -> Color {
+    if dist == 0 {
+        t.accent
+    } else if dist > 0 {
+        blend(t.fg, t.dim, (dist - 1) as f32 / 3.0)
+    } else {
+        blend(t.fg, t.dim, (-dist - 1) as f32 / 1.5)
+    }
 }
 
 /// Draw the maximized lyrics through kitty's text sizing protocol (OSC 66).
@@ -970,7 +1003,7 @@ fn draw_scaled_lyrics(
     f.render_widget(Clear, inner);
 
     let max_cells = (inner.width as usize / 2).max(1);
-    let mut scaled: Vec<(String, LyricKind)> = Vec::with_capacity(rows.len());
+    let mut scaled: Vec<(String, i32)> = Vec::with_capacity(rows.len());
     let mut centre_row = 0usize;
     for (i, row) in rows.iter().enumerate() {
         match row {
@@ -978,27 +1011,24 @@ fn draw_scaled_lyrics(
                 if current == Some(i) {
                     centre_row = scaled.len();
                 }
-                let kind = match current {
-                    Some(c) if i < c => LyricKind::Played,
-                    Some(c) if i == c => LyricKind::Current,
-                    _ => LyricKind::Upcoming,
-                };
+                let dist = current.map_or(0, |c| i as i32 - c as i32);
                 for chunk in wrap_cells(text, max_cells) {
-                    scaled.push((chunk, kind));
+                    scaled.push((chunk, dist));
                 }
             }
-            LyricRow::Gap => scaled.push((String::new(), LyricKind::Upcoming)),
+            // A stanza break is one empty line plus the line spacing.
+            LyricRow::Gap => scaled.push((String::new(), -100)),
         }
     }
 
-    let viewport = (inner.height as usize / 2).max(1);
+    let viewport = (inner.height as usize / SCALED_LINE_H).max(1);
     let offset = lyrics_row_offset(&mut app.lyrics_scroll, centre_row, scaled.len(), viewport)
         as usize;
     app.lyrics_offset = offset as u16;
 
     let t = &app.theme;
     let mut out = Vec::new();
-    for (i, (text, kind)) in scaled.iter().enumerate().skip(offset).take(viewport) {
+    for (i, (text, dist)) in scaled.iter().enumerate().skip(offset).take(viewport) {
         if text.is_empty() {
             continue;
         }
@@ -1006,17 +1036,13 @@ fn draw_scaled_lyrics(
         if width > inner.width as usize {
             continue;
         }
-        let y = inner.y + (i - offset) as u16 * 2;
+        let y = inner.y + (i - offset) as u16 * SCALED_LINE_H as u16;
         if y + 2 > inner.y + inner.height {
             break;
         }
         let x = inner.x;
         out.extend_from_slice(format!("\x1b[{};{}H", y + 1, x + 1).as_bytes());
-        let color = match kind {
-            LyricKind::Played => t.dim,
-            LyricKind::Current => t.accent,
-            LyricKind::Upcoming => t.fg,
-        };
+        let color = lyric_colour(t, *dist);
         out.extend_from_slice(b"\x1b[1m");
         out.extend_from_slice(sgr_fg(color).as_bytes());
         out.extend_from_slice(b"\x1b]66;s=2;");

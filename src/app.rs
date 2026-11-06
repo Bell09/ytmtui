@@ -2152,11 +2152,13 @@ impl App {
     }
 
     /// Watch the two failure modes mpv cannot report on its own: a stream
-    /// that never starts and one that silently stops mid-track.
+    /// that never starts and one that silently stops mid-track. Neither
+    /// applies while paused — the clocks only start counting again on
+    /// resume, otherwise a long pause looks like a stall.
     fn check_playback_health(&mut self) {
         if !matches!(
             self.playback_state,
-            PlaybackState::Buffering | PlaybackState::Playing | PlaybackState::Paused
+            PlaybackState::Buffering | PlaybackState::Playing
         ) {
             return;
         }
@@ -2823,6 +2825,11 @@ impl App {
                 self.player.pause();
                 self.playback_state = PlaybackState::Playing;
                 self.position_sampled_at = Some(Instant::now());
+                // Restart the watchdogs: the pause may have lasted minutes,
+                // and without this the stall check fires the moment we
+                // resume and the track starts over.
+                self.last_progress_at = Some(Instant::now());
+                self.play_started_at = Some(Instant::now());
                 self.status_message = "Resumed".to_string();
             }
             PlaybackState::Buffering => {}
