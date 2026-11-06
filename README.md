@@ -52,8 +52,9 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 
 | | |
 | :---: | :---: |
-| ![Billie Eilish — i love you](assets/screenshots/i-love-you.png) | ![Billie Eilish — What Was I Made For?](assets/screenshots/what-was-i-made-for.png) |
-| ![llana Flores — rises the moon](assets/screenshots/rises-the-moon.png) | ![Green Day — Boulevard of Broken Dreams](assets/screenshots/boulevard-of-broken-dreams.png) |
+| ![girl in red — we fell in love in october](assets/screenshots/2026-11-06-210522_hyprshot.png) | ![Billie Eilish — What Was I Made For?](assets/screenshots/2026-11-06-212308_hyprshot.png) |
+| ![Avril Lavigne — I'm with You · browse shelves](assets/screenshots/2026-11-06-213210_hyprshot.png) | ![Billie Eilish — i love you · Discover Mix](assets/screenshots/2026-11-06-213858_hyprshot.png) |
+| ![liana flores — rises the moon](assets/screenshots/2026-11-06-214330_hyprshot.png) | ![Cafuné — Tek It](assets/screenshots/2026-11-06-214645_hyprshot.png) |
 
 </div>
 
