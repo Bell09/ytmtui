@@ -220,12 +220,6 @@ impl YtmApi {
         self.for_you_with_pages(12).await
     }
 
-    /// The first page only: enough sections to open the picker after a
-    /// single round-trip while the full walk continues in the background.
-    pub async fn for_you_quick(&self) -> anyhow::Result<Vec<BrowseShelf>> {
-        self.for_you_with_pages(1).await
-    }
-
     async fn for_you_with_pages(&self, max_pages: usize) -> anyhow::Result<Vec<BrowseShelf>> {
         // Every endpoint runs alongside the slow home walk so opening the
         // picker waits for the longest request, not the sum.
@@ -665,9 +659,12 @@ impl YtmApi {
             token = find_next_continuation(&value);
         }
 
-        // Continuations occasionally repeat an item; keep the first occurrence.
-        let mut ids = std::collections::HashSet::new();
-        tracks.retain(|t| ids.insert(t.id.clone()));
+        // Continuations occasionally repeat the same playlist *entry*. Its
+        // `setVideoId` is the stable membership identity; video ids are not
+        // unique because playlists may legitimately contain the same song
+        // twice. Rows without a token are left alone rather than collapsing
+        // real repeats.
+        dedupe_playlist_entries(&mut tracks);
         Ok(tracks)
     }
 
@@ -1087,6 +1084,19 @@ fn extract_plain_lyrics(value: &Value) -> Option<String> {
         .filter_map(|r| r.get("text").and_then(Value::as_str))
         .collect();
     (!text.is_empty()).then_some(text)
+}
+
+/// Drop only genuinely repeated playlist entries: rows sharing a
+/// `setVideoId` are the same membership. A song repeated with a different
+/// token (or no token at all) is preserved.
+fn dedupe_playlist_entries(tracks: &mut Vec<Track>) {
+    let mut seen = std::collections::HashSet::new();
+    tracks.retain(|track| {
+        track
+            .set_video_id
+            .as_ref()
+            .is_none_or(|token| seen.insert(token.clone()))
+    });
 }
 
 /// Recursively collect tracks from `musicResponsiveListItemRenderer` nodes.
@@ -1972,6 +1982,44 @@ mod browse_tests {
             category_parts(&playlist.id),
             Some(("FEmusic_moods_and_genres_category", "category-params"))
         );
+    }
+
+    #[test]
+    fn playlist_dedupes_membership_tokens_not_video_ids() {
+        fn track(id: &str, token: Option<&str>) -> Track {
+            Track {
+                id: id.to_string(),
+                title: id.to_string(),
+                artist: "Artist".to_string(),
+                album: None,
+                duration: None,
+                thumbnail_url: None,
+                like: None,
+                downloaded: false,
+                set_video_id: token.map(str::to_string),
+            }
+        }
+        // Legitimate repeat: same video, two playlist memberships.
+        let mut tracks = vec![
+            track("same", Some("entry-a")),
+            track("other", Some("entry-b")),
+            track("same", Some("entry-c")),
+        ];
+        dedupe_playlist_entries(&mut tracks);
+        assert_eq!(tracks.len(), 3);
+
+        // A continuation repeating the same *entry* is dropped.
+        let mut tracks = vec![
+            track("same", Some("entry-a")),
+            track("same", Some("entry-a")),
+            track("other", None),
+            track("other", None),
+        ];
+        dedupe_playlist_entries(&mut tracks);
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(tracks[0].set_video_id.as_deref(), Some("entry-a"));
+        assert_eq!(tracks[1].id, "other");
+        assert_eq!(tracks[2].id, "other");
     }
 
     #[tokio::test]

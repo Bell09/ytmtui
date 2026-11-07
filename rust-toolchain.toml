@@ -1,0 +1,5 @@
+[toolchain]
+# Minimum supported Rust version. The edition, dependency graph (notably
+# uuid/lofty/image) and the APIs used by this crate all build on 1.89.
+channel = "1.89.0"
+profile = "minimal"

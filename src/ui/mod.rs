@@ -1636,16 +1636,19 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let width = rows[1].width as usize;
+    let (start, end) =
+        visible_window(app.search_results.len(), app.selected_index, rows[1].height);
     let items: Vec<ListItem> = if app.search_results.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             " Nothing here yet — press / to search.",
             Style::default().fg(t.dim),
         )))]
     } else {
-        app.search_results
+        app.search_results[start..end]
             .iter()
             .enumerate()
-            .map(|(i, hit)| {
+            .map(|(offset, hit)| {
+                let i = start + offset;
                 let playing = match hit {
                     SearchHit::Track(tr) => {
                         app.current_track.as_ref().is_some_and(|c| c.id == tr.id)
@@ -1668,7 +1671,7 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
     );
     let mut state = ListState::default();
     if !app.search_results.is_empty() {
-        state.select(Some(app.selected_index));
+        state.select(Some(app.selected_index.saturating_sub(start)));
     }
     f.render_stateful_widget(list, rows[1], &mut state);
 }
@@ -1695,35 +1698,38 @@ fn draw_browse(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let width = area.width as usize;
-    let items: Vec<ListItem> = app
-        .browse_rows
+    let (start, end) = visible_window(app.browse_rows.len(), app.selected_index, area.height);
+    let items: Vec<ListItem> = app.browse_rows[start..end]
         .iter()
         .enumerate()
-        .map(|(i, row)| match row {
-            BrowseRow::Header(title) => ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!(" {}", title.to_uppercase()),
-                    Style::default()
-                        .fg(t.accent_bright)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "  ",
-                    Style::default().fg(t.dim),
-                ),
-            ])),
-            BrowseRow::Item(hit) => {
-                let playing = match hit {
-                    SearchHit::Track(track) => {
-                        app.current_track.as_ref().is_some_and(|c| c.id == track.id)
-                    }
-                    _ => false,
-                };
-                let pct = match hit {
-                    SearchHit::Track(track) => app.download_pct(&track.id),
-                    _ => None,
-                };
-                hit_row(t, hit, width, i == app.selected_index, playing, pct)
+        .map(|(offset, row)| {
+            let i = start + offset;
+            match row {
+                BrowseRow::Header(title) => ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!(" {}", title.to_uppercase()),
+                        Style::default()
+                            .fg(t.accent_bright)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "  ",
+                        Style::default().fg(t.dim),
+                    ),
+                ])),
+                BrowseRow::Item(hit) => {
+                    let playing = match hit {
+                        SearchHit::Track(track) => {
+                            app.current_track.as_ref().is_some_and(|c| c.id == track.id)
+                        }
+                        _ => false,
+                    };
+                    let pct = match hit {
+                        SearchHit::Track(track) => app.download_pct(&track.id),
+                        _ => None,
+                    };
+                    hit_row(t, hit, width, i == app.selected_index, playing, pct)
+                }
             }
         })
         .collect();
@@ -1733,7 +1739,7 @@ fn draw_browse(f: &mut Frame, app: &App, area: Rect) {
             .bg(t.selection_bg),
     );
     let mut state = ListState::default();
-    state.select(Some(app.selected_index));
+    state.select(Some(app.selected_index.saturating_sub(start)));
     f.render_stateful_widget(list, area, &mut state);
 }
 

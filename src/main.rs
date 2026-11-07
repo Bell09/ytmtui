@@ -12,7 +12,7 @@ mod ipc;
 mod lyrics;
 mod offline;
 
-use std::{env, io, io::Write, time::Duration};
+use std::{env, io, io::Write, time::{Duration, Instant}};
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
@@ -241,42 +241,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Warm the shelf cache in the background so the first `b` opens at once.
     app.start_browse_refresh();
 
+    // Draw whenever something animates (playback clock, buffering,
+    // downloads) or a key arrives; an idle screen only needs a periodic
+    // refresh so background results still appear promptly. This keeps the
+    // 10Hz tick cheap without hurting input latency.
+    let mut last_draw = Instant::now();
+    let mut needs_redraw = true;
+
     // Main event loop
     while !app.should_quit {
         app.update();
-        // Scaled lyrics are multicell glyphs; erase the previous block before
-        // ratatui redraws underneath it once the scaled view is left.
-        let size = terminal.size()?;
-        ui::prepare_lyrics(&mut app, (size.width, size.height));
-        if !app.lyrics_clear.is_empty() {
-            let mut out = io::stdout();
-            let _ = out.write_all(&app.lyrics_clear);
-            let _ = out.flush();
-            app.lyrics_clear.clear();
-        }
-        terminal.draw(|f| ui::draw(f, &mut app))?;
-        // Kitty album art travels as escape bytes written after the frame
-        // (the image floats above the cells ratatui keeps drawing).
-        if !app.art_output.is_empty() {
-            let mut out = io::stdout();
-            let _ = out.write_all(&app.art_output);
-            let _ = out.flush();
-            app.art_output.clear();
-        }
-        // Changed scaled lyrics: clear the old block and paint the new one in
-        // one write so the text never blinks out in between.
-        if !app.lyrics_clear.is_empty() || !app.lyrics_output.is_empty() {
-            let mut buf = Vec::with_capacity(app.lyrics_clear.len() + app.lyrics_output.len());
-            buf.extend_from_slice(&app.lyrics_clear);
-            buf.extend_from_slice(&app.lyrics_output);
-            let mut out = io::stdout();
-            let _ = out.write_all(&buf);
-            let _ = out.flush();
-            app.lyrics_clear.clear();
-            app.lyrics_output.clear();
+        let animating = app.animating();
+        if needs_redraw || animating || last_draw.elapsed() >= Duration::from_secs(1) {
+            // Scaled lyrics are multicell glyphs; erase the previous block before
+            // ratatui redraws underneath it once the scaled view is left.
+            let size = terminal.size()?;
+            ui::prepare_lyrics(&mut app, (size.width, size.height));
+            if !app.lyrics_clear.is_empty() {
+                let mut out = io::stdout();
+                let _ = out.write_all(&app.lyrics_clear);
+                let _ = out.flush();
+                app.lyrics_clear.clear();
+            }
+            terminal.draw(|f| ui::draw(f, &mut app))?;
+            // Kitty album art travels as escape bytes written after the frame
+            // (the image floats above the cells ratatui keeps drawing).
+            if !app.art_output.is_empty() {
+                let mut out = io::stdout();
+                let _ = out.write_all(&app.art_output);
+                let _ = out.flush();
+                app.art_output.clear();
+            }
+            // Changed scaled lyrics: clear the old block and paint the new one in
+            // one write so the text never blinks out in between.
+            if !app.lyrics_clear.is_empty() || !app.lyrics_output.is_empty() {
+                let mut buf = Vec::with_capacity(app.lyrics_clear.len() + app.lyrics_output.len());
+                buf.extend_from_slice(&app.lyrics_clear);
+                buf.extend_from_slice(&app.lyrics_output);
+                let mut out = io::stdout();
+                let _ = out.write_all(&buf);
+                let _ = out.flush();
+                app.lyrics_clear.clear();
+                app.lyrics_output.clear();
+            }
+            last_draw = Instant::now();
+            needs_redraw = false;
         }
 
         if event::poll(Duration::from_millis(100))? {
+            needs_redraw = true;
             if let Event::Key(key) = event::read()? {
                 // Global hotkeys
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -289,7 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match key.code {
                         KeyCode::Enter => {
                             app.input_mode = InputMode::Normal;
-                            app.perform_search().await;
+                            app.perform_search();
                         }
                         KeyCode::Esc => {
                             app.input_mode = InputMode::Normal;
@@ -408,10 +421,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Enter => app.activate_selected().await,
                     // Cycle the search filters (search page only).
                     KeyCode::Tab if app.current_page == Page::Search => {
-                        app.cycle_search_filter(true).await;
+                        app.cycle_search_filter(true);
                     }
                     KeyCode::BackTab if app.current_page == Page::Search => {
-                        app.cycle_search_filter(false).await;
+                        app.cycle_search_filter(false);
                     }
                     // Scroll the lyrics pane while it's open, otherwise the
                     // Library detail pane.

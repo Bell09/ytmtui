@@ -31,6 +31,12 @@ impl Player {
         }
     }
 
+    /// Path of this player's mpv IPC socket. The background timeline sampler
+    /// only needs this string, so it never has to borrow the `Player`.
+    pub fn socket_path(&self) -> &str {
+        &self.socket_path
+    }
+
     pub fn play(&mut self, track_id: &str) -> anyhow::Result<()> {
         self.play_with(track_id, None)
     }
@@ -90,51 +96,6 @@ impl Player {
         }
     }
 
-    /// Ask mpv where playback really is. The UI clock follows this instead of
-    /// guessing, so slow starts and seeks keep progress and lyrics in sync.
-    ///
-    /// Short-lived IPC connection with tight timeouts; a missing or wedged
-    /// mpv returns `None` without stalling a frame.
-    pub fn timeline(&self) -> Option<Timeline> {
-        let mut stream = UnixStream::connect(&self.socket_path).ok()?;
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(25)));
-        let _ = stream.set_write_timeout(Some(Duration::from_millis(25)));
-        let commands = concat!(
-            "{\"command\":[\"get_property\",\"time-pos\"],\"request_id\":1}\n",
-            "{\"command\":[\"get_property\",\"duration\"],\"request_id\":2}\n",
-        );
-        stream.write_all(commands.as_bytes()).ok()?;
-
-        let mut reader = BufReader::new(stream);
-        let deadline = Instant::now() + Duration::from_millis(40);
-        let mut timeline = Timeline::default();
-        let mut seen = 0u8;
-        while seen != 3 && Instant::now() < deadline {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            // mpv interleaves unsolicited events with replies; match only
-            // request ids.
-            match value.get("request_id").and_then(Value::as_u64) {
-                Some(1) => {
-                    timeline.position = value.get("data").and_then(Value::as_f64);
-                    seen |= 1;
-                }
-                Some(2) => {
-                    timeline.duration = value.get("data").and_then(Value::as_f64);
-                    seen |= 2;
-                }
-                _ => {}
-            }
-        }
-        (seen != 0).then_some(timeline)
-    }
-
     /// Seek to an absolute position via mpv's IPC socket.
     pub fn seek_to(&mut self, seconds: f64) {
         if let Ok(mut stream) = UnixStream::connect(&self.socket_path) {
@@ -174,6 +135,50 @@ impl Drop for Player {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// Query an mpv IPC socket for `time-pos` and `duration`.
+///
+/// This does blocking socket I/O with tight timeouts, which is why the TUI
+/// runs it on a background task rather than the frame thread.
+pub fn timeline_path(socket_path: &str) -> Option<Timeline> {
+    let mut stream = UnixStream::connect(socket_path).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(25)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(25)));
+    let commands = concat!(
+        "{\"command\":[\"get_property\",\"time-pos\"],\"request_id\":1}\n",
+        "{\"command\":[\"get_property\",\"duration\"],\"request_id\":2}\n",
+    );
+    stream.write_all(commands.as_bytes()).ok()?;
+
+    let mut reader = BufReader::new(stream);
+    let deadline = Instant::now() + Duration::from_millis(40);
+    let mut timeline = Timeline::default();
+    let mut seen = 0u8;
+    while seen != 3 && Instant::now() < deadline {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        // mpv interleaves unsolicited events with replies; match only
+        // request ids.
+        match value.get("request_id").and_then(Value::as_u64) {
+            Some(1) => {
+                timeline.position = value.get("data").and_then(Value::as_f64);
+                seen |= 1;
+            }
+            Some(2) => {
+                timeline.duration = value.get("data").and_then(Value::as_f64);
+                seen |= 2;
+            }
+            _ => {}
+        }
+    }
+    (seen != 0).then_some(timeline)
 }
 
 /// Resolve a video's direct audio URL for later playback. Local files are

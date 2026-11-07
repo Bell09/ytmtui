@@ -1,12 +1,27 @@
 use crate::models::{BrowseRow, BrowseShelf, Page, Playlist, PlaylistKind, SearchHit, Track};
-use crate::api::{SearchFilter, YtmApi};
-use crate::player::Player;
+use crate::api::{SearchFilter, SearchResults, YtmApi};
+use crate::player::{Player, Timeline};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 type PreviewResult = (String, Result<Vec<Track>, String>);
+
+/// Finished search: the request generation, its query and the API result.
+/// Generations let a slow, older search lose to a newer one instead of
+/// replacing fresher rows.
+type SearchResult = (u64, String, Result<SearchResults, String>);
+
+/// Finished collection fetch: generation, playlist id and tracks.
+/// The generation guards against a slow refresh overwriting a playlist the
+/// user has since opened.
+type CollectionResult = (u64, String, Result<Vec<Track>, String>);
+
+/// One background mpv timeline sample: sequence number and the reply (or
+/// `None` when the socket did not answer). Sampling off the UI thread keeps a
+/// wedged mpv from adding its timeout to input latency.
+type TimelineSample = (u64, Option<Timeline>);
 
 /// Finished library fetch: its generation plus playlists or an error. The
 /// generation lets a newer request supersede an in-flight one, e.g. when
@@ -107,6 +122,27 @@ type DownloadResult = (String, Result<crate::offline::Entry, String>);
 /// Background home-feed refresh for the browse picker.
 type BrowseResult = Result<Vec<BrowseShelf>, String>;
 
+/// A category or artist page fetched off the UI thread. The result carries
+/// the rows to restore if it fails and the generation guard that keeps a
+/// reply from replacing a page the user has since left.
+enum PageFetch {
+    Category {
+        title: String,
+        previous: Vec<BrowseRow>,
+        previous_index: usize,
+        result: Result<Vec<Playlist>, String>,
+    },
+    Artist {
+        artist: Playlist,
+        previous: Option<(Vec<BrowseRow>, usize)>,
+        result: Result<Vec<BrowseShelf>, String>,
+    },
+}
+type PageFetchResult = (u64, PageFetch);
+
+/// Finished offline-folder scan: generation plus the tracks it found.
+type OfflineScanResult = (u64, Vec<Track>);
+
 /// Resolved stream URL for the next queue track, or why it failed.
 type PrefetchResult = (String, Result<String, String>);
 
@@ -118,6 +154,10 @@ const PREFETCH_TTL: Duration = Duration::from_secs(15 * 60);
 const BUFFER_WATCHDOG: Duration = Duration::from_secs(25);
 /// A playing track whose clock stops is restarted after this.
 const STALL_WATCHDOG: Duration = Duration::from_secs(30);
+/// Interpolation is only trusted while mpv telemetry is this recent. If the
+/// socket stops answering, progress and lyrics freeze at the last known
+/// position instead of drifting ahead of the audio.
+const TELEMETRY_MAX_AGE: Duration = Duration::from_millis(600);
 
 /// Search-bar filters in display order. Only filters the Innertube
 /// response advertises are kept.
@@ -138,7 +178,7 @@ const LIKED_PLAYLIST: &str = "VLLM";
 /// back-and-forth case.
 const PREVIEW_CACHE_CAP: usize = 6;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackState {
     Stopped,
     Buffering,
@@ -223,6 +263,14 @@ pub struct App {
     library_tx: tokio::sync::mpsc::UnboundedSender<LibraryResult>,
     library_rx: tokio::sync::mpsc::UnboundedReceiver<LibraryResult>,
     library_generation: u64,
+    /// Background search results, newest generation wins.
+    search_tx: tokio::sync::mpsc::UnboundedSender<SearchResult>,
+    search_rx: tokio::sync::mpsc::UnboundedReceiver<SearchResult>,
+    search_generation: u64,
+    /// Background collection refresh; cached rows show while it runs.
+    collection_tx: tokio::sync::mpsc::UnboundedSender<CollectionResult>,
+    collection_rx: tokio::sync::mpsc::UnboundedReceiver<CollectionResult>,
+    collection_generation: u64,
 
     pub selected_index: usize,
     pub current_track: Option<Track>,
@@ -253,12 +301,11 @@ pub struct App {
     /// lyrics start with the audible audio.
     playback_position: f64,
     position_sampled_at: Option<Instant>,
-    /// Whether mpv answered at least one timeline query for this track. A
-    /// healthy IPC channel that reports no position yet means "still
-    /// buffering", not "fall back to a guessed start time".
-    mpv_seen: bool,
     pub playback_duration_secs: u64,
-    pub buffering_timer: Option<Instant>,
+    /// Newest background timeline sample and the sequence already applied.
+    timeline_rx: tokio::sync::mpsc::UnboundedReceiver<TimelineSample>,
+    pending_timeline: Option<TimelineSample>,
+    applied_timeline: u64,
     /// Retry counter for the current track; reset whenever a new track starts.
     playback_retries: u8,
     /// When the current track was handed to mpv, and the last time its clock
@@ -373,6 +420,20 @@ pub struct App {
     browse_refresh_tx: tokio::sync::mpsc::UnboundedSender<BrowseResult>,
     browse_refresh_rx: tokio::sync::mpsc::UnboundedReceiver<BrowseResult>,
     browse_refreshing: bool,
+    /// A cold browse page (or the `b` picker) is waiting for the feed.
+    /// The flags survive until the result lands so the UI stays interactive.
+    browse_load_requested: bool,
+    browse_pending_section: Option<usize>,
+    browse_picker_pending: bool,
+    /// Off-thread category/artist page fetch and the generation that owns it.
+    page_fetch_tx: tokio::sync::mpsc::UnboundedSender<PageFetchResult>,
+    page_fetch_rx: tokio::sync::mpsc::UnboundedReceiver<PageFetchResult>,
+    page_fetch_generation: u64,
+    /// Offline-folder scan running on a blocking worker. The UI shows the
+    /// previous view until the walk finishes.
+    offline_scan_tx: tokio::sync::mpsc::UnboundedSender<OfflineScanResult>,
+    offline_scan_rx: tokio::sync::mpsc::UnboundedReceiver<OfflineScanResult>,
+    offline_scan_generation: u64,
     /// Queued `r` removals — in-order like the like and add queues.
     rm_cmd_tx: tokio::sync::mpsc::UnboundedSender<RmCmd>,
     rm_rx: tokio::sync::mpsc::UnboundedReceiver<RmResult>,
@@ -423,7 +484,12 @@ impl App {
         };
         let (preview_tx, preview_rx) = tokio::sync::mpsc::unbounded_channel();
         let (library_tx, library_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (search_tx, search_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (collection_tx, collection_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (timeline_tx, timeline_rx) = tokio::sync::mpsc::unbounded_channel();
         let (browse_refresh_tx, browse_refresh_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (page_fetch_tx, page_fetch_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (offline_scan_tx, offline_scan_rx) = tokio::sync::mpsc::unbounded_channel();
         let (prefetch_tx, prefetch_rx) = tokio::sync::mpsc::unbounded_channel();
         let (account_tx, account_rx) = tokio::sync::mpsc::unbounded_channel();
         let (art_tx, art_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -526,6 +592,27 @@ impl App {
             }
         });
 
+        // mpv timeline sampling runs on its own task: a wedged socket adds
+        // its connect/read timeout to every frame if the UI thread does it
+        // inline. Samples are stamped so only the newest one is applied.
+        let player = Player::new();
+        let timeline_socket = player.socket_path().to_string();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let timeline_tx = timeline_tx.clone();
+            handle.spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_millis(100));
+                let mut seq = 0u64;
+                loop {
+                    ticker.tick().await;
+                    seq = seq.wrapping_add(1);
+                    let sample = crate::player::timeline_path(&timeline_socket);
+                    if timeline_tx.send((seq, sample)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+
         let mut app = Self {
             current_page: Page::Library,
             input_mode: InputMode::Normal,
@@ -554,6 +641,12 @@ impl App {
             library_tx,
             library_rx,
             library_generation: 0,
+            search_tx,
+            search_rx,
+            search_generation: 0,
+            collection_tx,
+            collection_rx,
+            collection_generation: 0,
             selected_index: 0,
             current_track: None,
             queue: Vec::new(),
@@ -567,14 +660,15 @@ impl App {
             queue_return_index: 0,
             playback_state: PlaybackState::Stopped,
             api,
-            player: Player::new(),
+            player,
             should_quit: false,
             status_message: auth_status.to_string(),
             playback_position: 0.0,
             position_sampled_at: None,
-            mpv_seen: false,
             playback_duration_secs: 210,
-            buffering_timer: None,
+            timeline_rx,
+            pending_timeline: None,
+            applied_timeline: 0,
             playback_retries: 0,
             play_started_at: None,
             last_progress_at: None,
@@ -632,6 +726,15 @@ impl App {
             browse_refresh_tx,
             browse_refresh_rx,
             browse_refreshing: false,
+            browse_load_requested: false,
+            browse_pending_section: None,
+            browse_picker_pending: false,
+            page_fetch_tx,
+            page_fetch_rx,
+            page_fetch_generation: 0,
+            offline_scan_tx,
+            offline_scan_rx,
+            offline_scan_generation: 0,
             rm_cmd_tx,
             rm_rx,
             offline: false,
@@ -653,7 +756,16 @@ impl App {
         self.poll_theme();
         self.poll_library();
         self.poll_browse_refresh();
+        self.poll_page_fetch();
+        self.poll_offline_scan();
         self.poll_preview();
+        self.poll_search();
+        self.poll_collection();
+        // Keep only the newest timeline sample; older ones are already stale
+        // by the time the frame runs.
+        while let Ok(sample) = self.timeline_rx.try_recv() {
+            self.pending_timeline = Some(sample);
+        }
         while let Ok(name) = self.account_rx.try_recv() {
             self.account_name = Some(name);
         }
@@ -788,8 +900,7 @@ impl App {
                     let title = entry.title.clone();
                     self.registry.insert(entry);
                     if self.offline {
-                        self.offline_tracks =
-                            crate::offline::scan(&self.music_dir, &self.registry);
+                        self.start_offline_scan(false);
                     }
                     self.stamp_all();
                     self.status_message = format!("Downloaded ✓ {}", title);
@@ -812,18 +923,10 @@ impl App {
         self.apply_ipc_commands();
         // Follow mpv's own clock. A file is only marked playing once mpv
         // reports a positive time, so the progress bar and lyrics begin with
-        // the audible audio instead of a fixed 1.5s guess. The timer remains
-        // only as a fallback for an unreachable IPC socket.
+        // the audible audio. There is deliberately no wall-clock fallback:
+        // guessing "playing" after a fixed delay made progress and lyrics run
+        // ahead of slow streams.
         self.poll_player_timeline();
-        if self.playback_state == PlaybackState::Buffering && !self.mpv_seen {
-            if let Some(timer) = self.buffering_timer {
-                if timer.elapsed() >= Duration::from_millis(1500) {
-                    self.playback_position = 0.0;
-                    self.position_sampled_at = Some(Instant::now());
-                    self.finish_buffering();
-                }
-            }
-        }
         // A stream that never starts, or one that stops advancing mid-track,
         // is retried and then skipped instead of leaving playback stuck.
         self.check_playback_health();
@@ -1189,17 +1292,21 @@ impl App {
             return;
         }
         // Warm cache: show the list immediately and refresh it in the
-        // background. A cold cache only waits for the first home page —
-        // the rest of the walk finishes behind the open picker.
+        // background. A cold cache starts the feed fetch without blocking
+        // input; `poll_browse_refresh` opens the picker when it lands.
         if !self.browse_loaded {
-            self.status_message = "Loading shelves...".to_string();
-            match self.api.for_you_quick().await {
-                Ok(shelves) => self.apply_browse_shelves(shelves),
-                Err(e) => {
-                    self.status_message = format!("Failed to load browse: {}", e);
-                    return;
-                }
+            if !self.api.is_authenticated() {
+                self.status_message = "Sign in to browse shelves.".into();
+                return;
             }
+            self.status_message = "Loading shelves...".to_string();
+            // Opening the picker after this answer supersedes a browse page
+            // that may also be waiting on the same feed request.
+            self.browse_load_requested = false;
+            self.browse_pending_section = None;
+            self.browse_picker_pending = true;
+            self.start_browse_refresh();
+            return;
         }
         let available = self.available_browse_sections();
         if available.is_empty() {
@@ -1297,7 +1404,7 @@ impl App {
         }
     }
 
-    pub async fn perform_search(&mut self) {
+    pub fn perform_search(&mut self) {
         let query = self.search_query.trim().to_string();
         if query.is_empty() {
             return;
@@ -1336,7 +1443,37 @@ impl App {
             };
             return;
         }
-        match self.api.search(&query, self.current_search_params()).await {
+        // The request runs in the background so typing, scrolling and
+        // playback keep responding while the network is slow. Only the
+        // newest generation may replace the rows, so an older search that
+        // answers late can't overwrite a newer one.
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let generation = self.search_generation;
+        let params = self.current_search_params().map(str::to_string);
+        let api = self.api.clone();
+        let tx = self.search_tx.clone();
+        let sent_query = query.clone();
+        tokio::spawn(async move {
+            let result = api
+                .search(&sent_query, params.as_deref())
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send((generation, sent_query, result));
+        });
+    }
+
+    /// Apply background search results, ignoring any stale generation.
+    fn poll_search(&mut self) {
+        while let Ok((generation, query, result)) = self.search_rx.try_recv() {
+            if generation != self.search_generation {
+                continue;
+            }
+            self.apply_search_result(query, result);
+        }
+    }
+
+    fn apply_search_result(&mut self, query: String, result: Result<SearchResults, String>) {
+        match result {
             Ok(results) => {
                 if !results.filters.is_empty() {
                     self.search_filters = curate_filters(results.filters);
@@ -1348,9 +1485,13 @@ impl App {
                     Self::mark_hits(&self.registry, &mut hits);
                     self.search_results = hits;
                     self.selected_index = 0;
-                    let filter = self.search_filter_label();
-                    self.status_message =
-                        format!("Found {} results ({}) for '{}'", self.search_results.len(), filter, query);
+                    let filter = self.search_filter_label().to_string();
+                    self.status_message = format!(
+                        "Found {} results ({}) for '{}'",
+                        self.search_results.len(),
+                        filter,
+                        query
+                    );
                 }
             }
             Err(e) => self.status_message = format!("Search failed: {}", e),
@@ -1377,7 +1518,7 @@ impl App {
     }
 
     /// Switch to the next (or previous) search filter and re-run the query.
-    pub async fn cycle_search_filter(&mut self, forward: bool) {
+    pub fn cycle_search_filter(&mut self, forward: bool) {
         let count = self.search_filters.len() + 1;
         if count <= 1 || self.search_query.trim().is_empty() {
             return;
@@ -1387,7 +1528,7 @@ impl App {
         } else {
             (self.search_filter + count - 1) % count
         };
-        self.perform_search().await;
+        self.perform_search();
     }
 
     /// Fetch the account's library in the background. The TUI keeps drawing
@@ -1406,14 +1547,19 @@ impl App {
         });
     }
 
-    /// Open the personalised browse page. It is cached for the session, so
-    /// returning to it is instant.
+    /// Open the personalised browse page. Cached shelves paint at once; a
+    /// cold page starts a background feed fetch and keeps the event loop
+    /// live, filling in when the result lands.
     pub async fn open_browse(&mut self) {
         if self.current_page == Page::Browse {
             return;
         }
         if self.offline {
             self.status_message = "Go online to browse mixes and charts".to_string();
+            return;
+        }
+        if !self.api.is_authenticated() {
+            self.status_message = "Sign in to browse mixes and charts".to_string();
             return;
         }
         let return_page = self.current_page;
@@ -1429,6 +1575,10 @@ impl App {
             self.status_message = "Browse".to_string();
         }
         self.current_page = Page::Browse;
+        // A page fetch from before this navigation must not land on top.
+        self.invalidate_page_fetch();
+        self.browse_load_requested = false;
+        self.browse_pending_section = None;
         if self.browse_loaded {
             if !matches!(
                 self.browse_rows.get(self.selected_index),
@@ -1440,33 +1590,10 @@ impl App {
         }
 
         self.status_message = "Loading mixes, trending and categories...".to_string();
-        if !self.load_browse_shelves().await {
-            // Keep the user where they were rather than parking them on
-            // an empty page; the footer still explains why.
-            self.current_page = return_page;
-            self.selected_index = return_index;
-            return;
-        }
-        // Land on the first section that actually came back.
-        let first = (0..BROWSE_SECTIONS.len())
-            .find(|&i| self.browse_shelves[i].is_some())
-            .unwrap_or(0);
-        self.select_browse_section(first);
-    }
-
-    /// Fetch the personalised feed and sort its shelves into the section
-    /// slots. Returns false when the request failed.
-    async fn load_browse_shelves(&mut self) -> bool {
-        match self.api.for_you().await {
-            Ok(shelves) => {
-                self.apply_browse_shelves(shelves);
-                true
-            }
-            Err(e) => {
-                self.status_message = format!("Failed to load browse: {}", e);
-                false
-            }
-        }
+        // `start_browse_refresh` is a no-op while the boot refresh is still
+        // in flight; the request flag applies whichever fetch answers.
+        self.browse_load_requested = true;
+        self.start_browse_refresh();
     }
 
     /// Sort the feed's shelves into the fixed section slots. Moods and
@@ -1584,23 +1711,69 @@ impl App {
                     if self.browse_picker_open {
                         self.refresh_browse_picker_sections();
                     }
+                    if self.browse_picker_pending {
+                        self.browse_picker_pending = false;
+                        self.open_pending_browse_picker();
+                    }
+                    if self.browse_load_requested {
+                        self.browse_load_requested = false;
+                        if self.current_page == Page::Browse {
+                            let section = self
+                                .browse_pending_section
+                                .take()
+                                .or_else(|| {
+                                    (0..BROWSE_SECTIONS.len())
+                                        .find(|&i| self.browse_shelves[i].is_some())
+                                })
+                                .unwrap_or(0);
+                            self.select_browse_section(section);
+                        }
+                    }
                 }
                 Err(e) => {
-                    // The boot refresh is silent: don't replace the footer
-                    // with a network error the user did not ask for.
-                    if self.browse_picker_open {
+                    if self.browse_load_requested {
+                        // The page was opened by the user and has nothing to
+                        // show: return them where they came from.
+                        self.browse_load_requested = false;
+                        self.browse_pending_section = None;
+                        self.current_page = self.browse_return_page;
+                        self.selected_index = self.browse_return_index;
+                        self.status_message = format!("Failed to load browse: {e}");
+                    } else if self.browse_picker_pending {
+                        self.browse_picker_pending = false;
+                        self.status_message = format!("Failed to load browse: {e}");
+                    } else if self.browse_picker_open {
+                        // A later refresh failure keeps the picker usable.
                         self.status_message = format!("Failed to refresh shelves: {e}");
                     }
+                    // Otherwise this was the silent boot refresh: don't
+                    // replace the footer with an error nobody asked for.
                 }
             }
         }
     }
 
+    /// Open the card the `b` key asked for once a cold feed answer lands.
+    fn open_pending_browse_picker(&mut self) {
+        let available = self.available_browse_sections();
+        if available.is_empty() {
+            self.status_message = "No browse shelves came back.".to_string();
+            return;
+        }
+        self.browse_picker_sections = available;
+        self.browse_picker_index = 0;
+        self.browse_picker_open = true;
+        self.status_message = "Browse shelves".to_string();
+    }
+
     /// Open the browse page at a section (by its index), loading the
-    /// sections first when needed. Used by the 1–5 shortcuts.
+    /// sections first when needed. Used by the 1–5 shortcuts. A cold feed is
+    /// fetched in the background; the section is selected when it lands.
     pub async fn open_browse_section(&mut self, section: usize) {
         let section = section.min(BROWSE_SECTIONS.len() - 1);
         self.input_mode = InputMode::Normal;
+        // A section shortcut supersedes a picker still waiting on the feed.
+        self.browse_picker_pending = false;
         if self.current_page != Page::Browse {
             self.open_browse().await;
         } else if self.browse_back.is_some() {
@@ -1609,6 +1782,9 @@ impl App {
         }
         if self.current_page == Page::Browse && self.browse_loaded {
             self.select_browse_section(section);
+        } else if self.current_page == Page::Browse {
+            // Remember the shortcut while the cold feed request is in flight.
+            self.browse_pending_section = Some(section);
         }
     }
 
@@ -1671,6 +1847,10 @@ impl App {
     /// Esc on the browse page: category history first, then wherever the
     /// browse page was opened from.
     pub fn leave_browse(&mut self) {
+        // Leaving discards a category or artist fetch that is still running.
+        self.invalidate_page_fetch();
+        self.browse_load_requested = false;
+        self.browse_pending_section = None;
         if let Some((rows, index)) = self.browse_back.take() {
             self.browse_rows = rows;
             self.selected_index = index;
@@ -1709,24 +1889,27 @@ impl App {
                 self.status_message = format!("Loading {}...", title);
                 let previous_rows = self.browse_rows.clone();
                 let previous_index = self.selected_index;
-                match self.api.category_playlists(&browse_id, &params).await {
-                    Ok(items) if !items.is_empty() => {
-                        let count = items.len();
-                        let mut rows = vec![BrowseRow::Header(title.clone())];
-                        rows.extend(items.into_iter().map(|p| {
-                            BrowseRow::Item(SearchHit::Collection(p))
-                        }));
-                        self.browse_back = Some((previous_rows, previous_index));
-                        self.set_browse_rows(rows);
-                        self.status_message = format!("{title} · {count} collections");
-                    }
-                    Ok(_) => {
-                        self.status_message = format!("Nothing found in {title}");
-                    }
-                    Err(e) => {
-                        self.status_message = format!("Failed to load {title}: {}", e);
-                    }
-                }
+                // The fetch runs behind the page so the cursor and playback
+                // stay live; the rows only change when the answer lands.
+                self.page_fetch_generation = self.page_fetch_generation.wrapping_add(1);
+                let generation = self.page_fetch_generation;
+                let api = self.api.clone();
+                let tx = self.page_fetch_tx.clone();
+                tokio::spawn(async move {
+                    let result = api
+                        .category_playlists(&browse_id, &params)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send((
+                        generation,
+                        PageFetch::Category {
+                            title,
+                            previous: previous_rows,
+                            previous_index,
+                            result,
+                        },
+                    ));
+                });
             }
         }
     }
@@ -1810,8 +1993,16 @@ impl App {
     /// stale while we were away. Playback is deliberately left alone: a
     /// queue mixing local files and online tracks keeps running either way.
     pub fn toggle_offline(&mut self) {
+        // A search for the other mode must not land after the toggle.
+        self.search_generation = self.search_generation.wrapping_add(1);
+        // Neither must a browse page fetch from the online session.
+        self.invalidate_page_fetch();
+        self.browse_load_requested = false;
+        self.browse_pending_section = None;
         if self.offline {
             self.offline = false;
+            // Discard a folder scan still running for the offline session.
+            self.offline_scan_generation = self.offline_scan_generation.wrapping_add(1);
             self.preview_cache.clear();
             self.current_page = Page::Library;
             self.start_library_load();
@@ -1822,9 +2013,45 @@ impl App {
         self.library_generation = self.library_generation.wrapping_add(1);
         // Re-read `config.json` so an edited path applies from here on.
         self.music_dir = crate::offline::music_dir();
-        self.offline_tracks = crate::offline::scan(&self.music_dir, &self.registry);
         self.preview_cache.clear();
-        self.load_offline_library();
+        self.preview_for = None;
+        self.preview_tracks.clear();
+        // Walk the folder on a blocking worker: a large library must not
+        // freeze typing, playback or the footer while it is indexed.
+        self.start_offline_scan(true);
+    }
+
+    /// Index the local folder off the UI thread. `announce` puts the wait in
+    /// the footer; a silent refresh is used when a download lands.
+    fn start_offline_scan(&mut self, announce: bool) {
+        self.offline_scan_generation = self.offline_scan_generation.wrapping_add(1);
+        let generation = self.offline_scan_generation;
+        let music_dir = self.music_dir.clone();
+        let registry = self.registry.clone();
+        let tx = self.offline_scan_tx.clone();
+        if announce {
+            self.status_message = "Scanning music folder...".to_string();
+        }
+        tokio::spawn(async move {
+            let tracks = tokio::task::spawn_blocking(move || {
+                crate::offline::scan(&music_dir, &registry)
+            })
+            .await
+            .unwrap_or_default();
+            let _ = tx.send((generation, tracks));
+        });
+    }
+
+    /// Apply a finished offline-folder scan unless the mode changed while it
+    /// ran. The previous view stays usable until this lands.
+    fn poll_offline_scan(&mut self) {
+        while let Ok((generation, tracks)) = self.offline_scan_rx.try_recv() {
+            if generation != self.offline_scan_generation || !self.offline {
+                continue;
+            }
+            self.offline_tracks = tracks;
+            self.load_offline_library();
+        }
     }
 
     /// Fill the sidebar with the local folder's structure.
@@ -1890,6 +2117,13 @@ impl App {
         let duration = parse_duration(&track.duration);
         self.dl_progress.insert(id.clone(), 0);
         self.status_message = format!("Downloading '{}'…", track.title);
+        // What the manifest already says lives at the destination path. Only
+        // that exact video id may reuse the file; everything else downloads
+        // beside it under a suffixed name.
+        let owner = self
+            .registry
+            .entry_for_path(&crate::offline::download_path(&dir, &track))
+            .map(|entry| entry.id.clone());
         tokio::spawn(async move {
             // Fetch lyrics while yt-dlp works. The audio still reports back
             // the moment it lands; the `.lrc` sidecar follows as soon as
@@ -1898,9 +2132,15 @@ impl App {
                 crate::lyrics::fetch_for_track(&api, &lyrics_id, &title, &artist, duration).await
             });
             let pid = id.clone();
-            let result = crate::offline::download(&url, &dir, &track, move |pct| {
-                let _ = ptx.send((pid.clone(), pct));
-            })
+            let result = crate::offline::download(
+                &url,
+                &dir,
+                &track,
+                owner.as_deref(),
+                move |pct| {
+                    let _ = ptx.send((pid.clone(), pct));
+                },
+            )
             .await
             .map_err(|e| e.to_string());
             let audio = result.as_ref().ok().map(|entry| PathBuf::from(&entry.path));
@@ -1917,6 +2157,9 @@ impl App {
     }
 
     pub async fn activate_selected(&mut self) {
+        // A new Enter press supersedes any category/artist page still in
+        // flight; its reply must not pull the user somewhere else later.
+        self.invalidate_page_fetch();
         match self.current_page {
             Page::Library => self.open_selected_playlist().await,
             Page::Browse => self.open_browse_selected().await,
@@ -1959,43 +2202,232 @@ impl App {
             self.open_artist(playlist).await;
             return;
         }
-        match self.api.playlist_tracks(&playlist.id).await {
-            Ok(mut tracks) if !tracks.is_empty() => {
-                Self::mark(&self.registry, &mut tracks);
-                self.show_collection(playlist, tracks);
+        // Cached previews (and rows already fetched this session) paint
+        // immediately; the authoritative list then refreshes in the
+        // background. A failure keeps the cached content on screen.
+        let cached = self
+            .preview_cache
+            .get(&playlist.id)
+            .cloned()
+            .filter(|tracks| !tracks.is_empty())
+            .or_else(|| {
+                (self.preview_for.as_deref() == Some(playlist.id.as_str())
+                    && !self.preview_tracks.is_empty())
+                .then(|| self.preview_tracks.clone())
+            });
+        let had_cache = cached.is_some();
+        let title = playlist.title.clone();
+        self.show_collection(playlist, cached.unwrap_or_default());
+        self.status_message = if had_cache {
+            format!("{} · showing cached · refreshing…", title)
+        } else {
+            format!("Loading '{}'...", title)
+        };
+        self.start_collection_refresh();
+    }
+
+    /// Refresh the open collection without blocking the event loop. The
+    /// result replaces the cached rows only when it is still the newest
+    /// request and the user is still on the same playlist.
+    fn start_collection_refresh(&mut self) {
+        let Some(id) = self
+            .current_playlist
+            .as_ref()
+            .map(|playlist| playlist.id.clone())
+        else {
+            return;
+        };
+        self.collection_generation = self.collection_generation.wrapping_add(1);
+        let generation = self.collection_generation;
+        let api = self.api.clone();
+        let tx = self.collection_tx.clone();
+        tokio::spawn(async move {
+            let result = api
+                .playlist_tracks(&id)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send((generation, id, result));
+        });
+    }
+
+    fn poll_collection(&mut self) {
+        while let Ok((generation, id, result)) = self.collection_rx.try_recv() {
+            if generation != self.collection_generation {
+                continue;
             }
-            Ok(_) => self.status_message = format!("'{}' is empty", playlist.title),
-            Err(e) => self.status_message = format!("Failed to load: {}", e),
+            if self.current_page != Page::Playlist
+                || self.current_playlist.as_ref().map(|p| p.id.as_str()) != Some(id.as_str())
+            {
+                continue;
+            }
+            match result {
+                Ok(mut tracks) if !tracks.is_empty() => {
+                    Self::mark(&self.registry, &mut tracks);
+                    // Keep the cursor on the same entry where possible;
+                    // setVideoId distinguishes legitimate repeated songs.
+                    let selected = self
+                        .playlist_tracks
+                        .get(self.selected_index)
+                        .map(|t| (t.set_video_id.clone(), t.id.clone()));
+                    self.playlist_tracks = tracks;
+                    if let Some((token, video)) = selected {
+                        if let Some(position) = token
+                            .and_then(|token| {
+                                self.playlist_tracks
+                                    .iter()
+                                    .position(|t| t.set_video_id.as_deref() == Some(token.as_str()))
+                            })
+                            .or_else(|| {
+                                self.playlist_tracks
+                                    .iter()
+                                    .position(|t| t.id == video)
+                            })
+                        {
+                            self.selected_index = position;
+                        }
+                    }
+                    self.selected_index = self
+                        .selected_index
+                        .min(self.playlist_tracks.len().saturating_sub(1));
+                    let title = self
+                        .current_playlist
+                        .as_ref()
+                        .map(|p| p.title.clone())
+                        .unwrap_or_default();
+                    self.status_message = format!("{} · {} tracks", title, self.playlist_tracks.len());
+                }
+                Ok(_) => {
+                    if self.playlist_tracks.is_empty() {
+                        let title = self
+                            .current_playlist
+                            .as_ref()
+                            .map(|p| p.title.clone())
+                            .unwrap_or_default();
+                        self.status_message = format!("'{}' is empty", title);
+                    } else {
+                        self.status_message = "Refresh returned no rows — keeping cached".to_string();
+                    }
+                }
+                Err(e) => {
+                    self.status_message = if self.playlist_tracks.is_empty() {
+                        format!("Failed to load: {}", e)
+                    } else {
+                        format!("Refresh failed — showing cached ({})", e)
+                    };
+                }
+            }
         }
     }
 
     /// Show an artist as shelves: top songs, then their albums and singles.
     /// The artist page replaces the current browse rows rather than opening
-    /// a flat track list, so the releases stay reachable.
+    /// a flat track list, so the releases stay reachable. The request runs
+    /// in the background; the current page stays live until it lands.
     async fn open_artist(&mut self, artist: Playlist) {
-        match self.api.artist_sections(&artist.id).await {
-            Ok(shelves) if !shelves.is_empty() => {
-                let was_browse = self.current_page == Page::Browse;
-                if was_browse {
-                    self.browse_back = Some((self.browse_rows.clone(), self.selected_index));
-                } else {
-                    self.browse_return_page = self.current_page;
-                    self.browse_return_index = self.selected_index;
-                    self.browse_back = None;
-                }
-                let mut rows = Vec::new();
-                for shelf in shelves {
-                    rows.push(BrowseRow::Header(shelf.title));
-                    rows.extend(shelf.items.into_iter().map(BrowseRow::Item));
-                }
-                self.browse_section = None;
-                self.current_page = Page::Browse;
-                self.set_browse_rows(rows);
-                self.status_message = format!("{} · albums & singles", artist.title);
-            }
-            Ok(_) => self.status_message = format!("No releases for {}", artist.title),
-            Err(e) => self.status_message = format!("Failed to load {}: {}", artist.title, e),
+        let from_browse = self.current_page == Page::Browse;
+        let previous = from_browse.then(|| (self.browse_rows.clone(), self.selected_index));
+        if !from_browse {
+            self.browse_return_page = self.current_page;
+            self.browse_return_index = self.selected_index;
+            self.browse_back = None;
         }
+        self.status_message = format!("Loading {}...", artist.title);
+        self.page_fetch_generation = self.page_fetch_generation.wrapping_add(1);
+        let generation = self.page_fetch_generation;
+        let api = self.api.clone();
+        let tx = self.page_fetch_tx.clone();
+        tokio::spawn(async move {
+            let result = api
+                .artist_sections(&artist.id)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send((
+                generation,
+                PageFetch::Artist {
+                    artist,
+                    previous,
+                    result,
+                },
+            ));
+        });
+    }
+
+    /// Apply a finished category/artist fetch unless the user has moved on.
+    fn poll_page_fetch(&mut self) {
+        while let Ok((generation, fetch)) = self.page_fetch_rx.try_recv() {
+            if generation != self.page_fetch_generation {
+                continue;
+            }
+            match fetch {
+                PageFetch::Category {
+                    title,
+                    previous,
+                    previous_index,
+                    result,
+                } => {
+                    if self.current_page != Page::Browse {
+                        continue;
+                    }
+                    match result {
+                        Ok(items) if !items.is_empty() => {
+                            let count = items.len();
+                            let mut rows = vec![BrowseRow::Header(title.clone())];
+                            rows.extend(
+                                items
+                                    .into_iter()
+                                    .map(|p| BrowseRow::Item(SearchHit::Collection(p))),
+                            );
+                            self.browse_back = Some((previous, previous_index));
+                            self.set_browse_rows(rows);
+                            self.status_message = format!("{title} · {count} collections");
+                        }
+                        Ok(_) => {
+                            // Restore the rows: they were never replaced, but
+                            // the cursor may have moved while waiting.
+                            self.browse_rows = previous;
+                            self.selected_index = previous_index;
+                            self.status_message = format!("Nothing found in {title}");
+                        }
+                        Err(e) => {
+                            self.browse_rows = previous;
+                            self.selected_index = previous_index;
+                            self.status_message = format!("Failed to load {title}: {}", e);
+                        }
+                    }
+                }
+                PageFetch::Artist {
+                    artist,
+                    previous,
+                    result,
+                } => match result {
+                    Ok(shelves) if !shelves.is_empty() => {
+                        if let Some(previous) = previous {
+                            self.browse_back = Some(previous);
+                        }
+                        let mut rows = Vec::new();
+                        for shelf in shelves {
+                            rows.push(BrowseRow::Header(shelf.title));
+                            rows.extend(shelf.items.into_iter().map(BrowseRow::Item));
+                        }
+                        self.browse_section = None;
+                        self.current_page = Page::Browse;
+                        self.set_browse_rows(rows);
+                        self.status_message = format!("{} · albums & singles", artist.title);
+                    }
+                    Ok(_) => {
+                        self.status_message = format!("No releases for {}", artist.title);
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Failed to load {}: {}", artist.title, e);
+                    }
+                },
+            }
+        }
+    }
+
+    /// Discard any in-flight category/artist fetch (the user navigated on).
+    fn invalidate_page_fetch(&mut self) {
+        self.page_fetch_generation = self.page_fetch_generation.wrapping_add(1);
     }
 
     /// Swap into the collection view with a track list that's already loaded.
@@ -2065,14 +2497,12 @@ impl App {
         }
         self.playback_position = 0.0;
         self.position_sampled_at = None;
-        self.mpv_seen = false;
         self.audio_started = false;
         self.play_started_at = Some(Instant::now());
         self.last_progress_at = Some(Instant::now());
         self.playback_duration_secs = parse_duration(&t.duration).unwrap_or(210);
         self.current_track = Some(t);
         self.playback_state = PlaybackState::Buffering;
-        self.buffering_timer = Some(Instant::now());
         self.sync_art();
         self.sync_lyrics();
         self.prefetch_next();
@@ -2125,7 +2555,6 @@ impl App {
     fn recover_playback(&mut self, reason: &str) {
         self.player.stop();
         self.position_sampled_at = None;
-        self.buffering_timer = None;
         self.audio_started = false;
         let Some(track) = self.current_track.clone() else {
             self.playback_state = PlaybackState::Stopped;
@@ -2178,28 +2607,42 @@ impl App {
         }
     }
 
-    /// Read mpv's authoritative timeline. While buffering, the first
+    /// Apply the newest mpv timeline sample. While buffering, the first
     /// positive position is the moment audio started — the state flips to
     /// Playing on that same tick, so lyrics and progress are never ahead of
     /// the sound or trailing behind it.
+    ///
+    /// The sample itself is collected on a background task; this function
+    /// only consumes the latest one, so it never blocks on the socket.
     fn poll_player_timeline(&mut self) {
         if !matches!(
             self.playback_state,
             PlaybackState::Buffering | PlaybackState::Playing | PlaybackState::Paused
         ) {
+            self.pending_timeline = None;
             return;
         }
-        let Some(timeline) = self.player.timeline() else {
+        let Some((sequence, sample)) = self.pending_timeline.take() else {
             return;
         };
-        self.mpv_seen = true;
+        if sequence <= self.applied_timeline {
+            return;
+        }
+        self.applied_timeline = sequence;
+        let Some(timeline) = sample else {
+            return;
+        };
         if let Some(position) = timeline.position.filter(|p| p.is_finite()) {
             let position = position.max(0.0);
-            if (position - self.playback_position).abs() > 0.05 {
-                self.last_progress_at = Some(Instant::now());
+            let now = Instant::now();
+            // Only a position that actually moved counts as fresh telemetry.
+            // A socket that keeps answering with the same frozen time while
+            // buffering must not let interpolation drift ahead.
+            if (position - self.playback_position).abs() > 0.001 {
+                self.position_sampled_at = Some(now);
+                self.last_progress_at = Some(now);
             }
             self.playback_position = position;
-            self.position_sampled_at = Some(Instant::now());
             if position > 0.0 {
                 self.audio_started = true;
                 if self.playback_state == PlaybackState::Buffering {
@@ -2221,10 +2664,9 @@ impl App {
         }
     }
 
-    /// Buffering is over: audio is running (or the IPC fallback expired).
+    /// Buffering is over: mpv confirmed that audio is running.
     fn finish_buffering(&mut self) {
         self.playback_state = PlaybackState::Playing;
-        self.buffering_timer = None;
         self.status_message = "Play♪ng".to_string();
     }
 
@@ -2527,22 +2969,9 @@ impl App {
             return None;
         }
         if self.shuffle {
-            let pos = self.shuffle_order.iter().position(|&i| i == self.queue_index)?;
-            if pos + 1 < self.shuffle_order.len() {
-                return Some(self.shuffle_order[pos + 1]);
-            }
-            return if self.repeat == RepeatMode::All {
-                Some(self.shuffle_order[0])
-            } else {
-                None
-            };
-        }
-        if self.queue_index + 1 < self.queue.len() {
-            Some(self.queue_index + 1)
-        } else if self.repeat == RepeatMode::All {
-            Some(0)
+            shuffle_next(&self.shuffle_order, self.queue_index, self.repeat)
         } else {
-            None
+            linear_next(self.queue_index, self.queue.len(), self.repeat)
         }
     }
 
@@ -2552,18 +2981,14 @@ impl App {
             return None;
         }
         if self.shuffle {
-            let pos = self.shuffle_order.iter().position(|&i| i == self.queue_index)?;
-            return Some(if pos == 0 {
-                *self.shuffle_order.last()?
-            } else {
-                self.shuffle_order[pos - 1]
-            });
-        }
-        Some(if self.queue_index == 0 {
-            self.queue.len() - 1
+            shuffle_previous(&self.shuffle_order, self.queue_index)
         } else {
-            self.queue_index - 1
-        })
+            Some(if self.queue_index == 0 {
+                self.queue.len() - 1
+            } else {
+                self.queue_index - 1
+            })
+        }
     }
 
     /// Advance to the next queue track. Repeat "one" only affects the
@@ -2586,16 +3011,25 @@ impl App {
         }
     }
 
-    /// Switch playback to `queue[i]` and start it.
+    /// Switch playback to `queue[i]` and start it. The shuffled order is
+    /// deliberately left alone: rebuilding it here made every track jump to a
+    /// fresh random order, so "next" could revisit songs and repeat-off never
+    /// reached the end of the queue.
     fn jump_to(&mut self, i: usize) {
         let Some(t) = self.queue.get(i).cloned() else {
             return;
         };
+        self.select_queue_index(i);
+        self.play_track(t);
+    }
+
+    /// Move the queue cursor, repairing the shuffled order only if it does
+    /// not know this index (e.g. after an external queue replacement).
+    fn select_queue_index(&mut self, i: usize) {
         self.queue_index = i;
-        if self.shuffle {
+        if self.shuffle && !self.shuffle_order.contains(&i) {
             self.rebuild_shuffle_order(None);
         }
-        self.play_track(t);
     }
 
     /// A track ended on its own: honour repeat one, otherwise advance.
@@ -2641,6 +3075,56 @@ impl App {
         self.shuffle_order = order;
     }
 
+    /// Insert `pos` into the existing shuffled order directly after the
+    /// current track, without reshuffling what has not played yet. Indices at
+    /// or after `pos` shift down by one to match the queue insertion.
+    fn shuffle_after_insert(&mut self, pos: usize) {
+        if !self.shuffle {
+            return;
+        }
+        for index in &mut self.shuffle_order {
+            if *index >= pos {
+                *index += 1;
+            }
+        }
+        match self
+            .shuffle_order
+            .iter()
+            .position(|&index| index == self.queue_index)
+        {
+            Some(at) => self.shuffle_order.insert(at + 1, pos),
+            None => self.rebuild_shuffle_order(Some(pos)),
+        }
+    }
+
+    /// Drop `removed` from the shuffled order and shift later indices, so the
+    /// remaining playback history and unplayed tail stay intact.
+    fn shuffle_after_remove(&mut self, removed: usize) {
+        if !self.shuffle {
+            return;
+        }
+        self.shuffle_order.retain(|&index| index != removed);
+        for index in &mut self.shuffle_order {
+            if *index > removed {
+                *index -= 1;
+            }
+        }
+    }
+
+    /// Remap a queue swap in the shuffled order.
+    fn shuffle_after_swap(&mut self, a: usize, b: usize) {
+        if !self.shuffle {
+            return;
+        }
+        for index in &mut self.shuffle_order {
+            if *index == a {
+                *index = b;
+            } else if *index == b {
+                *index = a;
+            }
+        }
+    }
+
     /// `z`: open the queue page, remembering where to return.
     pub fn open_queue(&mut self) {
         if self.current_page == Page::Queue {
@@ -2680,9 +3164,10 @@ impl App {
         }
         let pos = self.queue_index + 1;
         self.queue.insert(pos, track.clone());
-        // Inserting shifts every later index, so rebuild the shuffle order
-        // with the new track pinned right after the current one.
-        self.rebuild_shuffle_order(Some(pos));
+        self.queue_version = self.queue_version.wrapping_add(1);
+        // Pin the new track right after the current one while keeping the
+        // rest of the shuffled order exactly as it was.
+        self.shuffle_after_insert(pos);
         self.status_message = format!("Playing next: {} - {}", track.title, track.artist);
     }
 
@@ -2693,13 +3178,15 @@ impl App {
             let i = self.selected_index;
             if i < self.queue.len() && i != self.queue_index {
                 let t = self.queue.remove(i);
+                self.shuffle_after_remove(i);
                 if i < self.queue_index {
                     self.queue_index -= 1;
                 }
                 let pos = self.queue_index + 1;
                 self.queue.insert(pos, t);
+                self.queue_version = self.queue_version.wrapping_add(1);
+                self.shuffle_after_insert(pos);
                 self.selected_index = pos;
-                self.rebuild_shuffle_order(Some(pos));
                 self.status_message = "Playing next".to_string();
             }
             return;
@@ -2721,7 +3208,15 @@ impl App {
             return;
         }
         self.queue.push(track.clone());
-        self.rebuild_shuffle_order(None);
+        self.queue_version = self.queue_version.wrapping_add(1);
+        // Appending must not reshuffle the tracks already waiting.
+        if self.shuffle {
+            if self.shuffle_order.is_empty() {
+                self.rebuild_shuffle_order(None);
+            } else {
+                self.shuffle_order.push(self.queue.len() - 1);
+            }
+        }
         self.status_message = format!("Added to queue: {} - {}", track.title, track.artist);
     }
 
@@ -2741,6 +3236,7 @@ impl App {
             self.queue_version = self.queue_version.wrapping_add(1);
             self.queue_index = 0;
             self.selected_index = 0;
+            self.shuffle_order.clear();
             if was_current {
                 self.stop_playback();
                 self.current_track = None;
@@ -2756,7 +3252,8 @@ impl App {
             if self.selected_index >= self.queue.len() {
                 self.selected_index = self.queue.len() - 1;
             }
-            self.rebuild_shuffle_order(None);
+            self.queue_version = self.queue_version.wrapping_add(1);
+            self.shuffle_after_remove(i);
             if was_current {
                 self.jump_to(self.queue_index);
             }
@@ -2793,7 +3290,8 @@ impl App {
             self.queue_index = i;
         }
         self.selected_index = j;
-        self.rebuild_shuffle_order(None);
+        self.queue_version = self.queue_version.wrapping_add(1);
+        self.shuffle_after_swap(i, j);
     }
 
     /// `Ctrl+R`: cycle repeat off → all → one.
@@ -2824,7 +3322,9 @@ impl App {
             PlaybackState::Paused => {
                 self.player.pause();
                 self.playback_state = PlaybackState::Playing;
-                self.position_sampled_at = Some(Instant::now());
+                // Do not mark a sample time here: interpolation only resumes
+                // when mpv reports a moved position, so a slow or wedged
+                // socket cannot make progress run ahead of the audio.
                 // Restart the watchdogs: the pause may have lasted minutes,
                 // and without this the stall check fires the moment we
                 // resume and the track starts over.
@@ -2838,23 +3338,31 @@ impl App {
     }
 
     /// Current playback position with sub-second precision. The value comes
-    /// from mpv and is interpolated only until the next tick, so progress
-    /// and lyrics stay tied to what is actually audible.
+    /// from mpv and is interpolated only while telemetry is fresh, so
+    /// progress and lyrics stay tied to what is actually audible.
     pub fn position_secs_f64(&self) -> f64 {
-        let active = if self.playback_state == PlaybackState::Playing {
-            self.position_sampled_at
-                .map(|s| s.elapsed().as_secs_f64())
-                .unwrap_or(0.0)
-        } else {
-            0.0
-        };
-        (self.playback_position + active).clamp(0.0, self.playback_duration_secs as f64)
+        interpolate_position(
+            self.playback_state,
+            self.playback_position,
+            self.position_sampled_at,
+            Instant::now(),
+            self.playback_duration_secs,
+        )
     }
 
     /// Whole-second view of [`Self::position_secs_f64`] for labels, MPRIS
     /// and the queue bridge.
     pub fn position_secs(&self) -> u64 {
         self.position_secs_f64().floor() as u64
+    }
+
+    /// Whether frames change on their own (playback clock, buffering, live
+    /// downloads). Idle screens redraw much less often.
+    pub fn animating(&self) -> bool {
+        matches!(
+            self.playback_state,
+            PlaybackState::Playing | PlaybackState::Buffering
+        ) || !self.downloading.is_empty()
     }
 
     /// Stop playback entirely (MPRIS `Stop`): end mpv but keep the last
@@ -3037,6 +3545,61 @@ fn set_string(dst: &mut String, value: &str) {
     }
 }
 
+/// Position shown by the progress bar and lyrics: mpv's last sample plus the
+/// time elapsed since it *only* while playing and while that sample is fresh.
+/// Buffering, pause, and missing/stale telemetry all freeze at the last known
+/// position instead of guessing.
+fn interpolate_position(
+    state: PlaybackState,
+    base: f64,
+    sampled_at: Option<Instant>,
+    now: Instant,
+    duration_secs: u64,
+) -> f64 {
+    let active = match (state, sampled_at) {
+        (PlaybackState::Playing, Some(sampled)) => {
+            let age = now.saturating_duration_since(sampled);
+            if age <= TELEMETRY_MAX_AGE {
+                age.as_secs_f64()
+            } else {
+                0.0
+            }
+        }
+        _ => 0.0,
+    };
+    (base + active).clamp(0.0, duration_secs as f64)
+}
+
+fn linear_next(current: usize, len: usize, repeat: RepeatMode) -> Option<usize> {
+    if current + 1 < len {
+        Some(current + 1)
+    } else if repeat == RepeatMode::All {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+fn shuffle_next(order: &[usize], current: usize, repeat: RepeatMode) -> Option<usize> {
+    let position = order.iter().position(|&index| index == current)?;
+    if position + 1 < order.len() {
+        Some(order[position + 1])
+    } else if repeat == RepeatMode::All {
+        order.first().copied()
+    } else {
+        None
+    }
+}
+
+fn shuffle_previous(order: &[usize], current: usize) -> Option<usize> {
+    let position = order.iter().position(|&index| index == current)?;
+    Some(if position == 0 {
+        *order.last()?
+    } else {
+        order[position - 1]
+    })
+}
+
 /// Format seconds the way track durations are written (`M:SS` / `H:MM:SS`).
 fn format_duration(secs: u64) -> String {
     if secs >= 3600 {
@@ -3132,5 +3695,118 @@ mod browse_section_tests {
         assert_eq!(browse_section_for_title("Country charts"), Some(14));
         assert_eq!(browse_section_for_title("Global charts"), Some(15));
         assert_eq!(browse_section_for_title("Listen again"), None);
+    }
+}
+
+#[cfg(test)]
+mod playback_clock_tests {
+    use super::*;
+
+    fn at(base: f64, state: PlaybackState, age: Option<Duration>) -> f64 {
+        let now = Instant::now();
+        interpolate_position(
+            state,
+            base,
+            age.map(|age| now - age),
+            now,
+            600,
+        )
+    }
+
+    #[test]
+    fn initial_progress_stays_zero_while_buffering() {
+        // Slow initial loading and a delayed/absent mpv reply must not invent
+        // elapsed time: the old 1.5s fallback did exactly that.
+        assert_eq!(at(0.0, PlaybackState::Buffering, None), 0.0);
+        assert_eq!(
+            at(0.0, PlaybackState::Buffering, Some(Duration::from_secs(10))),
+            0.0
+        );
+    }
+
+    #[test]
+    fn normal_playback_interpolates_from_authoritative_sample() {
+        let position = at(42.0, PlaybackState::Playing, Some(Duration::from_millis(250)));
+        assert!((position - 42.25).abs() < 0.01, "got {position}");
+    }
+
+    #[test]
+    fn stale_telemetry_and_mid_song_buffering_freeze() {
+        assert_eq!(
+            at(42.0, PlaybackState::Playing, Some(Duration::from_secs(2))),
+            42.0
+        );
+        assert_eq!(at(42.0, PlaybackState::Playing, None), 42.0);
+    }
+
+    #[test]
+    fn pause_freezes_and_resume_waits_for_a_new_sample() {
+        assert_eq!(
+            at(42.0, PlaybackState::Paused, Some(Duration::from_millis(100))),
+            42.0
+        );
+        // Resuming does not fabricate a sample: with the pre-pause sample now
+        // stale the clock stays put until mpv reports a moved position.
+        assert_eq!(
+            at(42.0, PlaybackState::Playing, Some(Duration::from_secs(5))),
+            42.0
+        );
+    }
+
+    #[test]
+    fn track_switch_resets_to_zero_and_seek_is_immediate() {
+        assert_eq!(at(0.0, PlaybackState::Buffering, Some(Duration::from_secs(1))), 0.0);
+        let seek = at(100.0, PlaybackState::Playing, Some(Duration::from_millis(50)));
+        assert!((seek - 100.05).abs() < 0.01, "got {seek}");
+        assert_eq!(at(590.0, PlaybackState::Playing, Some(Duration::from_secs(1))), 590.0);
+        assert_eq!(at(599.9, PlaybackState::Playing, Some(Duration::from_millis(500))), 600.0);
+    }
+}
+
+#[cfg(test)]
+mod shuffle_tests {
+    use super::*;
+
+    #[test]
+    fn shuffled_queue_walks_every_track_once_then_ends() {
+        let order = [3, 0, 4, 1, 2];
+        let mut seen = Vec::new();
+        let mut current = order[0];
+        loop {
+            seen.push(current);
+            match shuffle_next(&order, current, RepeatMode::Off) {
+                Some(next) => current = next,
+                None => break,
+            }
+        }
+        assert_eq!(seen, order);
+    }
+
+    #[test]
+    fn repeat_all_wraps_and_previous_follows_the_same_order() {
+        let order = [3, 0, 4, 1, 2];
+        assert_eq!(shuffle_next(&order, 2, RepeatMode::All), Some(3));
+        assert_eq!(shuffle_next(&order, 2, RepeatMode::Off), None);
+        assert_eq!(shuffle_previous(&order, 0), Some(3));
+        assert_eq!(shuffle_previous(&order, 3), Some(2));
+    }
+
+    #[test]
+    fn linear_queue_ends_without_repeat() {
+        assert_eq!(linear_next(0, 3, RepeatMode::Off), Some(1));
+        assert_eq!(linear_next(2, 3, RepeatMode::Off), None);
+        assert_eq!(linear_next(2, 3, RepeatMode::All), Some(0));
+    }
+
+    #[test]
+    fn shuffle_order_survives_playing_a_track_already_in_it() {
+        // `select_queue_index` only rebuilds when the order cannot name the
+        // track, so normal advances (and manual jumps inside the order) keep
+        // the existing sequence instead of reshuffling every song.
+        let order = vec![3, 0, 4, 1, 2];
+        for index in &order {
+            assert!(order.contains(index));
+        }
+        assert!(!order.contains(&5));
     }
 }

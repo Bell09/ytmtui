@@ -7,7 +7,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 
 <br>
 
-[![Rust](https://img.shields.io/badge/Rust-1.75%2B-0d1117?style=for-the-badge&logo=rust&logoColor=22c55e&labelColor=161b22)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.89%2B-0d1117?style=for-the-badge&logo=rust&logoColor=22c55e&labelColor=161b22)](https://www.rust-lang.org/)
 [![mpv](https://img.shields.io/badge/mpv-backend-0d1117?style=for-the-badge&logo=mpv&logoColor=4ade80&labelColor=161b22)](https://mpv.io/)
 [![License](https://img.shields.io/badge/License-MIT-0d1117?style=for-the-badge&logo=opensourceinitiative&logoColor=22c55e&labelColor=161b22)](LICENSE)
 [![AUR](https://img.shields.io/badge/AUR-ytmtui-0d1117?style=for-the-badge&logo=archlinux&logoColor=4ade80&labelColor=161b22)](https://aur.archlinux.org/packages/ytmtui)
@@ -68,7 +68,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/main/install.sh | sh
 ```
 
-Installs to `~/.local/bin`. Use `sh install.sh --system` for `/usr/local/bin`, or pin a build with `YTMTUI_VERSION=0.1.7`. The script verifies the download checksum before installing.
+Installs to `~/.local/bin`. Use `sh install.sh --system` for `/usr/local/bin`, or pin a build with `YTMTUI_VERSION=0.1.8`. The script verifies the download checksum before installing.
 
 ### Release binaries
 
@@ -111,7 +111,7 @@ cargo build --release
 | Dependency | Purpose |
 | :--- | :--- |
 | **mpv** | Playback backend (controlled via IPC) |
-| **Rust** ≥ 1.75 | Only needed when building from source |
+| **Rust** ≥ 1.89 | Only needed when building from source |
 
 Install on Arch:
 

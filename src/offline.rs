@@ -110,6 +110,7 @@ pub struct Entry {
 ///
 /// Prunes entries whose file was deleted, so a check mark never outlives a file
 /// the user removed behind the app's back.
+#[derive(Clone)]
 pub struct Registry {
     entries: HashMap<String, Entry>,
     by_path: HashMap<PathBuf, String>,
@@ -175,7 +176,17 @@ impl Registry {
 /// album and duration the API reported, which we'd otherwise have to probe from
 /// tags. Loose files fall back to the path layout (`Artist/Album/01 -
 /// Title.ext`), the usual shape of hand-copied libraries.
-fn track_for(path: &Path, registry: &Registry, root: &Path) -> Track {
+fn track_for(
+    path: &Path,
+    registry: &Registry,
+    root: &Path,
+    art: &HashMap<PathBuf, Vec<PathBuf>>,
+) -> Track {
+    let cover = |path: &Path| {
+        path.parent()
+            .and_then(|dir| art.get(dir))
+            .and_then(|images| sidecar_art_from(path, images))
+    };
     if let Some(e) = registry.entry_for_path(path) {
         return Track {
             id: local_id(path),
@@ -189,7 +200,7 @@ fn track_for(path: &Path, registry: &Registry, root: &Path) -> Track {
                 .art
                 .clone()
                 .filter(|p| Path::new(p).is_file())
-                .or_else(|| sidecar_art(path)),
+                .or_else(|| cover(path)),
             downloaded: true,
             like: None,
             set_video_id: None,
@@ -204,7 +215,7 @@ fn track_for(path: &Path, registry: &Registry, root: &Path) -> Track {
         // Unknown without reading tags, and probing every file at scan time
         // would stall startup. Downloaded files never land here.
         duration: None,
-        thumbnail_url: sidecar_art(path),
+        thumbnail_url: cover(path),
         downloaded: true,
         like: None,
         set_video_id: None,
@@ -256,34 +267,46 @@ fn derive_metadata(path: &Path, root: &Path) -> (String, String, Option<String>)
     }
 }
 
-/// Cover sitting next to an audio file, if any.
+/// Cover sitting next to an audio file, if any. Reads the file's directory
+/// once — used by the single-file download path.
 fn sidecar_art(path: &Path) -> Option<String> {
     let dir = path.parent()?;
-    let stem = path.file_stem()?;
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let lower = name.to_lowercase();
-        let ext = lower.rsplit('.').next().unwrap_or("");
-        if !IMAGE_EXT.contains(&ext) {
-            continue;
-        }
-        let file_stem = Path::new(&name)
+    let images: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .map(|ext| IMAGE_EXT.contains(&ext.to_string_lossy().to_lowercase().as_str()))
+                .unwrap_or(false)
+        })
+        .collect();
+    sidecar_art_from(path, &images)
+}
+
+/// Pick the cover for `path` from a directory's known image list. No disk
+/// reads: a scan indexes each directory once instead of once per song.
+fn sidecar_art_from(path: &Path, images: &[PathBuf]) -> Option<String> {
+    let stem = path.file_stem()?.to_string_lossy().to_lowercase();
+    images.iter().find_map(|image| {
+        let file_stem = image
             .file_stem()
             .map(|s| s.to_string_lossy().to_lowercase())
             .unwrap_or_default();
         // Same stem as the audio, or the conventional folder cover names.
-        if file_stem == stem.to_string_lossy().to_lowercase()
-            || matches!(file_stem.as_str(), "cover" | "folder" | "album" | "front")
-        {
-            return Some(entry.path().display().to_string());
-        }
-    }
-    None
+        (file_stem == stem
+            || matches!(file_stem.as_str(), "cover" | "folder" | "album" | "front"))
+        .then(|| image.display().to_string())
+    })
 }
 
-/// Recursively collect audio files under `dir`.
-fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Recursively collect audio files under `dir`, indexing each directory's
+/// images once. Both lists are filled in one traversal.
+fn collect(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    art: &mut HashMap<PathBuf, Vec<PathBuf>>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -294,26 +317,37 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
         .collect();
     // Sorted so folders and files render in a stable order.
     paths.sort();
+    let mut images = Vec::new();
     for path in paths {
         if path.is_dir() {
-            collect(&path, out);
+            collect(&path, out, art);
         } else if path
             .extension()
             .map(|e| AUDIO_EXT.contains(&e.to_string_lossy().to_lowercase().as_str()))
             .unwrap_or(false)
         {
             out.push(path);
+        } else if path
+            .extension()
+            .map(|e| IMAGE_EXT.contains(&e.to_string_lossy().to_lowercase().as_str()))
+            .unwrap_or(false)
+        {
+            images.push(path);
         }
+    }
+    if !images.is_empty() {
+        art.insert(dir.to_path_buf(), images);
     }
 }
 
 /// Every audio file under the music folder, registry metadata where known.
 pub fn scan(music_dir: &Path, registry: &Registry) -> Vec<Track> {
     let mut files = Vec::new();
-    collect(music_dir, &mut files);
+    let mut art: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    collect(music_dir, &mut files, &mut art);
     files
         .into_iter()
-        .map(|p| track_for(&p, registry, music_dir))
+        .map(|p| track_for(&p, registry, music_dir, &art))
         .collect()
 }
 
@@ -495,12 +529,53 @@ fn ytdlp(
     anyhow::bail!("{}", text)
 }
 
+/// Destination of a downloaded song: `Artist/Album/Title.mp3` (or
+/// `Artist/Title.mp3` without an album).
+pub fn download_path(music_dir: &Path, track: &Track) -> PathBuf {
+    let artist = sanitise(&track.artist);
+    let stem = sanitise(&track.title);
+    let out_dir = match track.album.as_deref().filter(|a| !a.trim().is_empty()) {
+        Some(album) => music_dir.join(&artist).join(sanitise(album)),
+        None => music_dir.join(&artist),
+    };
+    out_dir.join(format!("{}.mp3", stem))
+}
+
+/// Pick a free filename next to `base`: `Title.mp3`, `Title (2).mp3`, …
+/// Used when a path already belongs to a different video (or an unregistered
+/// legacy file) so a download never overwrites someone else's audio.
+fn unique_audio_path(base: &Path) -> PathBuf {
+    if !base.exists() {
+        return base.to_path_buf();
+    }
+    let stem = base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "track".to_string());
+    let parent = base.parent().unwrap_or_else(|| Path::new("."));
+    for n in 2..10_000 {
+        let candidate = parent.join(format!("{stem} ({n}).mp3"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    // Practically unreachable; the timestamp keeps the name unique.
+    parent.join(format!(
+        "{stem} ({}).mp3",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ))
+}
+
 /// Download one song into the music folder, cover embedded in the audio.
 ///
-/// Layout is `Artist/Album/Title.mp3` (`Artist/Title.mp3` when the album is
-/// unknown), which [`scan`] can read back with no metadata of its own and which
-/// matches hand-copied libraries. The returned [`Entry`] ties the video id to
-/// the new file, so the row can show a check mark.
+/// `existing_owner` is the video id the download manifest already ties to the
+/// destination path, if any. A file is only adopted when it is provably the
+/// same video: an unregistered (legacy) file or one owned by another video
+/// gets a suffixed filename instead, so a title collision can never steal a
+/// different song's file or mislabel it in the registry.
 ///
 /// `progress` is called from the blocking download thread with yt-dlp's
 /// percentage (0–100), so the row can show how far along it is.
@@ -508,29 +583,35 @@ pub async fn download<F>(
     url: &str,
     music_dir: &Path,
     track: &Track,
+    existing_owner: Option<&str>,
     progress: F,
 ) -> anyhow::Result<Entry>
 where
     F: Fn(u8) + Send + Sync + 'static,
 {
-    let artist = sanitise(&track.artist);
-    let stem = sanitise(&track.title);
-    // A known album nests under it; an unknown one doesn't invent a folder —
-    // `Artist/Title.mp3` is how a single sits on disk.
-    let out_dir = match track.album.as_deref().filter(|a| !a.trim().is_empty()) {
-        Some(album) => music_dir.join(&artist).join(sanitise(album)),
-        None => music_dir.join(&artist),
-    };
+    let base = download_path(music_dir, track);
+    let out_dir = base
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("download path has no parent"))?
+        .to_path_buf();
     std::fs::create_dir_all(&out_dir)?;
-    let template = out_dir.join(format!("{}.%(ext)s", stem));
-    let audio = out_dir.join(format!("{}.mp3", stem));
-
-    // An interrupted download leaves its file behind but never reaches the
-    // registry. Adopting it beats fetching the bytes again, and lets `d` after a
-    // crash repair the check mark instead of erroring.
+    // Only reuse an existing file when the manifest proves it is this video's
+    // (e.g. a download interrupted after yt-dlp finished but before the
+    // registry was saved). Anything else gets a fresh name so a title
+    // collision can't overwrite or mislabel a different song.
+    let audio = if base.is_file() && existing_owner == Some(track.id.as_str()) {
+        base
+    } else {
+        unique_audio_path(&base)
+    };
     if audio.is_file() {
         return Ok(entry_for(audio, track));
     }
+    let stem = audio
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "track".to_string());
+    let template = out_dir.join(format!("{}.%(ext)s", stem));
 
     // yt-dlp and ffmpeg are blocking child processes; keep them off the async
     // runtime's threads so frames keep drawing while it downloads.
@@ -562,17 +643,10 @@ where
 
     // `-x --audio-format mp3` plus the template fixes the name exactly.
     if !audio.is_file() {
-        // A title collision can leave yt-dlp nothing to rename; take the newest
-        // mp3 it wrote rather than fail a download that actually succeeded.
-        let newest = std::fs::read_dir(&out_dir)?
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|x| x.eq_ignore_ascii_case("mp3")).unwrap_or(false))
-            .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
-        match newest {
-            Some(path) if path.is_file() => return Ok(entry_for(path, track)),
-            _ => anyhow::bail!("download finished but no audio file appeared in {}", out_dir.display()),
-        }
+        anyhow::bail!(
+            "download finished but no audio file appeared at {}",
+            audio.display()
+        );
     }
     Ok(entry_for(audio, track))
 }
@@ -595,5 +669,118 @@ fn entry_for(path: PathBuf, track: &Track) -> Entry {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_registry(path: PathBuf) -> Registry {
+        Registry {
+            entries: HashMap::new(),
+            by_path: HashMap::new(),
+            path,
+        }
+    }
+
+    #[test]
+    fn download_collision_gets_a_unique_name_instead_of_adopting_it() {
+        let root = std::env::temp_dir().join(format!(
+            "ytmtui-download-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let base = root.join("Song.mp3");
+        std::fs::write(&base, b"someone else's audio").unwrap();
+
+        // A path that is already taken is never returned: the other file may
+        // belong to a different video or be an unregistered legacy download.
+        let fresh = unique_audio_path(&base);
+        assert_eq!(fresh.file_name().unwrap(), "Song (2).mp3");
+        std::fs::write(&fresh, b"new audio").unwrap();
+        assert_eq!(
+            unique_audio_path(&base).file_name().unwrap(),
+            "Song (3).mp3"
+        );
+        // The original bytes were not touched.
+        assert_eq!(std::fs::read(&base).unwrap(), b"someone else's audio");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn download_path_uses_artist_album_layout() {
+        let track = crate::models::Track {
+            id: "vid".into(),
+            title: "Title/With:Bad*Chars".into(),
+            artist: "Artist".into(),
+            album: Some("Album".into()),
+            duration: None,
+            thumbnail_url: None,
+            like: None,
+            downloaded: false,
+            set_video_id: None,
+        };
+        let path = download_path(Path::new("/music"), &track);
+        assert_eq!(
+            path,
+            Path::new("/music/Artist/Album/Title-With-Bad-Chars.mp3")
+        );
+    }
+
+    #[test]
+    fn scan_reuses_one_directory_cover_index() {
+        let root = std::env::temp_dir().join(format!("ytmtui-scan-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("Artist").join("Album");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("01 - First.mp3"), b"").unwrap();
+        std::fs::write(dir.join("02 - Second.mp3"), b"").unwrap();
+        std::fs::write(dir.join("cover.jpg"), b"").unwrap();
+
+        let registry = empty_registry(root.join("downloads.json"));
+        let tracks = scan(&root, &registry);
+        assert_eq!(tracks.len(), 2);
+        let cover = dir.join("cover.jpg");
+        for track in &tracks {
+            assert_eq!(
+                track.thumbnail_url.as_deref(),
+                Some(cover.to_string_lossy().as_ref())
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Build a fixture of `artists × albums × tracks` empty audio files and
+    /// report the scan time. Ignored so ordinary test runs never touch disk at
+    /// this scale; run with
+    /// `cargo test --release -- --ignored --nocapture bench_scan_large_library`.
+    #[test]
+    #[ignore]
+    fn bench_scan_large_library() {
+        let root = std::env::temp_dir().join("ytmtui-scan-bench");
+        let _ = std::fs::remove_dir_all(&root);
+        for a in 0..20 {
+            for al in 0..5 {
+                let dir = root.join(format!("Artist {a:02}")).join(format!("Album {al:02}"));
+                std::fs::create_dir_all(&dir).unwrap();
+                for t in 0..20 {
+                    std::fs::write(dir.join(format!("{t:02} - Track {t}.mp3")), b"").unwrap();
+                }
+                std::fs::write(dir.join("cover.jpg"), b"").unwrap();
+            }
+        }
+        let registry = Registry {
+            entries: HashMap::new(),
+            by_path: HashMap::new(),
+            path: root.join("downloads.json"),
+        };
+        let start = std::time::Instant::now();
+        let tracks = scan(&root, &registry);
+        let elapsed = start.elapsed();
+        assert_eq!(tracks.len(), 2000);
+        println!("scan of {} files: {:?}", tracks.len(), elapsed);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
