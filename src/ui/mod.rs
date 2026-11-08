@@ -1380,11 +1380,20 @@ fn draw_create_playlist_dialog(f: &mut Frame, app: &App, area: Rect) {
     spans.push(Span::styled("▌", Style::default().fg(t.accent)));
     f.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
 
+    // "enter create" takes the pywal accent (the same colour the footer
+    // uses for keys) so the primary action stands out; "esc cancel" stays
+    // plain white.
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "enter create · esc cancel",
-            Style::default().fg(t.dim),
-        ))),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "enter create",
+                Style::default()
+                    .fg(t.accent2)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" · ", Style::default().fg(t.dim)),
+            Span::styled("esc cancel", Style::default().fg(Color::White)),
+        ])),
         rows[2],
     );
 }
