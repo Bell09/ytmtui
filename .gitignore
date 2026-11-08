@@ -1,1 +1,6 @@
 /target
+
+# Local authentication and config — never commit credentials.
+auth.json
+.ytmtui/
+.config/ytmtui/
