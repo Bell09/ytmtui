@@ -473,18 +473,20 @@ fn sidebar_item(
     ListItem::new(Line::from(spans))
 }
 
-/// Cover art in the sidebar, flush above the playback line. Kitty shows a
-/// true inline image (graphics protocol); other terminals get quadrant blocks
-/// at two pixels per cell on both axes. The photo keeps its own colours, not
-/// the palette. While fetching, a dim cover glyph holds the space.
+/// Cover art in the sidebar, flush above the playback line. Terminals
+/// speaking the Kitty graphics protocol (Kitty, WezTerm, Ghostty, Konsole)
+/// show a true inline image; other terminals get quadrant blocks at two
+/// pixels per cell on both axes. The photo keeps its own colours, not the
+/// palette. While fetching, a dim cover glyph holds the space.
 fn draw_album_art(f: &mut Frame, app: &mut App, area: Rect) {
     let (w, rows) = (area.width, area.height);
 
     if crate::art::graphics_mode() == crate::art::Graphics::Kitty {
         // True inline image: transmit once per (track, cell size, terminal
-        // size). Kitty keeps it placed between frames but drops all
-        // placements on resize, so a fullscreen toggle must retransmit. The
-        // escape bytes are flushed after each frame (see main's event loop).
+        // size). Kitty graphics protocol keeps it placed between frames but
+        // drops all placements on resize, so a fullscreen toggle must
+        // retransmit. The escape bytes are flushed after each frame (see
+        // main's event loop).
         if let Some(id) = app.art_track.clone() {
             if let Some(src) = app.art_source.as_ref() {
                 let frame = f.area();

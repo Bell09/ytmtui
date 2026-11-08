@@ -1,6 +1,7 @@
 //! Album art: fetch the current track's cover and hand it to the renderer as
-//! square RGBA. Kitty shows a true inline image (graphics protocol); elsewhere
-//! it is drawn with quadrant blocks at two pixels per cell in both axes.
+//! square RGBA. Terminals speaking the Kitty graphics protocol (Kitty,
+//! WezTerm, Ghostty, Konsole) show a true inline image; elsewhere it is
+//! drawn with quadrant blocks at two pixels per cell in both axes.
 
 use crate::models::Track;
 use image::RgbaImage;
@@ -9,6 +10,7 @@ use image::RgbaImage;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Graphics {
     /// Kitty's inline image protocol: a real, high-resolution picture.
+    /// Supported by Kitty, WezTerm, Ghostty and Konsole.
     Kitty,
     /// Unicode quadrant blocks: 2×2 pixels per cell.
     Blocks,
@@ -17,9 +19,22 @@ pub enum Graphics {
 /// Detect terminal capability from the environment. Protocol queries need a
 /// terminal reply, which the key-reading event loop would swallow.
 pub fn graphics_mode() -> Graphics {
+    let term = std::env::var("TERM").unwrap_or_default();
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+
+    // Kitty graphics protocol is spoken by Kitty, WezTerm, Ghostty and
+    // Konsole. Environment variables each terminal sets:
     let kitty = std::env::var_os("KITTY_WINDOW_ID").is_some()
-        || std::env::var("TERM").is_ok_and(|t| t.contains("kitty"));
-    if kitty {
+        || term.contains("kitty");
+    let wezterm = std::env::var_os("WEZTERM_PANE").is_some()
+        || std::env::var_os("WEZTERM_EXECUTABLE").is_some()
+        || term_program.contains("WezTerm");
+    let ghostty = std::env::var_os("GHOSTTY").is_some()
+        || term_program.contains("Ghostty");
+    let konsole = std::env::var_os("KONSOLE_VERSION").is_some()
+        || term.contains("konsole");
+
+    if kitty || wezterm || ghostty || konsole {
         Graphics::Kitty
     } else {
         Graphics::Blocks
@@ -27,25 +42,43 @@ pub fn graphics_mode() -> Graphics {
 }
 
 /// Whether the terminal supports kitty's text sizing protocol (OSC 66).
-/// Kitty added it in 0.40; older versions swallow the scaled text and leave
-/// the pane blank.
+/// Kitty (0.40+), Ghostty and WezTerm support it; Konsole does not.
 pub fn text_scaling() -> bool {
     static SUPPORT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SUPPORT.get_or_init(|| {
         if graphics_mode() != Graphics::Kitty {
             return false;
         }
-        let Ok(out) = std::process::Command::new("kitty").arg("--version").output() else {
-            return false;
-        };
-        let text = String::from_utf8_lossy(&out.stdout);
-        let Some(ver) = text.split_whitespace().nth(1) else {
-            return false;
-        };
-        let mut parts = ver.split('.');
-        let major = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
-        let minor = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
-        (major, minor) >= (0, 40)
+        let term = std::env::var("TERM").unwrap_or_default();
+        let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+
+        // Ghostty supports OSC 66 from its early releases.
+        if std::env::var_os("GHOSTTY").is_some() || term_program.contains("Ghostty") {
+            return true;
+        }
+        // WezTerm supports OSC 66.
+        if std::env::var_os("WEZTERM_PANE").is_some()
+            || std::env::var_os("WEZTERM_EXECUTABLE").is_some()
+            || term_program.contains("WezTerm")
+        {
+            return true;
+        }
+        // Kitty: check the CLI version (0.40+).
+        if std::env::var_os("KITTY_WINDOW_ID").is_some() || term.contains("kitty") {
+            let Ok(out) = std::process::Command::new("kitty").arg("--version").output() else {
+                return false;
+            };
+            let text = String::from_utf8_lossy(&out.stdout);
+            let Some(ver) = text.split_whitespace().nth(1) else {
+                return false;
+            };
+            let mut parts = ver.split('.');
+            let major = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+            let minor = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+            return (major, minor) >= (0, 40);
+        }
+        // Konsole speaks the Kitty graphics protocol but not OSC 66.
+        false
     })
 }
 

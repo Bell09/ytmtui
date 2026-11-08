@@ -347,10 +347,10 @@ pub struct App {
     pub art_track: Option<String>,
     pub art_source: Option<image::RgbaImage>,
     pub art_fitted: Option<((u16, u16), image::RgbaImage)>,
-    /// Kitty graphics state: escape bytes waiting to be written after the
-    /// next frame, and what was last transmitted (track, art cells, and
-    /// terminal size — kitty drops image placements on window resizes, so
-    /// a size change must retransmit).
+    /// Kitty-graphics-protocol state: escape bytes waiting to be written
+    /// after the next frame, and what was last transmitted (track, art
+    /// cells, and terminal size — Kitty-protocol terminals drop image
+    /// placements on window resizes, so a size change must retransmit).
     pub art_output: Vec<u8>,
     pub art_kitty_sent: Option<(String, u16, u16, u16, u16)>,
     /// Erase the previous scaled-lyrics block before the next frame.
