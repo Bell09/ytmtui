@@ -246,14 +246,26 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
     // The rule spans the header width, capped at one copy of the motif so
     // ultra-wide terminals keep its intended shape.
     let focused = app.input_mode == InputMode::Search;
+    let creating = app.input_mode == InputMode::CreatePlaylist;
+    let input_focused = focused || creating;
     let input_w = usize::from(rows[0].width).min(TOP_RULE.chars().count());
+
+    let (label, query, placeholder) = if creating {
+        (
+            "Create playlist ",
+            &app.create_playlist_query,
+            "name for the new playlist",
+        )
+    } else {
+        ("Search ", &app.search_query, "press / to search")
+    };
 
     let mut spans = vec![
         Span::styled(
-            "Search ",
+            label,
             Style::default()
-                .fg(if focused { t.accent } else { t.dim })
-                .add_modifier(if focused {
+                .fg(if input_focused { t.accent } else { t.dim })
+                .add_modifier(if input_focused {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
@@ -267,18 +279,18 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
     // Label + arrow reserve nine columns; leave a margin before the rule's
     // end so text never sits flush against it.
     let text_budget = input_w.saturating_sub(10);
-    let cursor_w = usize::from(focused);
-    if app.search_query.is_empty() && !focused {
+    let cursor_w = usize::from(input_focused);
+    if query.is_empty() && !input_focused {
         spans.push(Span::styled(
-            truncate("press / to search", text_budget),
+            truncate(placeholder, text_budget),
             Style::default().fg(t.dim),
         ));
     } else {
         spans.push(Span::styled(
-            truncate(&app.search_query, text_budget.saturating_sub(cursor_w)),
+            truncate(query, text_budget.saturating_sub(cursor_w)),
             Style::default().fg(t.fg),
         ));
-        if focused {
+        if input_focused {
             spans.push(Span::styled("▌", Style::default().fg(t.accent)));
         }
     }

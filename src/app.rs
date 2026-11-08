@@ -190,6 +190,8 @@ pub enum PlaybackState {
 pub enum InputMode {
     Normal,
     Search,
+    /// Typing a name for a new playlist to create (`c` key).
+    CreatePlaylist,
 }
 
 /// Repeat behaviour for queue advancement (Ctrl+R, honoured at end of file).
@@ -222,6 +224,8 @@ pub struct App {
     pub current_page: Page,
     pub input_mode: InputMode,
     pub search_query: String,
+    /// Playlist name being typed while `InputMode::CreatePlaylist` is active.
+    pub create_playlist_query: String,
     pub search_results: Vec<SearchHit>,
     /// Index 0 is always "Top" (default search); the rest mirror `search_filters`.
     pub search_filter: usize,
@@ -267,6 +271,10 @@ pub struct App {
     search_tx: tokio::sync::mpsc::UnboundedSender<SearchResult>,
     search_rx: tokio::sync::mpsc::UnboundedReceiver<SearchResult>,
     search_generation: u64,
+    /// Result of a `create_playlist` request. `Ok(())` means the playlist was
+    /// created; `Err(String)` is the server's complaint.
+    create_playlist_tx: tokio::sync::mpsc::UnboundedSender<Result<(), String>>,
+    create_playlist_rx: tokio::sync::mpsc::UnboundedReceiver<Result<(), String>>,
     /// Background collection refresh; cached rows show while it runs.
     collection_tx: tokio::sync::mpsc::UnboundedSender<CollectionResult>,
     collection_rx: tokio::sync::mpsc::UnboundedReceiver<CollectionResult>,
@@ -485,6 +493,8 @@ impl App {
         let (preview_tx, preview_rx) = tokio::sync::mpsc::unbounded_channel();
         let (library_tx, library_rx) = tokio::sync::mpsc::unbounded_channel();
         let (search_tx, search_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (create_playlist_tx, create_playlist_rx) =
+            tokio::sync::mpsc::unbounded_channel();
         let (collection_tx, collection_rx) = tokio::sync::mpsc::unbounded_channel();
         let (timeline_tx, timeline_rx) = tokio::sync::mpsc::unbounded_channel();
         let (browse_refresh_tx, browse_refresh_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -617,6 +627,7 @@ impl App {
             current_page: Page::Library,
             input_mode: InputMode::Normal,
             search_query: String::new(),
+            create_playlist_query: String::new(),
             search_results: Vec::new(),
             search_filter: 0,
             search_filters: Vec::new(),
@@ -644,6 +655,8 @@ impl App {
             search_tx,
             search_rx,
             search_generation: 0,
+            create_playlist_tx,
+            create_playlist_rx,
             collection_tx,
             collection_rx,
             collection_generation: 0,
@@ -761,6 +774,7 @@ impl App {
         self.poll_preview();
         self.poll_search();
         self.poll_collection();
+        self.poll_create_playlist();
         // Keep only the newest timeline sample; older ones are already stale
         // by the time the frame runs.
         while let Ok(sample) = self.timeline_rx.try_recv() {
@@ -1495,6 +1509,35 @@ impl App {
                 }
             }
             Err(e) => self.status_message = format!("Search failed: {}", e),
+        }
+    }
+
+    /// Submit a playlist creation request in the background. The result is
+    /// applied by [`poll_create_playlist`].
+    pub fn create_playlist_submit(&mut self, title: String) {
+        self.status_message = format!("Creating playlist '{}'...", title);
+        let api = self.api.clone();
+        let tx = self.create_playlist_tx.clone();
+        tokio::spawn(async move {
+            let result = api
+                .create_playlist(&title)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Apply a finished playlist creation result. On success, refresh the
+    /// library so the new playlist appears in the sidebar.
+    fn poll_create_playlist(&mut self) {
+        while let Ok(result) = self.create_playlist_rx.try_recv() {
+            match result {
+                Ok(()) => {
+                    self.status_message = "Playlist created.".to_string();
+                    self.start_library_load();
+                }
+                Err(e) => self.status_message = format!("Failed to create playlist: {}", e),
+            }
         }
     }
 

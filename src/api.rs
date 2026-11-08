@@ -835,6 +835,24 @@ impl YtmApi {
         self.playlist_edit(body).await
     }
 
+    /// Create a new playlist with the given title. The playlist is private
+    /// by default. On success the new playlist appears in the next library
+    /// refresh.
+    pub async fn create_playlist(&self, title: &str) -> anyhow::Result<()> {
+        let body = json!({
+            "context": context(),
+            "actions": [{
+                "action": "ACTION_CREATE_PLAYLIST",
+                "playlist": {
+                    "title": title,
+                    "description": "",
+                    "privacyStatus": "PRIVATE",
+                },
+            }],
+        });
+        self.playlist_edit(body).await
+    }
+
     /// Drop a song from a playlist. Hand the row's `setVideoId` — the
     /// per-membership token the removal is addressed with — plus the
     /// video id itself (`ACTION_REMOVE_VIDEO`, ytmusicapi's exact shape).

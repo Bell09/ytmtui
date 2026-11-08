@@ -319,6 +319,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
+                // Creating a new playlist: type a name, then press Enter.
+                if app.input_mode == InputMode::CreatePlaylist {
+                    match key.code {
+                        KeyCode::Enter => {
+                            let title = std::mem::take(&mut app.create_playlist_query);
+                            app.input_mode = InputMode::Normal;
+                            app.create_playlist_submit(title);
+                        }
+                        KeyCode::Esc => {
+                            app.input_mode = InputMode::Normal;
+                            app.create_playlist_query.clear();
+                        }
+                        KeyCode::Backspace => {
+                            app.create_playlist_query.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            app.create_playlist_query.push(c);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 // The add-to-playlist picker owns the keyboard while it's
                 // open — the page underneath keeps its selection untouched.
                 if app.picker_open {
@@ -401,6 +424,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Add the highlighted song to a library playlist —
                     // `a` opens the picker, arrows scroll, Enter adds.
                     KeyCode::Char('a' | 'A') => app.open_playlist_picker(),
+                    // Create a new playlist: `c` opens a name prompt.
+                    KeyCode::Char('c') => {
+                        app.input_mode = InputMode::CreatePlaylist;
+                        app.create_playlist_query.clear();
+                        app.status_message = "New playlist name:".to_string();
+                    }
                     // Drop the highlighted song from the open playlist.
                     // Guarded against Ctrl+R so repeat cycling keeps its key.
                     KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
