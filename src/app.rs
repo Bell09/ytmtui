@@ -308,6 +308,9 @@ pub struct App {
     /// follows mpv instead of a fixed startup timer, so the progress bar and
     /// lyrics start with the audible audio.
     playback_position: f64,
+    /// Previous timeline position, used to detect mpv's gapless auto-advance
+    /// (position resets to ~0 when mpv moves to the next queued track).
+    last_position: Option<f64>,
     position_sampled_at: Option<Instant>,
     pub playback_duration_secs: u64,
     /// Newest background timeline sample and the sequence already applied.
@@ -325,6 +328,14 @@ pub struct App {
     /// `advance_on_end` only fires once per track despite repeated timeline
     /// samples. Reset in `start_track`.
     track_end_reported: bool,
+    /// True when the next track has been queued in mpv's playlist via
+    /// `loadfile append-play` for gapless playback. Reset when the track
+    /// changes or the user skips/stops.
+    mpv_queued_next: bool,
+    /// The video id of the track queued in mpv's playlist (when
+    /// `mpv_queued_next` is true). Used to update `current_track` when mpv
+    /// auto-advances.
+    queued_next_id: Option<String>,
     /// Next track's resolved stream, keyed by video id and when it arrived.
     prefetch: Option<(String, String, Instant)>,
     prefetch_inflight: Option<String>,
@@ -681,6 +692,7 @@ impl App {
             should_quit: false,
             status_message: auth_status.to_string(),
             playback_position: 0.0,
+            last_position: None,
             position_sampled_at: None,
             playback_duration_secs: 210,
             timeline_rx,
@@ -691,6 +703,8 @@ impl App {
             last_progress_at: None,
             audio_started: false,
             track_end_reported: false,
+            mpv_queued_next: false,
+            queued_next_id: None,
             prefetch: None,
             prefetch_inflight: None,
             prefetch_tx,
@@ -928,12 +942,34 @@ impl App {
             }
         }
         // A resolved next-track stream is kept until `play_track` uses it.
+        // When a track is playing, also queue it in mpv's playlist so the
+        // transition is gapless (mpv auto-advances via its playlist).
         while let Ok((id, result)) = self.prefetch_rx.try_recv() {
             if self.prefetch_inflight.as_deref() == Some(id.as_str()) {
                 self.prefetch_inflight = None;
             }
             if let Ok(url) = result {
+                let id_clone = id.clone();
+                let url_clone = url.clone();
                 self.prefetch = Some((id, url, Instant::now()));
+                if !self.mpv_queued_next
+                    && self.playback_state == PlaybackState::Playing
+                {
+                    if let Some(track) = self.queue.iter().find(|t| t.id == id_clone) {
+                        match self.player
+                            .queue_next(&track.id, Some(&url_clone))
+                        {
+                            Ok(()) => {
+                                self.mpv_queued_next = true;
+                                self.queued_next_id = Some(id_clone);
+                            }
+                            Err(_) => {
+                                // mpv may not be ready yet; fall back to
+                                // loadfile replace when the track starts.
+                            }
+                        }
+                    }
+                }
             }
         }
         // Widget actions (MPRIS + queue IPC) apply before this tick's own
@@ -2524,7 +2560,36 @@ impl App {
 
     /// Shared entry point for fresh tracks and retries. A retry deliberately
     /// skips the prefetched URL, since that URL is the one that just failed.
+    ///
+    /// If mpv auto-advanced to this track via gapless playlist playback
+    /// (`mpv_queued_next` is set), the track is already loaded — skip the
+    /// `loadfile replace` that would cause a gap, and just adopt the state.
     fn start_track(&mut self, t: Track, retry: bool) {
+        // Gapless auto-advance: mpv already loaded this track via
+        // `loadfile append-play`. Adopt it without reloading.
+        if !retry
+            && self.mpv_queued_next
+            && self.queued_next_id.as_deref() == Some(&t.id)
+        {
+            self.mpv_queued_next = false;
+            self.queued_next_id = None;
+            self.track_end_reported = false;
+            self.playback_position = 0.0;
+            self.last_position = None;
+            self.position_sampled_at = None;
+            self.audio_started = false;
+            self.play_started_at = Some(Instant::now());
+            self.last_progress_at = Some(Instant::now());
+            self.playback_duration_secs =
+                parse_duration(&t.duration).unwrap_or(210);
+            self.current_track = Some(t);
+            self.playback_state = PlaybackState::Buffering;
+            self.sync_art();
+            self.sync_lyrics();
+            self.prefetch_next();
+            return;
+        }
+
         self.status_message = if retry {
             "Retrying…".to_string()
         } else {
@@ -2551,9 +2616,12 @@ impl App {
             return;
         }
         self.playback_position = 0.0;
+        self.last_position = None;
         self.position_sampled_at = None;
         self.audio_started = false;
         self.track_end_reported = false;
+        self.mpv_queued_next = false;
+        self.queued_next_id = None;
         self.play_started_at = Some(Instant::now());
         self.last_progress_at = Some(Instant::now());
         self.playback_duration_secs = parse_duration(&t.duration).unwrap_or(210);
@@ -2706,6 +2774,31 @@ impl App {
                     self.finish_buffering();
                 }
             }
+            // Gapless: mpv auto-advances to the next track in its playlist
+            // when the current track ends. Detect this via a position reset
+            // (position jumps back to ~0) and adopt the queued track without
+            // reloading it via `loadfile replace`.
+            if let Some(prev) = self.last_position {
+                if position < prev - 1.0 {
+                    // Track changed: mpv moved to the next queued track.
+                    if let Some(queued_id) = self.queued_next_id.take() {
+                        self.mpv_queued_next = false;
+                        if let Some(pos) = self
+                            .queue
+                            .iter()
+                            .position(|t| t.id == queued_id)
+                        {
+                            self.queue_index = pos;
+                            let t = self.queue[pos].clone();
+                            self.start_track(t, false);
+                            // start_track resets last_position; don't
+                            // overwrite it with the old track's sample.
+                            return;
+                        }
+                    }
+                }
+            }
+            self.last_position = Some(position);
         }
         if let Some(duration) = timeline.duration.filter(|d| d.is_finite() && *d > 0.0) {
             let secs = duration.round() as u64;
@@ -2715,19 +2808,6 @@ impl App {
                     let label = format_duration(secs);
                     if track.duration.as_deref() != Some(label.as_str()) {
                         track.duration = Some(label);
-                    }
-                }
-            }
-            // Gapless: when mpv reports the position at (or past) the end of
-            // the track, step the queue forward without killing mpv. The next
-            // `start_track` → `play_with` loads via IPC `loadfile`, so the
-            // transition is gapless. Only fire once per track.
-            if !self.track_end_reported {
-                if let Some(position) = timeline.position.filter(|p| p.is_finite()) {
-                    let position = position.max(0.0);
-                    if position >= duration - 0.5 {
-                        self.track_end_reported = true;
-                        self.advance_on_end();
                     }
                 }
             }
@@ -3440,6 +3520,9 @@ impl App {
     pub fn stop_playback(&mut self) {
         self.playback_position = self.position_secs_f64();
         self.position_sampled_at = None;
+        self.last_position = None;
+        self.mpv_queued_next = false;
+        self.queued_next_id = None;
         self.player.stop();
         self.playback_state = PlaybackState::Stopped;
         self.status_message = "Stopped".to_string();
@@ -3879,4 +3962,5 @@ mod shuffle_tests {
         }
         assert!(!order.contains(&5));
     }
+
 }

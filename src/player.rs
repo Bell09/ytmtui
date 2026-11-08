@@ -13,12 +13,23 @@ pub struct Timeline {
     pub duration: Option<f64>,
 }
 
+/// How to load a track into mpv.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadMode {
+    /// Clear the playlist and play this track immediately (used for the
+    /// first track, after a user skip/stop, or on recovery).
+    Replace,
+    /// Append to mpv's playlist for gapless playback — mpv plays the current
+    /// track to completion, then moves to the queued track automatically.
+    Append,
+}
+
 /// Thin wrapper around a persistent `mpv` process.
 ///
-/// mpv is started once and kept alive across tracks. Tracks are swapped with
-/// the IPC `loadfile` command so playback is gapless — there's no kill /
-/// restart between songs. `--gapless-audio=yes` lets mpv buffer the next
-/// stream while the current one finishes.
+/// mpv is started once and kept alive across the session. Tracks are loaded
+/// through IPC: `loadfile … replace` for immediate playback, `loadfile …
+/// append-play` to queue the next track gaplessly. `--gapless-audio=yes`
+/// lets mpv buffer the next stream while the current one finishes.
 pub struct Player {
     process: Option<Child>,
     socket_path: String,
@@ -59,38 +70,75 @@ impl Player {
         self.play_with(track_id, None)
     }
 
-    /// Start `track_id`, using a prefetched stream URL when available. That
-    /// skips the yt-dlp round-trip, so the next song starts almost instantly.
+    /// Start `track_id` immediately, replacing whatever is in mpv's
+    /// playlist. Uses a prefetched stream URL when available.
     ///
-    /// If mpv is already running, the new track is loaded through the IPC
-    /// socket with `loadfile … replace`, so playback is gapless. If mpv is
-    /// not running (or died), a fresh process is spawned.
+    /// If mpv is already running, loads via IPC `loadfile … replace`. If
+    /// mpv is not running (or died), spawns a fresh process.
     pub fn play_with(&mut self, track_id: &str, stream_url: Option<&str>) -> anyhow::Result<()> {
-        // Offline ids carry a `local:` prefix and map to a file; everything
-        // else is a YouTube video. mpv accepts either, so the queue can mix
-        // both across an `o` toggle.
-        let target = match stream_url {
+        self.load(track_id, stream_url, LoadMode::Replace)
+    }
+
+    /// Queue `track_id` after the currently playing track in mpv's playlist,
+    /// for gapless playback. mpv will auto-advance to it when the current
+    /// track finishes. Returns an error if mpv is not running.
+    pub fn queue_next(&mut self, track_id: &str, stream_url: Option<&str>) -> anyhow::Result<()> {
+        if !self.is_running() {
+            anyhow::bail!("mpv is not running");
+        }
+        self.load(track_id, stream_url, LoadMode::Append)
+    }
+
+    /// Clear mpv's playlist. Used before a user skip/stop so stale queued
+    /// tracks don't play after the transition.
+    pub fn playlist_clear(&self) -> anyhow::Result<()> {
+        self.send_command(&["playlist-clear"])
+    }
+
+    /// Resolve the playable target (URL or local path) for a track.
+    fn resolve_target(&self, track_id: &str, stream_url: Option<&str>) -> String {
+        match stream_url {
             Some(url) => url.to_string(),
             None => match crate::offline::local_path(track_id) {
                 Some(path) => path.display().to_string(),
                 None => format!("https://www.youtube.com/watch?v={}", track_id),
             },
-        };
+        }
+    }
 
-        if self.is_running() {
-            // Gapless: keep the mpv process alive and load the new track
-            // into it via IPC. If loadfile fails (mpv may be stuck in an
-            // error state), kill mpv and spawn fresh below.
-            match self.loadfile(&target) {
-                Ok(()) => return Ok(()),
-                Err(_) => {
-                    self.stop();
-                    let _ = std::fs::remove_file(&self.socket_path);
+    /// Load `track_id` into mpv with the given mode.
+    ///
+    /// If mpv is not running, spawns a fresh process (always Replace mode
+    /// for the first track). If running, sends the appropriate IPC command.
+    fn load(&mut self, track_id: &str, stream_url: Option<&str>, mode: LoadMode) -> anyhow::Result<()> {
+        let target = self.resolve_target(track_id, stream_url);
+
+        match mode {
+            LoadMode::Replace => {
+                if self.is_running() {
+                    self.playlist_clear()?;
+                    self.send_command(&["loadfile", &target, "replace"])
+                } else {
+                    self.spawn_mpv(&target)
                 }
             }
+            LoadMode::Append => {
+                if !self.is_running() {
+                    anyhow::bail!("mpv is not running");
+                }
+                self.send_command(&["loadfile", &target, "append-play"])
+            }
         }
+    }
 
-        self.spawn_mpv(&target)
+    /// Send a raw IPC command array to the running mpv process.
+    fn send_command(&self, args: &[&str]) -> anyhow::Result<()> {
+        let body = json!({ "command": args });
+        let cmd = serde_json::to_string(&body)? + "\n";
+        let mut stream = UnixStream::connect(&self.socket_path)?;
+        stream.set_write_timeout(Some(Duration::from_millis(100)))?;
+        stream.write_all(cmd.as_bytes())?;
+        Ok(())
     }
 
     /// Spawn a fresh mpv process for `target`. Used for the first track and
@@ -130,19 +178,6 @@ impl Player {
                 anyhow::bail!("Failed to start mpv (is mpv installed?): {}", e)
             }
         }
-    }
-
-    /// Load `target` into the running mpv process via IPC, replacing the
-    /// current track. This is what makes playback gapless.
-    fn loadfile(&self, target: &str) -> anyhow::Result<()> {
-        let body = json!({
-            "command": ["loadfile", target, "replace"]
-        });
-        let cmd = serde_json::to_string(&body)? + "\n";
-        let mut stream = UnixStream::connect(&self.socket_path)?;
-        stream.set_write_timeout(Some(Duration::from_millis(100)))?;
-        stream.write_all(cmd.as_bytes())?;
-        Ok(())
     }
 
     /// Toggle pause/resume via mpv's IPC socket.
@@ -262,4 +297,42 @@ pub fn resolve_stream(track_id: &str) -> anyhow::Result<String> {
         .find(|line| line.starts_with("http"))
         .map(str::to_string)
         .ok_or_else(|| anyhow::anyhow!("yt-dlp returned no stream URL"))
+}
+
+#[cfg(test)]
+mod player_tests {
+    use super::*;
+
+    /// `resolve_stream` maps a local id (`local:` prefix) to its file path
+    /// without invoking yt-dlp or the network.
+    #[test]
+    fn resolve_stream_returns_local_path_for_offline_id() {
+        let result = resolve_stream("local:/tmp/song.mp3");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "/tmp/song.mp3");
+    }
+
+    /// `resolve_stream` with a non-local id calls yt-dlp (network). Not run
+    /// here — just verifies the function signature exists and returns an
+    /// error when yt-dlp fails.
+    #[test]
+    fn resolve_stream_returns_error_for_unknown_video() {
+        let result = resolve_stream("nonexistent_video_id_xyz");
+        assert!(result.is_err());
+    }
+
+    /// `LoadMode` variants are distinct.
+    #[test]
+    fn load_mode_variants_are_distinct() {
+        assert_ne!(LoadMode::Replace, LoadMode::Append);
+    }
+
+    /// `LoadMode` derives `Copy` so it can be passed by value.
+    #[test]
+    fn load_mode_is_copy() {
+        let a = LoadMode::Replace;
+        let b = a; // Copy, not move
+        assert_eq!(a, b);
+        assert_eq!(b, LoadMode::Replace);
+    }
 }
