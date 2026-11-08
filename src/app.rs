@@ -271,10 +271,10 @@ pub struct App {
     search_tx: tokio::sync::mpsc::UnboundedSender<SearchResult>,
     search_rx: tokio::sync::mpsc::UnboundedReceiver<SearchResult>,
     search_generation: u64,
-    /// Result of a `create_playlist` request. `Ok(())` means the playlist was
-    /// created; `Err(String)` is the server's complaint.
-    create_playlist_tx: tokio::sync::mpsc::UnboundedSender<Result<(), String>>,
-    create_playlist_rx: tokio::sync::mpsc::UnboundedReceiver<Result<(), String>>,
+    /// Result of a `create_playlist` request. `Ok(id)` is the new playlist
+    /// id; `Err(String)` is the server's complaint.
+    create_playlist_tx: tokio::sync::mpsc::UnboundedSender<Result<String, String>>,
+    create_playlist_rx: tokio::sync::mpsc::UnboundedReceiver<Result<String, String>>,
     /// Background collection refresh; cached rows show while it runs.
     collection_tx: tokio::sync::mpsc::UnboundedSender<CollectionResult>,
     collection_rx: tokio::sync::mpsc::UnboundedReceiver<CollectionResult>,
@@ -1515,6 +1515,11 @@ impl App {
     /// Submit a playlist creation request in the background. The result is
     /// applied by [`poll_create_playlist`].
     pub fn create_playlist_submit(&mut self, title: String) {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            self.status_message = "Playlist name cannot be empty.".to_string();
+            return;
+        }
         self.status_message = format!("Creating playlist '{}'...", title);
         let api = self.api.clone();
         let tx = self.create_playlist_tx.clone();
@@ -1532,7 +1537,7 @@ impl App {
     fn poll_create_playlist(&mut self) {
         while let Ok(result) = self.create_playlist_rx.try_recv() {
             match result {
-                Ok(()) => {
+                Ok(_id) => {
                     self.status_message = "Playlist created.".to_string();
                     self.start_library_load();
                 }

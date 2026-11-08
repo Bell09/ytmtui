@@ -68,7 +68,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/main/install.sh | sh
 ```
 
-Installs to `~/.local/bin`. Use `sh install.sh --system` for `/usr/local/bin`, or pin a build with `YTMTUI_VERSION=0.1.9`. The script verifies the download checksum before installing.
+Installs to `~/.local/bin`. Use `sh install.sh --system` for `/usr/local/bin`, or pin a build with `YTMTUI_VERSION=0.1.10`. The script verifies the download checksum before installing.
 
 ### Release binaries
 

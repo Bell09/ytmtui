@@ -12,6 +12,11 @@ const LIKE_URL: &str = "https://music.youtube.com/youtubei/v1/like/";
 /// Playlist edits live under `browse/edit_playlist` these days — the old
 /// `playlist/edit` route answers 404 to any client-level variant of it.
 const EDIT_URL: &str = "https://music.youtube.com/youtubei/v1/browse/edit_playlist";
+/// Creating a playlist is its own route (`playlist/create`); it is not an
+/// edit action. ytmusicapi's `create_playlist` posts `title`, `description`
+/// and `privacyStatus` here and reads back `playlistId`.
+const CREATE_PLAYLIST_URL: &str =
+    "https://music.youtube.com/youtubei/v1/playlist/create?prettyPrint=false";
 
 /// A search filter chip (e.g. "Albums") and the opaque `params` that selects it.
 #[derive(Debug, Clone)]
@@ -835,22 +840,61 @@ impl YtmApi {
         self.playlist_edit(body).await
     }
 
-    /// Create a new playlist with the given title. The playlist is private
-    /// by default. On success the new playlist appears in the next library
-    /// refresh.
-    pub async fn create_playlist(&self, title: &str) -> anyhow::Result<()> {
+    /// Create a new empty playlist with the given title and return its id.
+    /// The playlist is private by default. YouTube can't handle `<`/`>`, so
+    /// they're stripped like the web client does.
+    pub async fn create_playlist(&self, title: &str) -> anyhow::Result<String> {
+        let headers = self
+            .headers
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("not signed in"))?;
+
+        let title = title.trim().replace(['<', '>'], "");
+        if title.is_empty() {
+            anyhow::bail!("playlist name cannot be empty");
+        }
+
         let body = json!({
             "context": context(),
-            "actions": [{
-                "action": "ACTION_CREATE_PLAYLIST",
-                "playlist": {
-                    "title": title,
-                    "description": "",
-                    "privacyStatus": "PRIVATE",
-                },
-            }],
+            "title": title,
+            "description": "",
+            "privacyStatus": "PRIVATE",
         });
-        self.playlist_edit(body).await
+
+        let url = format!("{}&alt=json&key={}", CREATE_PLAYLIST_URL, API_KEY);
+        let mut req = self.client.post(url).json(&body);
+        if let Some(visitor) = self.visitor_id.get() {
+            req = req.header("x-goog-visitor-id", visitor);
+        }
+        for (k, v) in headers {
+            // reqwest sets its own; forwarding the saved copy duplicates it.
+            if k.eq_ignore_ascii_case("content-type") {
+                continue;
+            }
+            if let Some(s) = v.as_str() {
+                req = req.header(k.as_str(), s);
+            }
+        }
+
+        let resp = req.send().await?;
+        self.capture_visitor(&resp);
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            let snippet: String = text.trim().chars().take(160).collect();
+            anyhow::bail!("HTTP {}: {}", status, snippet);
+        }
+        let value: Value = serde_json::from_str(text.trim()).unwrap_or(Value::Null);
+        if let Some(error) = value.get("error") {
+            anyhow::bail!("Could not create playlist: {}", error);
+        }
+        match value.get("playlistId").and_then(Value::as_str) {
+            Some(id) if !id.is_empty() => Ok(id.to_string()),
+            _ => {
+                let snippet: String = text.trim().chars().take(160).collect();
+                anyhow::bail!("Could not create playlist: {}", snippet)
+            }
+        }
     }
 
     /// Drop a song from a playlist. Hand the row's `setVideoId` — the
@@ -2038,6 +2082,54 @@ mod browse_tests {
         assert_eq!(tracks[0].set_video_id.as_deref(), Some("entry-a"));
         assert_eq!(tracks[1].id, "other");
         assert_eq!(tracks[2].id, "other");
+    }
+
+    /// Create a playlist on the signed-in account, confirm the server
+    /// returned an id, then delete it again. Ignored by default because it
+    /// touches the live account; run with `cargo test live_create_playlist
+    /// -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_create_playlist_round_trip() {
+        let headers = crate::auth::Auth::load_headers().expect("auth.json with headers");
+        if headers.get("cookie").and_then(Value::as_str).is_none() {
+            eprintln!("skipping: no signed-in cookie");
+            return;
+        }
+        let api = YtmApi::new();
+        assert!(api.is_authenticated(), "api should see the saved session");
+
+        let title = format!(
+            "ytmtui round-trip {}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
+        let id = api.create_playlist(&title).await.expect("create playlist");
+        assert!(!id.is_empty(), "server returned an empty playlist id");
+        eprintln!("created {title} -> {id}");
+
+        // Delete the probe playlist again so the account is left untouched.
+        let body = json!({ "context": context(), "playlistId": id });
+        let url = format!(
+            "https://music.youtube.com/youtubei/v1/playlist/delete?prettyPrint=false&alt=json&key={}",
+            API_KEY
+        );
+        let mut req = api.client.post(url).json(&body);
+        for (k, v) in &headers {
+            if k.eq_ignore_ascii_case("content-type") {
+                continue;
+            }
+            if let Some(s) = v.as_str() {
+                req = req.header(k.as_str(), s);
+            }
+        }
+        let resp = req.send().await.expect("delete request");
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        assert!(status.is_success(), "delete failed: {status} {text}");
+        eprintln!("deleted {id} ({status})");
     }
 
     #[tokio::test]
