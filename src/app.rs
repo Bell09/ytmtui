@@ -321,6 +321,10 @@ pub struct App {
     play_started_at: Option<Instant>,
     last_progress_at: Option<Instant>,
     audio_started: bool,
+    /// True once we've already reported the current track as ended, so
+    /// `advance_on_end` only fires once per track despite repeated timeline
+    /// samples. Reset in `start_track`.
+    track_end_reported: bool,
     /// Next track's resolved stream, keyed by video id and when it arrived.
     prefetch: Option<(String, String, Instant)>,
     prefetch_inflight: Option<String>,
@@ -686,6 +690,7 @@ impl App {
             play_started_at: None,
             last_progress_at: None,
             audio_started: false,
+            track_end_reported: false,
             prefetch: None,
             prefetch_inflight: None,
             prefetch_tx,
@@ -2548,6 +2553,7 @@ impl App {
         self.playback_position = 0.0;
         self.position_sampled_at = None;
         self.audio_started = false;
+        self.track_end_reported = false;
         self.play_started_at = Some(Instant::now());
         self.last_progress_at = Some(Instant::now());
         self.playback_duration_secs = parse_duration(&t.duration).unwrap_or(210);
@@ -2601,9 +2607,10 @@ impl App {
         (cached_id == id && at.elapsed() < PREFETCH_TTL).then_some(url)
     }
 
-    /// Retry the current track, then skip it if it keeps failing.
+    /// Retry the current track, then skip it if it keeps failing. mpv is
+    /// kept alive — the retry/skip is loaded via IPC `loadfile`, so playback
+    /// stays gapless even across failures.
     fn recover_playback(&mut self, reason: &str) {
-        self.player.stop();
         self.position_sampled_at = None;
         self.audio_started = false;
         let Some(track) = self.current_track.clone() else {
@@ -2708,6 +2715,19 @@ impl App {
                     let label = format_duration(secs);
                     if track.duration.as_deref() != Some(label.as_str()) {
                         track.duration = Some(label);
+                    }
+                }
+            }
+            // Gapless: when mpv reports the position at (or past) the end of
+            // the track, step the queue forward without killing mpv. The next
+            // `start_track` → `play_with` loads via IPC `loadfile`, so the
+            // transition is gapless. Only fire once per track.
+            if !self.track_end_reported {
+                if let Some(position) = timeline.position.filter(|p| p.is_finite()) {
+                    let position = position.max(0.0);
+                    if position >= duration - 0.5 {
+                        self.track_end_reported = true;
+                        self.advance_on_end();
                     }
                 }
             }

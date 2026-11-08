@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
@@ -13,10 +13,12 @@ pub struct Timeline {
     pub duration: Option<f64>,
 }
 
-/// Thin wrapper around an `mpv` process.
+/// Thin wrapper around a persistent `mpv` process.
 ///
-/// mpv runs with an IPC socket so pause/resume works in place. Killing and
-/// restarting would lose the playback position.
+/// mpv is started once and kept alive across tracks. Tracks are swapped with
+/// the IPC `loadfile` command so playback is gapless — there's no kill /
+/// restart between songs. `--gapless-audio=yes` lets mpv buffer the next
+/// stream while the current one finishes.
 pub struct Player {
     process: Option<Child>,
     socket_path: String,
@@ -37,17 +39,33 @@ impl Player {
         &self.socket_path
     }
 
+    /// Whether the wrapped mpv process is still alive.
+    fn is_running(&mut self) -> bool {
+        match self.process.as_mut() {
+            Some(p) => match p.try_wait() {
+                Ok(None) => true, // still running
+                Ok(Some(_)) => {
+                    // Just exited; reap it so poll_exited doesn't double-handle.
+                    self.process = None;
+                    false
+                }
+                Err(_) => false,
+            },
+            None => false,
+        }
+    }
+
     pub fn play(&mut self, track_id: &str) -> anyhow::Result<()> {
         self.play_with(track_id, None)
     }
 
     /// Start `track_id`, using a prefetched stream URL when available. That
     /// skips the yt-dlp round-trip, so the next song starts almost instantly.
+    ///
+    /// If mpv is already running, the new track is loaded through the IPC
+    /// socket with `loadfile … replace`, so playback is gapless. If mpv is
+    /// not running (or died), a fresh process is spawned.
     pub fn play_with(&mut self, track_id: &str, stream_url: Option<&str>) -> anyhow::Result<()> {
-        self.stop();
-        // Remove a socket left by a previous process; otherwise mpv can't bind.
-        let _ = std::fs::remove_file(&self.socket_path);
-
         // Offline ids carry a `local:` prefix and map to a file; everything
         // else is a YouTube video. mpv accepts either, so the queue can mix
         // both across an `o` toggle.
@@ -58,20 +76,45 @@ impl Player {
                 None => format!("https://www.youtube.com/watch?v={}", track_id),
             },
         };
+
+        if self.is_running() {
+            // Gapless: keep the mpv process alive and load the new track
+            // into it via IPC. If loadfile fails (mpv may be stuck in an
+            // error state), kill mpv and spawn fresh below.
+            match self.loadfile(&target) {
+                Ok(()) => return Ok(()),
+                Err(_) => {
+                    self.stop();
+                    let _ = std::fs::remove_file(&self.socket_path);
+                }
+            }
+        }
+
+        self.spawn_mpv(&target)
+    }
+
+    /// Spawn a fresh mpv process for `target`. Used for the first track and
+    /// as a fallback when the persistent mpv dies or wedges.
+    fn spawn_mpv(&mut self, target: &str) -> anyhow::Result<()> {
+        // Remove a socket left by a previous process; otherwise mpv can't bind.
+        let _ = std::fs::remove_file(&self.socket_path);
+
         let child = Command::new("mpv")
             .arg("--no-video")
             .arg("--audio-display=no")
             .arg("--no-terminal")
             // No user config or scripts, best audio stream only. Cache is
             // enabled below for smooth network playback; local files still
-            // open instantly.
+            // open instantly. `--gapless-audio=yes` lets mpv buffer the next
+            // stream while the current one finishes.
             .arg("--no-config")
             .arg("--load-scripts=no")
             .arg("--cache=auto")
+            .arg("--gapless-audio=yes")
             // Only used for URLs; local paths skip the ytdl hook.
             .arg("--ytdl-format=bestaudio/best")
             .arg(format!("--input-ipc-server={}", self.socket_path))
-            .arg(&target)
+            .arg(target)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -87,6 +130,19 @@ impl Player {
                 anyhow::bail!("Failed to start mpv (is mpv installed?): {}", e)
             }
         }
+    }
+
+    /// Load `target` into the running mpv process via IPC, replacing the
+    /// current track. This is what makes playback gapless.
+    fn loadfile(&self, target: &str) -> anyhow::Result<()> {
+        let body = json!({
+            "command": ["loadfile", target, "replace"]
+        });
+        let cmd = serde_json::to_string(&body)? + "\n";
+        let mut stream = UnixStream::connect(&self.socket_path)?;
+        stream.set_write_timeout(Some(Duration::from_millis(100)))?;
+        stream.write_all(cmd.as_bytes())?;
+        Ok(())
     }
 
     /// Toggle pause/resume via mpv's IPC socket.
