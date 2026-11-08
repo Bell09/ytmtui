@@ -1427,6 +1427,7 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
     let guide: Vec<(&str, &str)> = vec![
         ("d", "download"),
         ("a", "add"),
+        ("c", "create"),
         ("space", "pause"),
         ("←→", "seek"),
         ("n p", "skip"),

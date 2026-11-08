@@ -68,7 +68,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/main/install.sh | sh
 ```
 
-Installs to `~/.local/bin`. Use `sh install.sh --system` for `/usr/local/bin`, or pin a build with `YTMTUI_VERSION=0.1.10`. The script verifies the download checksum before installing.
+Installs to `~/.local/bin`. Use `sh install.sh --system` for `/usr/local/bin`, or pin a build with `YTMTUI_VERSION=0.1.11`. The script verifies the download checksum before installing.
 
 ### Release binaries
 
@@ -218,6 +218,7 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 | `Esc` | Back / leave the maximized view |
 | `d` | Download highlighted song as MP3 with cover art and synced `.lrc` (or delete in queue) |
 | `a` | Add highlighted song to a library playlist — arrows scroll, `Enter` adds |
+| `c` | Create a new private playlist — type a name, `Enter` creates it |
 | `r` | Remove highlighted song from the open playlist (rolls back on failure) |
 | `o` | Toggle offline mode |
 | `L` | Like / unlike current song — in Liked Music it targets the highlighted row |
