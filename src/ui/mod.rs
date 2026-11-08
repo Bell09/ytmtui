@@ -97,6 +97,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         if app.browse_picker_open {
             draw_browse_picker(f, app, rows[1]);
         }
+        if app.input_mode == InputMode::CreatePlaylist {
+            draw_create_playlist_dialog(f, app, rows[1]);
+        }
         return;
     }
 
@@ -213,6 +216,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         // region, not just the content column.
         draw_browse_picker(f, app, rows[1]);
     }
+    if app.input_mode == InputMode::CreatePlaylist {
+        draw_create_playlist_dialog(f, app, rows[1]);
+    }
 }
 
 /// Header: title line (app name + account) and search input, as separate
@@ -246,26 +252,14 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
     // The rule spans the header width, capped at one copy of the motif so
     // ultra-wide terminals keep its intended shape.
     let focused = app.input_mode == InputMode::Search;
-    let creating = app.input_mode == InputMode::CreatePlaylist;
-    let input_focused = focused || creating;
     let input_w = usize::from(rows[0].width).min(TOP_RULE.chars().count());
-
-    let (label, query, placeholder) = if creating {
-        (
-            "Create playlist ",
-            &app.create_playlist_query,
-            "name for the new playlist",
-        )
-    } else {
-        ("Search ", &app.search_query, "press / to search")
-    };
 
     let mut spans = vec![
         Span::styled(
-            label,
+            "Search ",
             Style::default()
-                .fg(if input_focused { t.accent } else { t.dim })
-                .add_modifier(if input_focused {
+                .fg(if focused { t.accent } else { t.dim })
+                .add_modifier(if focused {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
@@ -279,18 +273,18 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
     // Label + arrow reserve nine columns; leave a margin before the rule's
     // end so text never sits flush against it.
     let text_budget = input_w.saturating_sub(10);
-    let cursor_w = usize::from(input_focused);
-    if query.is_empty() && !input_focused {
+    let cursor_w = usize::from(focused);
+    if app.search_query.is_empty() && !focused {
         spans.push(Span::styled(
-            truncate(placeholder, text_budget),
+            truncate("press / to search", text_budget),
             Style::default().fg(t.dim),
         ));
     } else {
         spans.push(Span::styled(
-            truncate(query, text_budget.saturating_sub(cursor_w)),
+            truncate(&app.search_query, text_budget.saturating_sub(cursor_w)),
             Style::default().fg(t.fg),
         ));
-        if input_focused {
+        if focused {
             spans.push(Span::styled("▌", Style::default().fg(t.accent)));
         }
     }
@@ -1322,6 +1316,77 @@ fn draw_playlist_picker(f: &mut Frame, app: &App, area: Rect) {
     let mut state = ListState::default();
     state.select(Some(app.picker_index));
     f.render_stateful_widget(list, rows[1], &mut state);
+}
+
+/// Centred modal for naming a new playlist (opened with `c`). It mirrors the
+/// add-to-playlist card so the two playlist actions feel like one family.
+fn draw_create_playlist_dialog(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
+    let width = 52.min(area.width.saturating_sub(4) as usize) as u16;
+    let height = 5.min(area.height.saturating_sub(2));
+    if width < 24 || height < 5 {
+        return;
+    }
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    // Erase the page drawn beneath, then paint the card on top.
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.dim))
+            .title(Span::styled(
+                " create playlist ",
+                Style::default().fg(t.accent2).add_modifier(Modifier::BOLD),
+            )),
+        rect,
+    );
+
+    let inner = rect.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // input line
+            Constraint::Length(1), // gap
+            Constraint::Min(0),    // hint
+        ])
+        .split(inner);
+
+    // Input line: prompt glyph, the typed name (or a dim placeholder) and a
+    // block cursor that stays present while the dialog owns the keys.
+    let text_w = rows[0].width.saturating_sub(3) as usize;
+    let mut spans = vec![Span::styled(
+        "▸ ",
+        Style::default().fg(t.mark).add_modifier(Modifier::BOLD),
+    )];
+    if app.create_playlist_query.is_empty() {
+        spans.push(Span::styled(
+            truncate("playlist name", text_w),
+            Style::default().fg(t.dim),
+        ));
+    } else {
+        spans.push(Span::styled(
+            truncate(&app.create_playlist_query, text_w),
+            Style::default().fg(t.fg),
+        ));
+    }
+    spans.push(Span::styled("▌", Style::default().fg(t.accent)));
+    f.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "enter create · esc cancel",
+            Style::default().fg(t.dim),
+        ))),
+        rows[2],
+    );
 }
 
 /// Modal picker for choosing a browse shelf (opened with `b`).

@@ -428,7 +428,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('c') => {
                         app.input_mode = InputMode::CreatePlaylist;
                         app.create_playlist_query.clear();
-                        app.status_message = "New playlist name:".to_string();
                     }
                     // Drop the highlighted song from the open playlist.
                     // Guarded against Ctrl+R so repeat cycling keeps its key.
