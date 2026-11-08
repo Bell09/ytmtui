@@ -1538,8 +1538,10 @@ impl App {
         while let Ok(result) = self.create_playlist_rx.try_recv() {
             match result {
                 Ok(_id) => {
-                    self.status_message = "Playlist created.".to_string();
+                    // Refresh first: `start_library_load` writes its own
+                    // status line, so the confirmation must come after it.
                     self.start_library_load();
+                    self.status_message = "Playlist created.".to_string();
                 }
                 Err(e) => self.status_message = format!("Failed to create playlist: {}", e),
             }
