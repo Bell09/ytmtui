@@ -65,21 +65,27 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 
 ## 📦 Install
 
-### One-line install (Linux x86_64)
+### One-line install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/main/install.sh | sh
 ```
 
-Installs to `~/.local/bin`. Use `sh install.sh --system` for `/usr/local/bin`, or pin a build with `YTMTUI_VERSION=0.1.15`. The script verifies the download checksum before installing.
+| Option | Result |
+|--------|--------|
+| Default | Installs to `~/.local/bin` |
+| `sh install.sh --system` | Installs to `/usr/local/bin` |
+| `YTMTUI_VERSION=0.1.15` | Pins a specific version |
+
+The script verifies the download checksum before installing.
 
 ### Release binaries
 
-Download `ytmtui-x86_64-linux.tar.gz` from the [latest release](https://github.com/Bell09/ytmtui/releases/latest) and put the binary on your `PATH`.
+Download `ytmtui-x86_64-linux.tar.gz` from the [latest release](https://github.com/Bell09/ytmtui/releases/latest) and place the binary on your `PATH`.
 
-### Arch Linux (pacman repo)
+### Arch Linux
 
-AUR is unavailable right now, so the package is published to a GitHub Pages repo. Add this to `/etc/pacman.conf`:
+Add the custom repository to `/etc/pacman.conf`:
 
 ```ini
 [ytmtui]
@@ -87,14 +93,13 @@ SigLevel = Optional TrustAll
 Server = https://bell09.github.io/ytmtui/$arch
 ```
 
-Then install and update normally:
+Then install:
 
 ```bash
 sudo pacman -Sy ytmtui
-sudo pacman -Syu          # picks up future releases
 ```
 
-Packages are unsigned, hence `TrustAll`.
+> Packages are currently unsigned (`TrustAll`). Future updates are picked up with `pacman -Syu`.
 
 ### From source
 
@@ -102,8 +107,9 @@ Packages are unsigned, hence `TrustAll`.
 git clone https://github.com/Bell09/ytmtui.git
 cd ytmtui
 cargo build --release
-# binary lands in target/release/ytmtui
 ```
+
+Binary lands in `target/release/ytmtui`.
 
 ---
 
