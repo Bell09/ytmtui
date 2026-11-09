@@ -155,7 +155,6 @@ Album art is rendered as **true high-resolution images** on terminals that suppo
 | **WezTerm**  | ✅          | ✅                        |
 | **Ghostty**  | ✅          | ✅                        |
 | **Konsole**  | ✅          | ❌                        |
-| Other        | ❌ (blocks) | ❌                        |
 
 **Kitty ≥ 0.40** is recommended for the full experience (images + 2× lyrics text in the maximized view).
 
