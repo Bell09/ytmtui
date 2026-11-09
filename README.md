@@ -292,7 +292,7 @@ Matugen’s Material role JSON (flat or nested) and base16 JSON are both support
 
 | Role        | Applied to |
 |-------------|------------|
-| **Accent**  | Active elements — `▌,'.~♮‎♪♬.༺❜´˚` cursors, progress bar, playing indicator, text, current search filter |
+| **Accent**  | Active elements — `▌,'.~‎♪♬.༺❜´˚` cursors, progress bar, playing indicator, text, current search filter |
 | **Secondary** | Meta text, counts, hairlines, status messages (dimmed) |
 
 The palette is watched live — change your wallpaper and the UI repaints without a restart.  
