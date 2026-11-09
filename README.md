@@ -265,13 +265,25 @@ The window is deliberately chrome-free — no box borders, just hairlines, white
 
 ## 🎨 Theming
 
-Colors are detected from the newest palette written by **pywal**, **wallust** or **matugen**:
+YTMTUI automatically picks up the newest color palette written by your wallpaper tools.
 
-- **pywal** — `$XDG_CACHE_HOME/wal/colors.json` (or the `colors` file)
-- **wallust** — `$XDG_CACHE_HOME/wallust/colors.json` (or `wallust/colors`), plus JSON `target`/`dst` outputs declared in `~/.config/wallust/wallust.toml`
-- **matugen** — `colors.json` in its cache/config/data directories, plus JSON `output_path` outputs declared in `~/.config/matugen/config.toml`
+| Tool        | Paths searched |
+|-------------|----------------|
+| **pywal**   | `$XDG_CACHE_HOME/wal/colors.json` <br> or the plain `colors` file |
+| **wallust** | `$XDG_CACHE_HOME/wallust/colors.json` (or `wallust/colors`) <br> + any JSON `target` / `dst` declared in `~/.config/wallust/wallust.toml` |
+| **matugen** | `colors.json` in its cache / config / data directories <br> + any JSON `output_path` declared in `~/.config/matugen/config.toml` |
 
-Matugen's Material role JSON (flat or nested) and base16 JSON are supported. The accent colour marks everything active — the `▌` cursors, progress bar, playing indicator and current search filter. Secondary text (meta, counts, hairlines, status) is dimmed. The palette is watched live, so a wallpaper change repaints without a restart; no palette found → a built-in **green** fallback is used.
+Matugen’s Material role JSON (flat or nested) and base16 JSON are both supported.
+
+**How colors are used**
+
+| Role        | Applied to |
+|-------------|------------|
+| **Accent**  | Active elements — `▌` cursors, progress bar, playing indicator, current search filter |
+| **Secondary** | Meta text, counts, hairlines, status messages (dimmed) |
+
+The palette is watched live — change your wallpaper and the UI repaints without a restart.  
+If no palette is found, a built-in **green** fallback is used.
 
 ---
 
