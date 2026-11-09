@@ -464,7 +464,9 @@ fn ytdlp(
     progress: &dyn Fn(u8),
 ) -> anyhow::Result<()> {
     let mut cmd = std::process::Command::new("yt-dlp");
-    cmd.args(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
+    // bestaudio/best selects the best audio stream available; -x converts it
+    // to mp3. -f and bestaudio/best are separate arguments for clarity.
+    cmd.args(["-f", "bestaudio/best", "-x", "--audio-format", "mp3", "--audio-quality", "0"])
         .args(["--no-playlist", "--no-warnings"])
         // Machine-readable progress, one line per update, so the row can show
         // a live percentage instead of an indefinite "Downloading…". The prefix
