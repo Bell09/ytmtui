@@ -83,7 +83,17 @@ The script verifies the download checksum before installing.
 
 Download `ytmtui-x86_64-linux.tar.gz` from the [latest release](https://github.com/Bell09/ytmtui/releases/latest) and place the binary on your `PATH`.
 
-### Arch Linux
+### Arch Linux & derivatives
+
+Supported distributions:
+
+- **Arch Linux**
+- **Garuda Linux**
+- **CachyOS**
+- **EndeavourOS**
+- **Manjaro**
+- **Artix Linux**
+- **BlackArch Linux**
 
 Add the custom repository to `/etc/pacman.conf`:
 
@@ -122,7 +132,7 @@ Binary lands in `target/release/ytmtui`.
 | **mpv** | Playback backend (controlled via IPC) |
 | **Rust** ≥ 1.89 | Only needed when building from source |
 
-Install on Arch:
+Install on Arch-based systems:
 
 ```bash
 sudo pacman -S mpv
