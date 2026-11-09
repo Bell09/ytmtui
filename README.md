@@ -145,7 +145,7 @@ sudo pacman -S yt-dlp ffmpeg
 
 ---
 
-## 🖥️ Supported Terminals
+## >_ Supported Terminals
 
 Album art is rendered as **true high-resolution images** on terminals that support the **Kitty graphics protocol**. All other terminals fall back to Unicode quadrant blocks.
 
