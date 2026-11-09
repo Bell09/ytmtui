@@ -251,15 +251,19 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 
 The window is deliberately chrome-free — no box borders, just hairlines, whitespace and right-aligned metadata. Colour comes from your **wallpaper** palette.
 
-- 📌 **Header** — app name, signed-in account, search prompt  
-  Press `/` to search · `Tab` / `⇧Tab` switches **Top · Songs · Albums · Artists · Playlists**
-- 📂 **Playlist sidebar** — always-visible library of playlists, albums, artists & channels  
-  `↑`/`↓` moves the `▌` cursor · `Enter` opens the selection
-- 📄 **Detail / results** — title, meta line and lazily-fetched track list (cached)
-- ✨ **For you** — press `b` for the shelf picker (**Quick picks · Your daily discover · Featured playlists for you · My subscriptions · Forgotten favorites · From the community · Moods & genres · Activity mixes · Discovery mix · Mixed for you · New releases · Covers and remixes · Trending community playlists · Trending songs · Country charts · Global charts**) · `1`–`5` jump straight to the first five
-- 🎚️ **Playback bar** — indicator, track, time and a full-width progress bar that only advances while playing
-- 🖼️ **Now playing** — press `m` for a large centred cover beside full-height, left-aligned synced lyrics (2× text in Kitty ≥ 0.40) · `PgUp` / `PgDn` scrolls · `m` or `Esc` returns
-- ℹ️ **Footer** — status message and compact keybinding cheat-sheet
+| Area | Description |
+|------|-------------|
+| 📌 **Header** | App name, signed-in account and search prompt. Press `/` to search · `Tab` / `⇧Tab` cycles **Top · Songs · Albums · Artists · Playlists** |
+| 📂 **Playlist sidebar** | Always-visible library of playlists, albums, artists & channels. `↑`/`↓` moves the `▌` cursor · `Enter` opens the selection |
+| 📄 **Detail / results** | Title, meta line and lazily-fetched track list (cached) |
+| ✨ **For you** | Press `b` for the shelf picker. `1`–`5` jump straight to the first five shelves |
+| 🎚️ **Playback bar** | Indicator, track, time and a full-width progress bar that only advances while playing |
+| 🖼️ **Now playing** | Press `m` for a large centred cover beside full-height synced lyrics (2× text in Kitty ≥ 0.40). `PgUp` / `PgDn` scrolls · `m` or `Esc` returns |
+| ℹ️ **Footer** | Status message and compact keybinding cheat-sheet |
+
+**For you shelves** (accessible via `b` or hotkeys `1`–`5`):
+
+Quick picks · Your daily discover · Featured playlists for you · My subscriptions · Forgotten favorites · From the community · Moods & genres · Activity mixes · Discovery mix · Mixed for you · New releases · Covers and remixes · Trending community playlists · Trending songs · Country charts · Global charts
 
 ---
 
