@@ -222,7 +222,7 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 
 | Key | Action |
 | :--- | :--- |
-| `↑` / `↓` or `j` / `k` | Navigate lists |
+| `↑` / `↓` | Navigate lists |
 | `Enter` | Play / open selection |
 | `Space` | Play / Pause |
 | `←` / `→` | Seek -5s / +5s |
@@ -235,7 +235,7 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 | `a` | Add highlighted song to a library playlist — arrows scroll, `Enter` adds |
 | `c` | Create a new private playlist — type a name, `Enter` creates it |
 | `r` | Remove highlighted song from the open playlist (rolls back on failure) |
-| `o` | Toggle offline mode |
+| `o` | Toggle offline mode and online mode |
 | `L` | Like / unlike current song — in Liked Music it targets the highlighted row |
 | `l` | Toggle lyrics pane |
 | `m` | Toggle maximized now playing view (large cover + full-height lyrics) |
