@@ -50,11 +50,14 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 
 <div align="center">
 
-| | |
-| :---: | :---: |
-| ![girl in red — we fell in love in october](assets/screenshots/2026-11-06-210522_hyprshot.png) | ![Billie Eilish — What Was I Made For?](assets/screenshots/2026-11-06-212308_hyprshot.png) |
-| ![Avril Lavigne — I'm with You · browse shelves](assets/screenshots/2026-11-06-213210_hyprshot.png) | ![Billie Eilish — i love you · Discover Mix](assets/screenshots/2026-11-06-213858_hyprshot.png) |
-| ![liana flores — rises the moon](assets/screenshots/2026-11-06-214330_hyprshot.png) | ![Cafuné — Tek It](assets/screenshots/2026-11-06-214645_hyprshot.png) |
+<img src="assets/screenshots/2026-11-06-210522_hyprshot.png" width="48%" alt="girl in red — we fell in love in october" />
+<img src="assets/screenshots/2026-11-06-212308_hyprshot.png" width="48%" alt="Billie Eilish — What Was I Made For?" />
+
+<img src="assets/screenshots/2026-11-06-213210_hyprshot.png" width="48%" alt="Avril Lavigne — I'm with You · browse shelves" />
+<img src="assets/screenshots/2026-11-06-213858_hyprshot.png" width="48%" alt="Billie Eilish — i love you · Discover Mix" />
+
+<img src="assets/screenshots/2026-11-06-214330_hyprshot.png" width="48%" alt="liana flores — rises the moon" />
+<img src="assets/screenshots/2026-11-06-214645_hyprshot.png" width="48%" alt="Cafuné — Tek It" />
 
 </div>
 
@@ -283,7 +286,7 @@ Matugen’s Material role JSON (flat or nested) and base16 JSON are both support
 
 | Role        | Applied to |
 |-------------|------------|
-| **Accent**  | Active elements — `▌,'.⟢~𝄞‎♪♬.ᐟ༚❜´˚` cursors, progress bar, playing indicator, text, current search filter |
+| **Accent**  | Active elements — `▌,'.⟁~♮‎♪♬.ᐿ༺❜´˚` cursors, progress bar, playing indicator, text, current search filter |
 | **Secondary** | Meta text, counts, hairlines, status messages (dimmed) |
 
 The palette is watched live — change your wallpaper and the UI repaints without a restart.  
