@@ -145,6 +145,22 @@ sudo pacman -S yt-dlp ffmpeg
 
 ---
 
+## 🖥️ Supported Terminals
+
+Album art is rendered as **true high-resolution images** on terminals that support the **Kitty graphics protocol**. All other terminals fall back to Unicode quadrant blocks.
+
+| Terminal     | True images | 2× text scaling (lyrics) |
+|--------------|-------------|---------------------------|
+| **Kitty**    | ✅          | ✅ (≥ 0.40)              |
+| **WezTerm**  | ✅          | ✅                        |
+| **Ghostty**  | ✅          | ✅                        |
+| **Konsole**  | ✅          | ❌                        |
+| Other        | ❌ (blocks) | ❌                        |
+
+**Kitty ≥ 0.40** is recommended for the full experience (images + 2× lyrics text in the maximized view).
+
+---
+
 ## 🚀 Quick start
 
 ```bash
@@ -184,7 +200,7 @@ Supported browsers (checked in order):
 
 | Family | Method |
 | :--- | :--- |
-| 🦊 **Firefox / Zen** | Reads `cookies.sqlite` directly |
+| 🐺 **Firefox / Zen** | Reads `cookies.sqlite` directly |
 | 🧭 **Chromium family** | Decrypts the Cookies DB with AES-128-CBC using the login keyring (`secret-tool`) or Chrome’s Linux fallback |
 
 Databases are copied privately, so a running browser never blocks extraction. Flatpak / snap paths are handled too.
