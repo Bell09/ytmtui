@@ -97,7 +97,7 @@ for dep in mpv yt-dlp ffmpeg; do
 done
 if [ -n "$missing" ]; then
     echo "Runtime dependencies still missing:$missing" >&2
-    echo "On Arch: sudo pacman -S --needed$missing" >&2
+    echo "On Arch-based systems: sudo pacman -S --needed$missing" >&2
 fi
 
 case ":$PATH:" in
