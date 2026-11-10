@@ -71,13 +71,19 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/main/install.sh | sh
 ```
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:b2a4474c2d90877de2632ab4a1fecafef1c8300c0e1a073d016104c4db1fc18a -->
+
 | Option | Result |
 |--------|--------|
 | Default | Installs to `~/.local/bin` |
 | `sh install.sh --system` | Installs to `/usr/local/bin` |
-| `YTMTUI_VERSION=0.1.15` | Pins a specific version |
+| `YTMTUI_VERSION=0.1.17` | Pins a specific version |
 
-The script verifies the download checksum before installing.
+The script supports Linux x86_64, verifies the download checksum before installing, and automatically installs missing `mpv`, `yt-dlp`, and `ffmpeg` dependencies using a supported package manager. It verifies that all three dependencies run before reporting success.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ### Release binaries
 

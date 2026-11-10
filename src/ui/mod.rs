@@ -221,6 +221,31 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
+/// The account slot on the header: `Offline` when the local library is in
+/// use, otherwise the display name loaded in the background, or `Guest`
+/// when no valid account could be identified. Missing, blank and malformed
+/// names degrade to `Guest` rather than leaving a gap.
+fn header_account(offline: bool, account_name: Option<&str>) -> String {
+    if offline {
+        return "Offline".to_string();
+    }
+    let Some(name) = account_name else {
+        return "Guest".to_string();
+    };
+    // The name arrives from the network; keep it on one line and free of
+    // control characters so it cannot disturb the header.
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        "Guest".to_string()
+    } else {
+        name
+    }
+}
+
 /// Header: title line (app name + account) and search input, as separate
 /// areas. The title spans the full width; the search line only the columns
 /// left of the lyrics pane, so the pane's first line is level with the input.
@@ -234,18 +259,22 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
         ])
         .split(search);
 
-    // Title line: app name left, with an offline chip beside it while on, so
-    // the music source is never in doubt.
-    let mut title_spans = vec![Span::styled(
-        " YTMTUI ⟢ Qu!m Ashley Cast!ll0",
-        Style::default().fg(t.brand).add_modifier(Modifier::BOLD),
-    )];
-    if app.offline {
-        title_spans.push(Span::styled(
-            "  offline",
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-        ));
-    }
+    // Title line: brand, then the signed-in account name. Offline mode uses
+    // the same slot for its status because the online account name would be
+    // stale there; an unknown name falls back to `Guest`.
+    let account = header_account(app.offline, app.account_name.as_deref());
+    let account_style = if app.offline {
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(t.brand).add_modifier(Modifier::BOLD)
+    };
+    let title_spans = vec![
+        Span::styled(
+            " YTMTUI ⟢ ",
+            Style::default().fg(t.brand).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(account, account_style),
+    ];
     f.render_widget(Paragraph::new(Line::from(title_spans)), title);
 
     // Search input: a text line on an underline rule, no side or top borders.
@@ -2357,4 +2386,33 @@ fn pad(s: &str, width: usize) -> String {
         out.push_str(&" ".repeat(width - w));
     }
     out
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::header_account;
+
+    #[test]
+    fn header_shows_the_account_name_when_known() {
+        assert_eq!(header_account(false, Some("Test Account")), "Test Account");
+    }
+
+    #[test]
+    fn header_shows_guest_without_a_valid_account() {
+        assert_eq!(header_account(false, None), "Guest");
+        assert_eq!(header_account(false, Some("")), "Guest");
+        assert_eq!(header_account(false, Some("  \t\n ")), "Guest");
+    }
+
+    #[test]
+    fn header_hides_a_stale_account_name_while_offline() {
+        assert_eq!(header_account(true, Some("Test Account")), "Offline");
+        assert_eq!(header_account(true, None), "Offline");
+    }
+
+    #[test]
+    fn header_keeps_malformed_names_on_one_line() {
+        assert_eq!(header_account(false, Some(" Test\nAccount ")), "Test Account");
+        assert_eq!(header_account(false, Some("Test\tAccount")), "Test Account");
+    }
 }
