@@ -68,7 +68,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 ### One-line install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/Main/install.sh | sh
 ```
 
 <!-- coderabbit-ai-generated:v1 -->

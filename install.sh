@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the latest ytmtui release binary and its runtime dependencies.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/Main/install.sh | sh
 #   sh install.sh --system
 #   YTMTUI_VERSION=0.1.17 sh install.sh
 set -eu
