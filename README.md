@@ -79,7 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/Main/install.sh | sh
 |--------|--------|
 | Default | Installs to `~/.local/bin` |
 | `sh install.sh --system` | Installs to `/usr/local/bin` |
-| `YTMTUI_VERSION=0.1.17` | Pins a specific version |
+| `YTMTUI_VERSION=0.1.18` | Pins a specific version |
 
 The script supports Linux x86_64, verifies the download checksum before installing, and automatically installs missing `mpv`, `yt-dlp`, and `ffmpeg` dependencies using a supported package manager. It verifies that all three dependencies run before reporting success.
 
