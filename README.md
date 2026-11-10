@@ -51,13 +51,13 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 <div align="center">
 
 <img src="assets/screenshots/2026-11-06-210522_hyprshot.png" width="48%" alt="girl in red — we fell in love in october" />
-<img src="assets/screenshots/2026-11-06-212308_hyprshot.png" width="48%" alt="Billie Eilish — What Was I Made For?" />
+<img src="assets/screenshots/slow%20dancing%20in%20the%20dark.png" width="48%" alt="Joji — SLOW DANCING IN THE DARK" />
 
 <img src="assets/screenshots/2026-11-06-213210_hyprshot.png" width="48%" alt="Avril Lavigne — I'm with You · browse shelves" />
 <img src="assets/screenshots/2026-11-06-213858_hyprshot.png" width="48%" alt="Billie Eilish — i love you · Discover Mix" />
 
 <img src="assets/screenshots/2026-11-06-214330_hyprshot.png" width="48%" alt="liana flores — rises the moon" />
-<img src="assets/screenshots/2026-11-06-214645_hyprshot.png" width="48%" alt="Cafuné — Tek It" />
+<img src="assets/screenshots/no%20Vacation.png" width="48%" alt="Yam Yam — No Vacation" />
 
 </div>
 
