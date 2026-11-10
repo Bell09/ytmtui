@@ -79,6 +79,23 @@ impl Player {
         self.load(track_id, stream_url, LoadMode::Replace)
     }
 
+    /// Start `track_id` at an absolute position, optionally paused. Used once
+    /// at startup to restore the previous session. mpv is restarted so
+    /// `--start`/`--pause` apply deterministically to the loaded file.
+    pub fn play_at(
+        &mut self,
+        track_id: &str,
+        stream_url: Option<&str>,
+        start_secs: f64,
+        paused: bool,
+    ) -> anyhow::Result<()> {
+        if self.is_running() {
+            self.stop();
+        }
+        let target = self.resolve_target(track_id, stream_url);
+        self.spawn_mpv(&target, Some(start_secs), paused)
+    }
+
     /// Queue `track_id` after the currently playing track in mpv's playlist,
     /// for gapless playback. mpv will auto-advance to it when the current
     /// track finishes. Returns an error if mpv is not running.
@@ -119,7 +136,7 @@ impl Player {
                     self.playlist_clear()?;
                     self.send_command(&["loadfile", &target, "replace"])
                 } else {
-                    self.spawn_mpv(&target)
+                    self.spawn_mpv(&target, None, false)
                 }
             }
             LoadMode::Append => {
@@ -142,12 +159,14 @@ impl Player {
     }
 
     /// Spawn a fresh mpv process for `target`. Used for the first track and
-    /// as a fallback when the persistent mpv dies or wedges.
-    fn spawn_mpv(&mut self, target: &str) -> anyhow::Result<()> {
+    /// as a fallback when the persistent mpv dies or wedges. `start` seeks
+    /// before playback; `paused` keeps the file paused until the user resumes.
+    fn spawn_mpv(&mut self, target: &str, start: Option<f64>, paused: bool) -> anyhow::Result<()> {
         // Remove a socket left by a previous process; otherwise mpv can't bind.
         let _ = std::fs::remove_file(&self.socket_path);
 
-        let child = Command::new("mpv")
+        let mut command = Command::new("mpv");
+        command
             .arg("--no-video")
             .arg("--audio-display=no")
             .arg("--no-terminal")
@@ -161,7 +180,14 @@ impl Player {
             .arg("--gapless-audio=yes")
             // Only used for URLs; local paths skip the ytdl hook.
             .arg("--ytdl-format=bestaudio/best")
-            .arg(format!("--input-ipc-server={}", self.socket_path))
+            .arg(format!("--input-ipc-server={}", self.socket_path));
+        if let Some(seconds) = start {
+            command.arg(start_arg(seconds));
+        }
+        if paused {
+            command.arg("--pause=yes");
+        }
+        let child = command
             .arg(target)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -226,6 +252,17 @@ impl Drop for Player {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// mpv `--start=` argument for a resume position. Bad values collapse to 0
+/// instead of reaching the command line.
+fn start_arg(seconds: f64) -> String {
+    let seconds = if seconds.is_finite() {
+        seconds.max(0.0)
+    } else {
+        0.0
+    };
+    format!("--start={seconds:.3}")
 }
 
 /// Query an mpv IPC socket for `time-pos` and `duration`.
@@ -334,5 +371,14 @@ mod player_tests {
         let b = a; // Copy, not move
         assert_eq!(a, b);
         assert_eq!(b, LoadMode::Replace);
+    }
+
+    #[test]
+    fn start_arg_formats_and_clamps_the_resume_position() {
+        assert_eq!(start_arg(42.5), "--start=42.500");
+        assert_eq!(start_arg(0.0), "--start=0.000");
+        assert_eq!(start_arg(-5.0), "--start=0.000");
+        assert_eq!(start_arg(f64::NAN), "--start=0.000");
+        assert_eq!(start_arg(f64::INFINITY), "--start=0.000");
     }
 }

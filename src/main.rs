@@ -1,6 +1,7 @@
 mod models;
 mod api;
 mod player;
+mod session;
 mod app;
 mod ui;
 mod auth;
@@ -237,6 +238,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // so the first frame appears immediately — an empty sidebar fills in when
     // the account's playlists arrive.
     let mut app = App::new();
+    // Resume the previous queue and playback position before the first frame.
+    app.restore_session();
     app.start_library_load();
     // Warm the shelf cache in the background so the first `b` opens at once.
     app.start_browse_refresh();

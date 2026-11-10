@@ -1,6 +1,8 @@
 use crate::models::{BrowseRow, BrowseShelf, Page, Playlist, PlaylistKind, SearchHit, Track};
 use crate::api::{SearchFilter, SearchResults, YtmApi};
 use crate::player::{Player, Timeline};
+use crate::session::{SessionRef, SessionState};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -158,6 +160,13 @@ const STALL_WATCHDOG: Duration = Duration::from_secs(30);
 /// socket stops answering, progress and lyrics freeze at the last known
 /// position instead of drifting ahead of the audio.
 const TELEMETRY_MAX_AGE: Duration = Duration::from_millis(600);
+/// While playback is active, persist the position this often. Explicit
+/// changes (queue, shuffle, repeat, pause) are flushed sooner. This runs on
+/// the existing UI tick — no extra worker or timer process.
+const SESSION_SAVE_INTERVAL: Duration = Duration::from_secs(10);
+/// Explicit changes may be saved after this short delay, coalescing rapid
+/// key presses into one write.
+const SESSION_DIRTY_DELAY: Duration = Duration::from_secs(1);
 
 /// Search-bar filters in display order. Only filters the Innertube
 /// response advertises are kept.
@@ -195,8 +204,10 @@ pub enum InputMode {
 }
 
 /// Repeat behaviour for queue advancement (Ctrl+R, honoured at end of file).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RepeatMode {
+    #[default]
     Off,
     All,
     One,
@@ -304,6 +315,12 @@ pub struct App {
     pub player: Player,
     pub should_quit: bool,
     pub status_message: String,
+    /// Session persistence runs on the existing tick: this records the last
+    /// write and whether an explicit change is waiting to be flushed.
+    session_saved_at: Instant,
+    session_dirty: bool,
+    /// Unit tests must never write into the user's real config directory.
+    session_disabled: bool,
     /// Latest position mpv reported, plus when it was sampled. The UI clock
     /// follows mpv instead of a fixed startup timer, so the progress bar and
     /// lyrics start with the audible audio.
@@ -691,6 +708,9 @@ impl App {
             player,
             should_quit: false,
             status_message: auth_status.to_string(),
+            session_saved_at: Instant::now(),
+            session_dirty: false,
+            session_disabled: cfg!(test),
             playback_position: 0.0,
             last_position: None,
             position_sampled_at: None,
@@ -782,6 +802,134 @@ impl App {
         };
         app.load_browse_cache();
         app
+    }
+
+    /// Load the previous session and start its track at the saved position.
+    /// Called once at startup, before the first frame. A missing or invalid
+    /// file leaves a fresh session untouched.
+    pub fn restore_session(&mut self) {
+        if self.session_disabled {
+            return;
+        }
+        let Some(state) = SessionState::load(&crate::session::session_path()) else {
+            return;
+        };
+        let duration = state
+            .current
+            .as_ref()
+            .and_then(|track| parse_duration(&track.duration));
+        let start = state.resume_position(duration);
+        let SessionState {
+            queue,
+            queue_index,
+            current,
+            repeat,
+            shuffle,
+            shuffle_order,
+            paused,
+            ..
+        } = state;
+        let Some(track) = current else {
+            return;
+        };
+
+        self.queue = queue;
+        self.queue_index = queue_index;
+        self.repeat = repeat;
+        self.shuffle = shuffle;
+        self.shuffle_order = shuffle_order;
+        if !self.shuffle {
+            self.shuffle_order.clear();
+        } else if self.shuffle_order.len() != self.queue.len() {
+            // A missing/incomplete order is rebuilt once, then persisted.
+            self.rebuild_shuffle_order(None);
+        }
+        self.queue_version = self.queue_version.wrapping_add(1);
+        self.current_track = Some(track.clone());
+        self.playback_retries = 0;
+        self.start_track_at(track, false, Some(start), paused);
+        // The file on disk already describes this state; do not rewrite it
+        // before the first position tick.
+        self.session_saved_at = Instant::now();
+        self.session_dirty = false;
+    }
+
+    /// Snapshot the live queue by reference. `None` means there is nothing
+    /// worth resuming, in which case any stale file is removed.
+    fn session_snapshot(&self) -> Option<SessionRef<'_>> {
+        let current = self.current_track.as_ref()?;
+        let position = self.position_secs_f64();
+        let position = if position.is_finite() {
+            position.max(0.0)
+        } else {
+            0.0
+        };
+        Some(SessionRef {
+            version: crate::session::SESSION_VERSION,
+            queue: &self.queue,
+            queue_index: if self.queue.is_empty() {
+                0
+            } else {
+                self.queue_index.min(self.queue.len() - 1)
+            },
+            current,
+            position_secs: position,
+            repeat: self.repeat,
+            shuffle: self.shuffle,
+            shuffle_order: if self.shuffle {
+                &self.shuffle_order
+            } else {
+                &[]
+            },
+            // Buffering still counts as "was playing": resume immediately.
+            paused: !matches!(
+                self.playback_state,
+                PlaybackState::Playing | PlaybackState::Buffering
+            ),
+        })
+    }
+
+    /// Persist immediately. Also used by `Drop`, so quitting through any
+    /// normal path (including a terminal error) keeps the session.
+    pub fn save_session_now(&mut self) {
+        if self.session_disabled {
+            return;
+        }
+        let path = crate::session::session_path();
+        let saved = match self.session_snapshot() {
+            Some(snapshot) => snapshot.save(&path).is_ok(),
+            None => {
+                crate::session::clear(&path);
+                true
+            }
+        };
+        self.session_saved_at = Instant::now();
+        if saved {
+            self.session_dirty = false;
+        }
+    }
+
+    /// Cheap per-tick policy: explicit changes flush after a short delay,
+    /// while a moving playback clock is persisted less often. Idle and paused
+    /// sessions do no I/O at all.
+    fn maybe_save_session(&mut self) {
+        if self.session_disabled {
+            return;
+        }
+        let ticking = matches!(
+            self.playback_state,
+            PlaybackState::Playing | PlaybackState::Buffering
+        );
+        let delay = if self.session_dirty {
+            SESSION_DIRTY_DELAY
+        } else if ticking {
+            SESSION_SAVE_INTERVAL
+        } else {
+            return;
+        };
+        if self.session_saved_at.elapsed() >= delay {
+            self.save_session_now();
+        }
     }
 
     pub fn update(&mut self) {
@@ -1003,6 +1151,8 @@ impl App {
         // Mirror the resulting state to desktop media widgets.
         self.sync_mpris();
         self.sync_ipc();
+        // Session writes stay on this tick; no extra thread or timer.
+        self.maybe_save_session();
     }
 
     /// Repaint when a wallpaper tool rewrites one of its palette files.
@@ -2558,16 +2708,26 @@ impl App {
         self.start_track(t, false);
     }
 
-    /// Shared entry point for fresh tracks and retries. A retry deliberately
-    /// skips the prefetched URL, since that URL is the one that just failed.
-    ///
-    /// If mpv auto-advanced to this track via gapless playlist playback
-    /// (`mpv_queued_next` is set), the track is already loaded — skip the
-    /// `loadfile replace` that would cause a gap, and just adopt the state.
     fn start_track(&mut self, t: Track, retry: bool) {
+        self.start_track_at(t, retry, None, false);
+    }
+
+    /// Shared entry point for fresh tracks, retries and session resume.
+    /// `start` seeks mpv before playback; `paused` keeps the restored file
+    /// paused until the user presses space. Retries keep both, so a transient
+    /// stream failure does not silently restart the song from zero.
+    ///
+    /// A retry deliberately skips the prefetched URL, since that URL is the
+    /// one that just failed. If mpv auto-advanced to this track via gapless
+    /// playlist playback (`mpv_queued_next` is set), the track is already
+    /// loaded — skip the `loadfile replace` that would cause a gap, and just
+    /// adopt the state.
+    fn start_track_at(&mut self, t: Track, retry: bool, start: Option<f64>, paused: bool) {
+        self.session_dirty = true;
         // Gapless auto-advance: mpv already loaded this track via
         // `loadfile append-play`. Adopt it without reloading.
         if !retry
+            && start.is_none()
             && self.mpv_queued_next
             && self.queued_next_id.as_deref() == Some(&t.id)
         {
@@ -2590,15 +2750,25 @@ impl App {
             return;
         }
 
+        let resuming = start.is_some();
         self.status_message = if retry {
             "Retrying…".to_string()
+        } else if paused {
+            "Paused".to_string()
+        } else if resuming {
+            "Resuming…".to_string()
         } else {
             "buffer♪ng".to_string()
         };
         let prefetched = if retry { None } else { self.take_prefetch(&t.id) };
-        let result = match self.player.play_with(&t.id, prefetched.as_deref()) {
-            Err(_) if prefetched.is_some() => self.player.play(&t.id),
-            other => other,
+        let result = if let Some(position) = start {
+            self.player
+                .play_at(&t.id, prefetched.as_deref(), position, paused)
+        } else {
+            match self.player.play_with(&t.id, prefetched.as_deref()) {
+                Err(_) if prefetched.is_some() => self.player.play(&t.id),
+                other => other,
+            }
         };
         if let Err(e) = result {
             if self.playback_retries < MAX_PLAYBACK_RETRIES {
@@ -2607,7 +2777,7 @@ impl App {
                     "Playback error: {} — retrying ({}/{})",
                     e, self.playback_retries, MAX_PLAYBACK_RETRIES
                 );
-                self.start_track(t, true);
+                self.start_track_at(t, true, start, paused);
             } else {
                 self.playback_retries = 0;
                 self.playback_state = PlaybackState::Stopped;
@@ -2615,7 +2785,7 @@ impl App {
             }
             return;
         }
-        self.playback_position = 0.0;
+        self.playback_position = start.unwrap_or(0.0);
         self.last_position = None;
         self.position_sampled_at = None;
         self.audio_started = false;
@@ -2626,10 +2796,18 @@ impl App {
         self.last_progress_at = Some(Instant::now());
         self.playback_duration_secs = parse_duration(&t.duration).unwrap_or(210);
         self.current_track = Some(t);
-        self.playback_state = PlaybackState::Buffering;
+        self.playback_state = if paused {
+            PlaybackState::Paused
+        } else {
+            PlaybackState::Buffering
+        };
         self.sync_art();
         self.sync_lyrics();
-        self.prefetch_next();
+        // A paused restore must not spawn yt-dlp in the background. Resuming
+        // via `toggle_play` performs the prefetch when it is actually needed.
+        if !paused {
+            self.prefetch_next();
+        }
     }
 
     /// Resolve the upcoming queue track in the background so the next song
@@ -3085,6 +3263,7 @@ impl App {
         if !self.is_music_active() {
             return;
         }
+        self.session_dirty = true;
         let current = self.position_secs_f64();
         let total = self.playback_duration_secs as f64;
         let target = (current + delta as f64).clamp(0.0, total.max(0.0));
@@ -3194,6 +3373,7 @@ impl App {
             _ => {
                 self.position_sampled_at = None;
                 self.playback_state = PlaybackState::Stopped;
+                self.session_dirty = true;
                 self.status_message = "End of queue".to_string();
             }
         }
@@ -3303,6 +3483,7 @@ impl App {
     /// `X` on the queue page: move the highlighted track up to play next.
     /// Elsewhere: queue the highlighted track to play after the current one.
     pub fn queue_add_next(&mut self, track: Track) {
+        self.session_dirty = true;
         if self.queue.is_empty() {
             self.queue = vec![track];
             self.queue_index = 0;
@@ -3327,6 +3508,7 @@ impl App {
         if self.current_page == Page::Queue {
             let i = self.selected_index;
             if i < self.queue.len() && i != self.queue_index {
+                self.session_dirty = true;
                 let t = self.queue.remove(i);
                 self.shuffle_after_remove(i);
                 if i < self.queue_index {
@@ -3348,6 +3530,7 @@ impl App {
 
     /// `Z`: append the highlighted track to the end of the queue.
     pub fn queue_append(&mut self, track: Track) {
+        self.session_dirty = true;
         if self.queue.is_empty() {
             self.queue = vec![track];
             self.queue_index = 0;
@@ -3381,6 +3564,7 @@ impl App {
             return;
         }
         let was_current = i == self.queue_index;
+        self.session_dirty = true;
         let removed = self.queue.remove(i);
         if self.queue.is_empty() {
             self.queue_version = self.queue_version.wrapping_add(1);
@@ -3434,6 +3618,7 @@ impl App {
             i - 1
         };
         self.queue.swap(i, j);
+        self.session_dirty = true;
         if self.queue_index == i {
             self.queue_index = j;
         } else if self.queue_index == j {
@@ -3447,12 +3632,14 @@ impl App {
     /// `Ctrl+R`: cycle repeat off → all → one.
     pub fn cycle_repeat(&mut self) {
         self.repeat = self.repeat.next();
+        self.session_dirty = true;
         self.status_message = format!("Repeat: {}", self.repeat.label());
     }
 
     /// `Ctrl+S`: toggle shuffle.
     pub fn toggle_shuffle(&mut self) {
         self.shuffle = !self.shuffle;
+        self.session_dirty = true;
         self.rebuild_shuffle_order(None);
         self.status_message = format!("Shuffle: {}", if self.shuffle { "on" } else { "off" });
     }
@@ -3467,6 +3654,7 @@ impl App {
                 self.position_sampled_at = None;
                 self.player.pause();
                 self.playback_state = PlaybackState::Paused;
+                self.session_dirty = true;
                 self.status_message = "Paused".to_string();
             }
             PlaybackState::Paused => {
@@ -3480,6 +3668,10 @@ impl App {
                 // resume and the track starts over.
                 self.last_progress_at = Some(Instant::now());
                 self.play_started_at = Some(Instant::now());
+                self.session_dirty = true;
+                // A session restored paused skips the prefetch so startup
+                // stays quiet; start it now that playback is actually wanted.
+                self.prefetch_next();
                 self.status_message = "Resumed".to_string();
             }
             PlaybackState::Buffering => {}
@@ -3518,6 +3710,7 @@ impl App {
     /// Stop playback entirely (MPRIS `Stop`): end mpv but keep the last
     /// track's metadata so widgets can still show what was playing.
     pub fn stop_playback(&mut self) {
+        self.session_dirty = true;
         self.playback_position = self.position_secs_f64();
         self.position_sampled_at = None;
         self.last_position = None;
@@ -3626,6 +3819,7 @@ impl App {
                         self.queue_index = 0;
                     }
                     self.rebuild_shuffle_order(None);
+                    self.session_dirty = true;
                     self.status_message = "Queue cleared".to_string();
                 }
             }
@@ -3686,6 +3880,15 @@ impl App {
         set_string(&mut guard.status, status);
         guard.position_secs = self.position_secs();
         set_string(&mut guard.track_id, track_id);
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        // Covers `q`, Ctrl+C, normal returns and terminal errors. Periodic
+        // ticks already cover crashes; this captures the exact final
+        // position.
+        self.save_session_now();
     }
 }
 
