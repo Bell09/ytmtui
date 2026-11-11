@@ -155,6 +155,11 @@ type AutoQueueFetch = (u64, Result<Vec<Track>, String>);
 const MAX_PLAYBACK_RETRIES: u8 = 2;
 /// Prefetched URLs expire; older ones fall back to a fresh resolve.
 const PREFETCH_TTL: Duration = Duration::from_secs(15 * 60);
+/// Tolerance when comparing a sampled position with the expected one.
+const POSITION_EPSILON: f64 = 0.5;
+/// How long a pending resume position protects the saved position from
+/// mpv's 0:00 reading while the seek lands.
+const RESUME_PENDING_TIMEOUT: Duration = Duration::from_secs(45);
 /// A track that never produces audio is treated as failed after this.
 const BUFFER_WATCHDOG: Duration = Duration::from_secs(25);
 /// A playing track whose clock stops is restarted after this.
@@ -163,6 +168,21 @@ const STALL_WATCHDOG: Duration = Duration::from_secs(30);
 /// socket stops answering, progress and lyrics freeze at the last known
 /// position instead of drifting ahead of the audio.
 const TELEMETRY_MAX_AGE: Duration = Duration::from_millis(600);
+
+/// Whether a sampled position may replace a pending restored position.
+///
+/// mpv reports 0:00 until the resume seek lands. That reading must not
+/// overwrite the position the session was restored to, but once the seek
+/// has landed (or the wait is over) the sample is good again.
+fn resume_allows(pending: Option<(f64, Instant)>, position: f64) -> bool {
+    match pending {
+        None => true,
+        Some((expected, armed_at)) => {
+            position + POSITION_EPSILON >= expected
+                || armed_at.elapsed() >= RESUME_PENDING_TIMEOUT
+        }
+    }
+}
 /// While playback is active, persist the position this often. Explicit
 /// changes (queue, shuffle, repeat, pause) are flushed sooner. This runs on
 /// the existing UI tick — no extra worker or timer process.
@@ -332,6 +352,10 @@ pub struct App {
     /// (position resets to ~0 when mpv moves to the next queued track).
     last_position: Option<f64>,
     position_sampled_at: Option<Instant>,
+    /// The position a restored session is seeking to, and when it was armed.
+    /// mpv reports 0:00 until that seek lands, and the restored position
+    /// must not be overwritten by it.
+    resume_pending: Option<(f64, Instant)>,
     pub playback_duration_secs: u64,
     /// Newest background timeline sample and the sequence already applied.
     timeline_rx: tokio::sync::mpsc::UnboundedReceiver<TimelineSample>,
@@ -740,6 +764,7 @@ impl App {
             playback_position: 0.0,
             last_position: None,
             position_sampled_at: None,
+            resume_pending: None,
             playback_duration_secs: 210,
             timeline_rx,
             pending_timeline: None,
@@ -2800,6 +2825,7 @@ impl App {
             self.playback_position = 0.0;
             self.last_position = None;
             self.position_sampled_at = None;
+            self.resume_pending = None;
             self.audio_started = false;
             self.play_started_at = Some(Instant::now());
             self.last_progress_at = Some(Instant::now());
@@ -2851,6 +2877,9 @@ impl App {
         self.playback_position = start.unwrap_or(0.0);
         self.last_position = None;
         self.position_sampled_at = None;
+        // mpv seeks to the restored position once the file is open; until
+        // then it reports 0:00, which must not overwrite the saved position.
+        self.resume_pending = start.map(|position| (position, Instant::now()));
         self.audio_started = false;
         self.track_end_reported = false;
         self.mpv_queued_next = false;
@@ -3161,6 +3190,13 @@ impl App {
         if let Some(position) = timeline.position.filter(|p| p.is_finite()) {
             let position = position.max(0.0);
             let now = Instant::now();
+            // A restored session is still seeking to its saved position:
+            // mpv reports 0:00 until the seek lands, and that must not
+            // overwrite the restored position.
+            if !resume_allows(self.resume_pending, position) {
+                return;
+            }
+            self.resume_pending = None;
             // Only a position that actually moved counts as fresh telemetry.
             // A socket that keeps answering with the same frozen time while
             // buffering must not let interpolation drift ahead.
@@ -4277,6 +4313,44 @@ mod browse_section_tests {
         assert_eq!(browse_section_for_title("Country charts"), Some(14));
         assert_eq!(browse_section_for_title("Global charts"), Some(15));
         assert_eq!(browse_section_for_title("Listen again"), None);
+    }
+}
+
+#[cfg(test)]
+mod resume_position_tests {
+    use super::*;
+
+    /// mpv reports 0:00 until the resume seek lands. That reading must not
+    /// overwrite the position the session was restored to.
+    #[test]
+    fn the_pre_seek_reading_keeps_the_restored_position() {
+        let armed = Instant::now();
+        assert!(!resume_allows(Some((42.0, armed)), 0.0));
+        assert!(!resume_allows(Some((42.0, armed)), 12.0));
+    }
+
+    /// Once the seek has landed, the sample is applied again.
+    #[test]
+    fn the_restored_position_is_accepted_once_the_seek_lands() {
+        let armed = Instant::now();
+        assert!(resume_allows(Some((42.0, armed)), 42.0));
+        assert!(resume_allows(Some((42.0, armed)), 41.6));
+        assert!(resume_allows(Some((42.0, armed)), 43.0));
+    }
+
+    /// A pending restore that never lands must not freeze the position for
+    /// ever.
+    #[test]
+    fn an_expired_pending_restore_lets_samples_through() {
+        let armed = Instant::now() - RESUME_PENDING_TIMEOUT - Duration::from_secs(1);
+        assert!(resume_allows(Some((42.0, armed)), 0.0));
+    }
+
+    /// Without a pending restore every sample counts.
+    #[test]
+    fn samples_are_always_applied_without_a_pending_restore() {
+        assert!(resume_allows(None, 0.0));
+        assert!(resume_allows(None, 12.5));
     }
 }
 

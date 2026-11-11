@@ -44,7 +44,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 | ✨ **For you** | Personal mixes, subscriptions, trending songs, community playlists, activity mixes, moods, genres, and country/global charts |
 | ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, next-track prefetch, automatic retry/skip on stream failures · `m` for a maximized cover + synced lyrics view |
 | 🔁 **Auto Queue** | Fetches similar songs before the queue ends, appends only new tracks, and stays quiet offline or while repeat is active |
-| 💫 **Extras** | Synced lyrics, queue, offline mode, session resume, like/unlike, remove song from playlist, create a playlist, MP3 download with cover art and `.lrc` lyrics |
+| 💫 **Extras** | Synced lyrics, queue, offline mode, session resume (the restored track starts at the saved position, every later track at 0:00), like/unlike, remove song from playlist, create a playlist, MP3 download with cover art and `.lrc` lyrics |
 
 ---
 

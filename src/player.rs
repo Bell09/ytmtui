@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -110,6 +110,10 @@ const MAX_HEADER_NAME: usize = 64;
 const MAX_HEADER_VALUE: usize = 1024;
 /// Keep diagnostics short enough for the footer.
 const DIAGNOSTIC_CHARS: usize = 320;
+/// How long the resume seek waits for mpv to open the restored file. A
+/// network stream has to be extracted and connected first, so this is
+/// generous; the seek is skipped rather than delayed past the track.
+const RESUME_WAIT: Duration = Duration::from_secs(30);
 
 /// Thin wrapper around a persistent `mpv` process.
 ///
@@ -120,14 +124,33 @@ const DIAGNOSTIC_CHARS: usize = 320;
 pub struct Player {
     process: Option<Child>,
     socket_path: String,
+    /// The mpv executable. Kept as a field so the test suite can point the
+    /// player at a fake mpv.
+    program: PathBuf,
+    /// Extra mpv arguments. Empty in production; the test suite uses it to
+    /// run mpv without an audio device.
+    extra_args: Vec<String>,
+}
+
+/// A socket path that no other player in this process uses. Two players (the
+/// app and a test, for instance) must not fight over the same mpv socket.
+fn unique_socket_path() -> String {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("/tmp/ytmtui-mpv-{}-{sequence}.sock", std::process::id())
 }
 
 impl Player {
     pub fn new() -> Self {
-        let socket_path = format!("/tmp/ytmtui-mpv-{}.sock", std::process::id());
+        Self::with_program(PathBuf::from("mpv"))
+    }
+
+    fn with_program(program: PathBuf) -> Self {
         Self {
             process: None,
-            socket_path,
+            socket_path: unique_socket_path(),
+            program,
+            extra_args: Vec::new(),
         }
     }
 
@@ -171,8 +194,12 @@ impl Player {
     }
 
     /// Start `track_id` at an absolute position, optionally paused. Used once
-    /// at startup to restore the previous session. mpv is restarted so
-    /// `--start`/`--pause` apply deterministically to the loaded file.
+    /// at startup to restore the previous session.
+    ///
+    /// The position is applied with a seek once mpv has opened the file, so
+    /// it belongs to that track alone: tracks loaded later start at 0:00.
+    /// mpv opens the file paused, so the restored track is never heard from
+    /// the beginning before the seek lands.
     pub fn play_at(
         &mut self,
         track_id: &str,
@@ -184,7 +211,15 @@ impl Player {
             self.stop();
         }
         let target = self.resolve_target(track_id, stream);
-        self.spawn_mpv(&target, stream, Some(start_secs), paused)
+        self.spawn_mpv(&target, stream, true)?;
+        // Opening a network stream can take seconds, so the seek runs on a
+        // background thread: the first frame is not held up by it.
+        let socket = self.socket_path.clone();
+        let position = resume_position(start_secs);
+        std::thread::spawn(move || {
+            let _ = apply_resume(&socket, position, paused);
+        });
+        Ok(())
     }
 
     /// Queue `track_id` after the currently playing track in mpv's playlist,
@@ -236,7 +271,7 @@ impl Player {
                     self.playlist_clear()?;
                     self.load_target(&target, "replace", stream)
                 } else {
-                    self.spawn_mpv(&target, stream, None, false)
+                    self.spawn_mpv(&target, stream, false)
                 }
             }
             LoadMode::Append => {
@@ -266,6 +301,8 @@ impl Player {
                 body.push('\n');
             }
         }
+        // No start position here: a track loaded later must begin at 0:00,
+        // even when the session was restored from a saved position.
         body.push_str(&serde_json::to_string(&json!({
             "command": ["loadfile", target, mode]
         }))?);
@@ -280,26 +317,28 @@ impl Player {
     }
 
     fn send_raw(&self, body: &str) -> anyhow::Result<()> {
-        let mut stream = UnixStream::connect(&self.socket_path)?;
-        stream.set_write_timeout(Some(Duration::from_millis(100)))?;
-        stream.write_all(body.as_bytes())?;
-        Ok(())
+        send_to_socket(&self.socket_path, body)
     }
 
     /// Spawn a fresh mpv process for `target`. Used for the first track and
-    /// as a fallback when the persistent mpv dies or wedges. `start` seeks
-    /// before playback; `paused` keeps the file paused until the user resumes.
+    /// as a fallback when the persistent mpv dies or wedges.
+    ///
+    /// `paused` opens the file paused. A restored session needs that: the
+    /// resume position is applied with a seek once the file is open, and a
+    /// file that starts playing right away would be heard from the
+    /// beginning. No start position is ever passed on the command line —
+    /// mpv would apply it to every later track as well.
     fn spawn_mpv(
         &mut self,
         target: &str,
         stream: Option<&Stream>,
-        start: Option<f64>,
         paused: bool,
     ) -> anyhow::Result<()> {
         // Remove a socket left by a previous process; otherwise mpv can't bind.
         let _ = std::fs::remove_file(&self.socket_path);
 
-        let mut command = Command::new("mpv");
+        let mut command = Command::new(&self.program);
+        command.args(&self.extra_args);
         command
             .arg("--no-video")
             .arg("--audio-display=no")
@@ -327,9 +366,6 @@ impl Player {
             if !fields.is_empty() {
                 command.arg(format!("--http-header-fields={}", fields.join(",")));
             }
-        }
-        if let Some(seconds) = start {
-            command.arg(start_arg(seconds));
         }
         if paused {
             command.arg("--pause=yes");
@@ -401,15 +437,187 @@ impl Drop for Player {
     }
 }
 
-/// mpv `--start=` argument for a resume position. Bad values collapse to 0
-/// instead of reaching the command line.
-fn start_arg(seconds: f64) -> String {
-    let seconds = if seconds.is_finite() {
+/// The resume position of a restored track. Bad values collapse to 0
+/// instead of reaching mpv.
+fn resume_position(seconds: f64) -> f64 {
+    if seconds.is_finite() {
         seconds.max(0.0)
     } else {
         0.0
+    }
+}
+
+/// Send a raw IPC command body to mpv's socket.
+fn send_to_socket(socket_path: &str, body: &str) -> anyhow::Result<()> {
+    let mut stream = UnixStream::connect(socket_path)?;
+    stream.set_write_timeout(Some(Duration::from_millis(100)))?;
+    stream.write_all(body.as_bytes())?;
+    Ok(())
+}
+
+/// Send one IPC command to mpv.
+fn send_command_to(socket_path: &str, command: &[Value]) -> anyhow::Result<()> {
+    let body = serde_json::to_string(&json!({ "command": command }))? + "\n";
+    send_to_socket(socket_path, &body)
+}
+
+/// Ask mpv for a list of properties and collect the answers. The answers
+/// keep the order of `names`; `None` marks a property mpv did not answer
+/// in time.
+fn read_properties(socket_path: &str, names: &[&str], timeout: Duration) -> Vec<Option<Value>> {
+    let mut answers: Vec<Option<Value>> = vec![None; names.len()];
+    let Ok(mut stream) = UnixStream::connect(socket_path) else {
+        return answers;
     };
-    format!("--start={seconds:.3}")
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(25)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+
+    let mut body = String::new();
+    for (index, name) in names.iter().enumerate() {
+        let request = json!({ "command": ["get_property", name], "request_id": index + 1 });
+        if let Ok(text) = serde_json::to_string(&request) {
+            body.push_str(&text);
+            body.push('\n');
+        }
+    }
+    if stream.write_all(body.as_bytes()).is_err() {
+        return answers;
+    }
+
+    let mut reader = BufReader::new(stream);
+    let deadline = Instant::now() + timeout;
+    let mut seen = 0usize;
+    let mut line = String::new();
+    while seen < names.len() {
+        if Instant::now() >= deadline {
+            break;
+        }
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let parsed = serde_json::from_str::<Value>(&line).ok();
+                line.clear();
+                let Some(value) = parsed else { continue };
+                // mpv interleaves unsolicited events with replies; match only
+                // our own request ids.
+                let Some(id) = value.get("request_id").and_then(Value::as_u64) else {
+                    continue;
+                };
+                let Some(index) = id.checked_sub(1).map(|i| i as usize) else {
+                    continue;
+                };
+                if index >= names.len() || answers[index].is_some() {
+                    continue;
+                }
+                answers[index] = value.get("data").cloned();
+                seen += 1;
+            }
+            Err(_) => {
+                // mpv is busy: keep waiting until the deadline.
+                continue;
+            }
+        }
+    }
+    answers
+}
+
+/// Read one property from mpv's IPC socket. `None` when the answer does not
+/// arrive in time.
+fn read_property(socket_path: &str, name: &str, timeout: Duration) -> Option<Value> {
+    read_properties(socket_path, &[name], timeout)
+        .into_iter()
+        .next()
+        .flatten()
+}
+
+/// Send a command and wait for mpv's answer. `true` when mpv accepted it.
+///
+/// A seek on a file that is not open yet is rejected, which is how the
+/// resume position knows when the track is ready.
+fn command_accepted(socket_path: &str, command: &[Value]) -> bool {
+    let Ok(mut stream) = UnixStream::connect(socket_path) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+    let request = json!({ "command": command, "request_id": 1 });
+    let Ok(body) = serde_json::to_string(&request) else {
+        return false;
+    };
+    if stream.write_all(body.as_bytes()).is_err() || stream.write_all(b"\n").is_err() {
+        return false;
+    }
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => return false,
+            Ok(_) => {
+                let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if value.get("request_id").and_then(Value::as_u64) != Some(1) {
+                    continue;
+                }
+                return value.get("error").and_then(Value::as_str) == Some("success");
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Seek to `position` and keep asking until mpv reports the new position.
+///
+/// mpv only accepts a seek on a file that is open, and a network stream has
+/// to be extracted and connected first. The position is read back because
+/// mpv can accept a seek before the file is ready and then ignore it.
+/// `false` on timeout.
+fn seek_when_ready(socket_path: &str, position: f64, timeout: Duration) -> bool {
+    let command = [
+        json!("seek"),
+        json!(format!("{position:.3}")),
+        json!("absolute"),
+    ];
+    let deadline = Instant::now() + timeout;
+    loop {
+        // A position beyond the track's length is clamped by mpv: there is
+        // nothing to seek to.
+        let duration = read_property(socket_path, "duration", Duration::from_millis(500))
+            .and_then(|value| value.as_f64());
+        if duration.is_some_and(|seconds| seconds > 0.0 && seconds <= position) {
+            return true;
+        }
+        // The position shows both whether a file is open and whether the
+        // seek landed.
+        let current = read_property(socket_path, "time-pos", Duration::from_millis(500))
+            .and_then(|value| value.as_f64());
+        if current.is_some_and(|seconds| seconds >= position - 1.0) {
+            return true;
+        }
+        command_accepted(socket_path, &command);
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Apply a resume position to the file mpv has open.
+///
+/// The seek belongs to the open file, so later tracks are unaffected and
+/// start at 0:00. The paused state is set afterwards: a restored session
+/// that was playing continues from its saved position, one that was paused
+/// stays paused there.
+fn apply_resume(socket_path: &str, position: f64, paused: bool) -> anyhow::Result<()> {
+    if position > 0.0 {
+        seek_when_ready(socket_path, position, RESUME_WAIT);
+    }
+    send_command_to(
+        socket_path,
+        &[json!("set_property"), json!("pause"), json!(paused)],
+    )?;
+    Ok(())
 }
 
 /// Query an mpv IPC socket for `time-pos` and `duration`.
@@ -417,43 +625,17 @@ fn start_arg(seconds: f64) -> String {
 /// This does blocking socket I/O with tight timeouts, which is why the TUI
 /// runs it on a background task rather than the frame thread.
 pub fn timeline_path(socket_path: &str) -> Option<Timeline> {
-    let mut stream = UnixStream::connect(socket_path).ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(25)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(25)));
-    let commands = concat!(
-        "{\"command\":[\"get_property\",\"time-pos\"],\"request_id\":1}\n",
-        "{\"command\":[\"get_property\",\"duration\"],\"request_id\":2}\n",
+    let answers = read_properties(
+        socket_path,
+        &["time-pos", "duration"],
+        Duration::from_millis(40),
     );
-    stream.write_all(commands.as_bytes()).ok()?;
-
-    let mut reader = BufReader::new(stream);
-    let deadline = Instant::now() + Duration::from_millis(40);
-    let mut timeline = Timeline::default();
-    let mut seen = 0u8;
-    while seen != 3 && Instant::now() < deadline {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        // mpv interleaves unsolicited events with replies; match only
-        // request ids.
-        match value.get("request_id").and_then(Value::as_u64) {
-            Some(1) => {
-                timeline.position = value.get("data").and_then(Value::as_f64);
-                seen |= 1;
-            }
-            Some(2) => {
-                timeline.duration = value.get("data").and_then(Value::as_f64);
-                seen |= 2;
-            }
-            _ => {}
-        }
-    }
-    (seen != 0).then_some(timeline)
+    let position = answers.first().and_then(|value| value.as_ref()).and_then(Value::as_f64);
+    let duration = answers.get(1).and_then(|value| value.as_ref()).and_then(Value::as_f64);
+    (position.is_some() || duration.is_some()).then_some(Timeline {
+        position,
+        duration,
+    })
 }
 
 /// Resolve a video's direct audio stream for later playback. Local files are
@@ -869,12 +1051,416 @@ mod player_tests {
     }
 
     #[test]
-    fn start_arg_formats_and_clamps_the_resume_position() {
-        assert_eq!(start_arg(42.5), "--start=42.500");
-        assert_eq!(start_arg(0.0), "--start=0.000");
-        assert_eq!(start_arg(-5.0), "--start=0.000");
-        assert_eq!(start_arg(f64::NAN), "--start=0.000");
-        assert_eq!(start_arg(f64::INFINITY), "--start=0.000");
+    fn the_resume_position_is_clamped_to_a_usable_value() {
+        assert_eq!(resume_position(42.5), 42.5);
+        assert_eq!(resume_position(0.0), 0.0);
+        assert_eq!(resume_position(-5.0), 0.0);
+        assert_eq!(resume_position(f64::NAN), 0.0);
+        assert_eq!(resume_position(f64::INFINITY), 0.0);
+    }
+
+    // -----------------------------------------------------------------
+    // Resume position (fake mpv)
+    // -----------------------------------------------------------------
+
+    /// A player for the real mpv, without an audio device.
+    fn silent_player() -> Player {
+        let mut player = Player::new();
+        player.extra_args = vec!["--ao=null".to_string()];
+        player
+    }
+
+    /// A silent WAV file of the given length. A real file gives mpv a known
+    /// duration and a reliable seek, which a synthetic source does not.
+    fn temp_wav(tag: &str, seconds: u32) -> (PathBuf, PathBuf) {
+        let (dir, _) = temp_script(tag, "");
+        let path = dir.join("tone.wav");
+        const RATE: u32 = 8_000;
+        let samples = RATE * seconds;
+        let mut bytes: Vec<u8> = Vec::with_capacity(44 + samples as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + samples).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
+        bytes.extend_from_slice(&RATE.to_le_bytes());
+        bytes.extend_from_slice(&RATE.to_le_bytes()); // bytes per second
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // block align
+        bytes.extend_from_slice(&8u16.to_le_bytes()); // bits per sample
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&samples.to_le_bytes());
+        bytes.extend(std::iter::repeat(128u8).take(samples as usize));
+        fs::write(&path, &bytes).expect("write wav");
+        (dir, path)
+    }
+
+    /// A fake mpv that records its arguments and then idles.
+    fn fake_mpv(tag: &str) -> (PathBuf, PathBuf) {
+        let body = "#!/bin/sh\n\
+                    dir=\"$(dirname \"$0\")\"\n\
+                    printf '%s\\n' \"$@\" > \"$dir/argv\"\n\
+                    exec sleep 30\n";
+        let (dir, script) = temp_script(tag, body);
+        (dir, script)
+    }
+
+    /// The arguments the fake mpv was started with. The script writes them
+    /// asynchronously, so give it a moment.
+    fn recorded_argv(dir: &Path) -> Vec<String> {
+        let path = dir.join("argv");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            if !text.is_empty() || Instant::now() >= deadline {
+                return text.lines().map(str::to_string).collect();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A fake mpv IPC server. It records every command it receives and
+    /// answers property requests, so the client side can be exercised
+    /// without a real mpv.
+    fn fake_ipc_server(tag: &str) -> (PathBuf, std::sync::mpsc::Receiver<String>) {
+        use std::sync::{Arc, Mutex};
+        let unique = format!(
+            "ytmtui-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let dir = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("mpv.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        // The position the fake mpv reports; a seek moves it.
+        let position = Arc::new(Mutex::new(0.0f64));
+        let server_position = Arc::clone(&position);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let Ok(clone) = stream.try_clone() else { continue };
+                let mut reader = BufReader::new(clone);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    let command = line.trim().to_string();
+                    if command.is_empty() {
+                        continue;
+                    }
+                    let _ = sender.send(command.clone());
+                    // Answer like mpv does: every command gets a reply.
+                    if let Ok(value) = serde_json::from_str::<Value>(&command) {
+                        let args = value.get("command").and_then(|c| c.as_array());
+                        let name = args
+                            .and_then(|a| a.first())
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if name == "seek" {
+                            if let Some(target) = args
+                                .and_then(|a| a.get(1))
+                                .and_then(Value::as_str)
+                                .and_then(|text| text.parse::<f64>().ok())
+                            {
+                                if let Ok(mut current) = server_position.lock() {
+                                    *current = target;
+                                }
+                            }
+                        }
+                        let property = args.and_then(|a| a.get(1)).and_then(Value::as_str);
+                        let data = match (name, property) {
+                            ("get_property", Some("time-pos")) => {
+                                json!(server_position.lock().map(|guard| *guard).unwrap_or(0.0))
+                            }
+                            ("get_property", Some("duration")) => json!(600.0),
+                            ("get_property", _) => json!("fake-path"),
+                            _ => Value::Null,
+                        };
+                        let id = value.get("request_id").cloned().unwrap_or(json!(1));
+                        let reply = json!({ "data": data, "error": "success", "request_id": id });
+                        if let Ok(body) = serde_json::to_string(&reply) {
+                            let _ = stream.write_all((body + "\n").as_bytes());
+                        }
+                    }
+                }
+            }
+        });
+        (path, receiver)
+    }
+
+    /// The restored track must not be started through `--start`: mpv would
+    /// apply that position to every later track as well.
+    #[test]
+    fn a_restored_track_is_never_started_with_a_start_option() {
+        let (dir, script) = fake_mpv("resume-start");
+        let mut player = Player::with_program(script);
+        player
+            .spawn_mpv("https://example.invalid/audio", None, true)
+            .expect("spawn");
+        let argv = recorded_argv(&dir);
+        assert!(
+            !argv.iter().any(|arg| arg.starts_with("--start")),
+            "mpv must not receive a start position: {argv:?}"
+        );
+        // The file opens paused, so the seek can land before any audio.
+        assert!(
+            argv.iter().any(|arg| arg == "--pause=yes"),
+            "the restored track should open paused: {argv:?}"
+        );
+        player.stop();
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A track loaded later replaces the playlist; it must start at 0:00 and
+    /// must not inherit a paused state from the command line.
+    #[test]
+    fn a_replaced_track_carries_no_start_option() {
+        let (dir, script) = fake_mpv("replace-start");
+        let mut player = Player::with_program(script);
+        player
+            .spawn_mpv("https://example.invalid/audio", None, false)
+            .expect("spawn");
+        let argv = recorded_argv(&dir);
+        assert!(
+            !argv.iter().any(|arg| arg.starts_with("--start")),
+            "mpv must not receive a start position: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|arg| arg == "--pause=yes"),
+            "a fresh track must not start paused: {argv:?}"
+        );
+        player.stop();
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The load commands themselves carry no position: mpv starts the file
+    /// at 0:00 unless a seek says otherwise.
+    #[test]
+    fn the_load_command_carries_no_start_position() {
+        let (path, commands) = fake_ipc_server("load");
+        let mut player = Player::new();
+        player.socket_path = path.to_string_lossy().into_owned();
+
+        player
+            .load_target("https://example.invalid/audio", "replace", None)
+            .expect("load");
+        let replace = commands.recv_timeout(Duration::from_secs(2)).expect("command");
+        assert!(replace.contains("loadfile"));
+        assert!(replace.contains("replace"));
+        assert!(!replace.contains("start"));
+
+        // The gapless append used by the queue is just as position-free.
+        player
+            .load_target("https://example.invalid/next", "append-play", None)
+            .expect("append");
+        let append = commands.recv_timeout(Duration::from_secs(2)).expect("command");
+        assert!(append.contains("append-play"));
+        assert!(!append.contains("start"));
+    }
+
+    /// The resume position is applied with a seek on the open file, and the
+    /// paused state follows the restored session.
+    #[test]
+    fn the_resume_position_is_applied_with_a_seek() {
+        let (path, commands) = fake_ipc_server("seek");
+        let socket = path.to_string_lossy().into_owned();
+
+        apply_resume(&socket, 42.0, false).expect("resume");
+        let mut seen = Vec::new();
+        while let Ok(command) = commands.recv_timeout(Duration::from_millis(300)) {
+            seen.push(command);
+        }
+        assert!(
+            seen.iter().any(|c| c.contains("seek") && c.contains("42.000")),
+            "expected a seek to 42s, got {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|c| c.contains("pause") && c.contains("false")),
+            "expected the paused state to be cleared, got {seen:?}"
+        );
+    }
+
+    /// A paused session stays paused at the restored position.
+    #[test]
+    fn a_paused_restore_stays_paused() {
+        let (path, commands) = fake_ipc_server("paused");
+        let socket = path.to_string_lossy().into_owned();
+
+        apply_resume(&socket, 12.0, true).expect("resume");
+        let mut seen = Vec::new();
+        while let Ok(command) = commands.recv_timeout(Duration::from_millis(300)) {
+            seen.push(command);
+        }
+        assert!(seen.iter().any(|c| c.contains("seek") && c.contains("12.000")));
+        assert!(
+            seen.iter().any(|c| c.contains("pause") && c.contains("true")),
+            "expected the file to stay paused, got {seen:?}"
+        );
+    }
+
+    /// A position of zero needs no seek: the file simply starts at 0:00.
+    #[test]
+    fn a_zero_resume_position_sends_no_seek() {
+        let (path, commands) = fake_ipc_server("zero");
+        let socket = path.to_string_lossy().into_owned();
+
+        apply_resume(&socket, 0.0, false).expect("resume");
+        let mut seen = Vec::new();
+        while let Ok(command) = commands.recv_timeout(Duration::from_millis(300)) {
+            seen.push(command);
+        }
+        assert!(!seen.iter().any(|c| c.contains("seek")));
+        assert!(seen.iter().any(|c| c.contains("pause")));
+    }
+
+    // -----------------------------------------------------------------
+    // End-to-end check against a real mpv
+    // -----------------------------------------------------------------
+
+    /// A real mpv: the restored track plays from its saved position and the
+    /// tracks loaded afterwards start at 0:00.
+    #[test]
+    fn a_restored_position_does_not_leak_into_later_tracks() {
+        if which("mpv").is_none() {
+            // mpv is a runtime dependency; without it there is nothing to
+            // check here.
+            return;
+        }
+        // Long enough that the track cannot end while the test runs — mpv
+        // exits when its playlist runs out.
+        let (dir, source) = temp_wav("restore-wav", 120);
+        let (_, next) = temp_wav("restore-next-wav", 120);
+
+        let mut player = silent_player();
+        player.spawn_mpv(&source.to_string_lossy(), None, true).expect("spawn mpv");
+        let socket = player.socket_path().to_string();
+
+        // Restore: the track opens paused and is seeked to 20 seconds.
+        apply_resume(&socket, 20.0, false).expect("resume");
+        let restored = wait_for_position(&socket, |position| position > 15.0);
+        assert!(
+            restored,
+            "the restored track should play from about 20s"
+        );
+
+        // The next track replaces it and must start at the beginning.
+        player.load_target(&next.to_string_lossy(), "replace", None).expect("load next");
+        assert!(
+            wait_for_path(&socket, &next),
+            "the next track should start (path {:?}, pos {:?})",
+            current_path(&socket),
+            read_position(&socket)
+        );
+        // The position of the replaced track must not carry over.
+        let started_at_zero =
+            wait_for_position(&socket, |position| position > 0.05 && position < 10.0);
+        assert!(
+            started_at_zero,
+            "the next track should start at 0:00"
+        );
+
+        player.stop();
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The track mpv queues up plays from the beginning when the current
+    /// one ends — not from the position the session was restored to.
+    #[test]
+    fn a_queued_track_starts_at_the_beginning() {
+        if which("mpv").is_none() {
+            return;
+        }
+        // A short current track: it ends while the test waits, so mpv moves
+        // on to the queued one.
+        let (dir, current) = temp_wav("queued-wav", 8);
+        let (_, queued) = temp_wav("queued-next-wav", 60);
+
+        let mut player = silent_player();
+        player.spawn_mpv(&current.to_string_lossy(), None, true).expect("spawn mpv");
+        let socket = player.socket_path().to_string();
+        // Restore to 1.5s, as a session resume would.
+        apply_resume(&socket, 1.5, false).expect("resume");
+        assert!(
+            wait_for_path(&socket, &current),
+            "the first track should open"
+        );
+        // The resume position has to be in place, otherwise the first track
+        // would not end in time and the test would be measuring the wrong
+        // thing.
+        assert!(
+            wait_for_position(&socket, |position| position > 1.0),
+            "the restored track should play from about 1.5s"
+        );
+        player
+            .load_target(&queued.to_string_lossy(), "append-play", None)
+            .expect("queue next");
+
+        // When the first track ends, mpv moves to the queued one.
+        assert!(
+            wait_for_path(&socket, &queued),
+            "the queued track should start (path {:?}, pos {:?})",
+            current_path(&socket),
+            read_position(&socket)
+        );
+        let position = read_position(&socket).unwrap_or(-1.0);
+        assert!(
+            position < 5.0,
+            "the queued track should start at 0:00, got {position}"
+        );
+
+        player.stop();
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// mpv's current position.
+    fn read_position(socket_path: &str) -> Option<f64> {
+        read_property(socket_path, "time-pos", Duration::from_millis(500))
+            .and_then(|value| value.as_f64())
+    }
+
+    /// Wait until mpv plays the given source.
+    fn wait_for_path(socket_path: &str, target: &Path) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            let path = read_property(socket_path, "path", Duration::from_millis(500))
+                .and_then(|value| value.as_str().map(str::to_string));
+            if path.as_deref() == Some(target.to_string_lossy().as_ref()) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// The source mpv is playing right now.
+    fn current_path(socket_path: &str) -> Option<String> {
+        read_property(socket_path, "path", Duration::from_millis(500))
+            .and_then(|value| value.as_str().map(str::to_string))
+    }
+
+    /// Wait until the position satisfies `condition`.
+    fn wait_for_position(
+        socket_path: &str,
+        condition: impl Fn(f64) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if let Some(position) = read_position(socket_path) {
+                if condition(position) {
+                    return true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
     }
 
     // -----------------------------------------------------------------
