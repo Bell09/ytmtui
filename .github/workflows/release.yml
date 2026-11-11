@@ -78,7 +78,7 @@ jobs:
       - name: Package
         run: |
           set -eu
-          pacman -Sy --noconfirm --needed libarchive zstd
+          pacman -Syu --noconfirm --needed libarchive zstd
 
           ver="${TAG#v}"
           pkgver="$ver-1"
