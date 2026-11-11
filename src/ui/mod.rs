@@ -221,6 +221,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
+/// The Last.fm badge on the header. It appears whenever Last.fm is
+/// configured, because a configured account always scrobbles — there is no
+/// dimmed "off" state. Secrets never reach this string.
+fn lastfm_badge(scrobbler: &crate::lastfm::Scrobbler, t: &Theme) -> Option<Span<'static>> {
+    let user = scrobbler.badge()?;
+    Some(Span::styled(
+        format!("  · last.fm:{user}"),
+        Style::default().fg(t.accent),
+    ))
+}
+
 /// The account slot on the header: `Offline` when the local library is in
 /// use, otherwise the display name loaded in the background, or `Guest`
 /// when no valid account could be identified. Missing, blank and malformed
@@ -276,13 +287,11 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
             ),
             Span::styled(account, account_style),
         ];
-        // Last.fm connection status: the username when configured, dimmed
-        // while scrobbling is disabled. Secrets never reach this string.
-        if let Some(user) = app.lastfm.badge() {
-            spans.push(Span::styled(
-                format!("  · last.fm:{user}"),
-                Style::default().fg(if app.lastfm.enabled() { t.accent } else { t.dim }),
-            ));
+        // Last.fm connection status: the username when configured. Scrobbling
+        // is always on then, so the badge uses the accent colour. Secrets
+        // never reach this string.
+        if let Some(span) = lastfm_badge(&app.lastfm, t) {
+            spans.push(span);
         }
         spans
     };
@@ -2402,6 +2411,8 @@ fn pad(s: &str, width: usize) -> String {
 #[cfg(test)]
 mod header_tests {
     use super::header_account;
+    use super::lastfm_badge;
+    use crate::lastfm::Scrobbler;
 
     #[test]
     fn header_shows_the_account_name_when_known() {
@@ -2425,5 +2436,19 @@ mod header_tests {
     fn header_keeps_malformed_names_on_one_line() {
         assert_eq!(header_account(false, Some(" Test\nAccount ")), "Test Account");
         assert_eq!(header_account(false, Some("Test\tAccount")), "Test Account");
+    }
+
+    /// A configured Last.fm account always shows the badge in the accent
+    /// colour — there is no dimmed "off" state.
+    #[test]
+    fn the_lastfm_badge_is_accent_when_configured() {
+        let theme = crate::theme::Theme::default();
+        let scrobbler = Scrobbler::new(true, Some("tester".to_string()));
+        let span = lastfm_badge(&scrobbler, &theme).expect("badge");
+        assert_eq!(span.content, "  · last.fm:tester");
+        assert_eq!(span.style.fg, Some(theme.accent));
+
+        // Without a configured account there is no badge at all.
+        assert!(lastfm_badge(&Scrobbler::default(), &theme).is_none());
     }
 }

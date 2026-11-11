@@ -670,18 +670,14 @@ impl App {
             });
         }
 
-        // Last.fm: a tiny config read is enough for the header badge and the
-        // scrobbling state; the signed client is only built when enabled, so
-        // playback costs nothing when the feature is off or unconfigured.
+        // Last.fm: a tiny config read is enough for the header badge; the
+        // signed client is only built when Last.fm is configured, so playback
+        // costs nothing otherwise.
         let (lastfm, lastfm_client) = if cfg!(test) {
             (crate::lastfm::Scrobbler::default(), None)
         } else {
             let scrobbler = crate::lastfm::Scrobbler::from_config();
-            let client = if scrobbler.enabled() {
-                crate::lastfm::Client::from_config().map(Arc::new)
-            } else {
-                None
-            };
+            let client = crate::lastfm::Client::from_config().map(Arc::new);
             (scrobbler, client)
         };
 
@@ -3069,34 +3065,6 @@ impl App {
                 }
             }
         });
-    }
-
-    /// `Ctrl+F`: enable or disable Last.fm scrobbling, persisting the choice
-    /// so the next launch keeps it. Also reports the connection status.
-    pub fn toggle_lastfm(&mut self) {
-        if !self.lastfm.configured() {
-            self.status_message =
-                "Last.fm is not configured — run `ytmtui setup lastfm`".to_string();
-            return;
-        }
-        let enabled = !self.lastfm.enabled();
-        match crate::lastfm::set_enabled(enabled) {
-            Ok(()) => {
-                self.lastfm.set_enabled(enabled);
-                self.lastfm_client = if enabled {
-                    crate::lastfm::Client::from_config().map(Arc::new)
-                } else {
-                    None
-                };
-                self.status_message = format!(
-                    "Last.fm scrobbling: {}",
-                    if enabled { "on" } else { "off" }
-                );
-            }
-            Err(error) => {
-                self.status_message = format!("Could not update Last.fm settings: {error}");
-            }
-        }
     }
 
     /// Retry the current track, then skip it if it keeps failing. mpv is

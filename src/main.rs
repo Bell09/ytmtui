@@ -445,10 +445,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.toggle_auto_queue()
                     }
-                    // Last.fm scrobbling on/off for this session (persisted).
-                    KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.toggle_lastfm()
-                    }
                     // Add the highlighted song to a library playlist —
                     // `a` opens the picker, arrows scroll, Enter adds.
                     KeyCode::Char('a' | 'A') => app.open_playlist_picker(),

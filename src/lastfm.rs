@@ -4,10 +4,11 @@
 //! permissions. The module never prints or logs the API secret, password
 //! hash or session key — [`Credentials`]' `Debug` output is redacted.
 //!
-//! Scrobbling policy is pure ([`Scrobbler`]), so timing, deduplication and
-//! disabled-state behaviour are testable without the network. The app turns
-//! the returned [`Action`]s into fire-and-forget tasks; playback never waits
-//! on Last.fm.
+//! Scrobbling is always on once Last.fm is configured: there is no on/off
+//! switch, so a stored account always scrobbles. Scrobbling policy is pure
+//! ([`Scrobbler`]), so timing and deduplication are testable without the
+//! network. The app turns the returned [`Action`]s into fire-and-forget
+//! tasks; playback never waits on Last.fm.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -30,10 +31,6 @@ const MAX_TICK: Duration = Duration::from_secs(5);
 /// Two retries cover a flaky connection without keeping tasks alive for long.
 const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
 
-fn default_enabled() -> bool {
-    true
-}
-
 // ---------------------------------------------------------------------------
 // Stored credentials
 // ---------------------------------------------------------------------------
@@ -41,6 +38,9 @@ fn default_enabled() -> bool {
 /// The credentials needed to sign Last.fm requests. A password hash is
 /// deliberately absent: it is exchanged for a session key during setup and
 /// never written to disk.
+///
+/// Older files may still carry an `enabled` flag; it is ignored, because a
+/// configured account always scrobbles.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Credentials {
     pub api_key: String,
@@ -48,8 +48,6 @@ pub struct Credentials {
     #[serde(default)]
     pub username: String,
     pub session_key: String,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
 }
 
 impl fmt::Debug for Credentials {
@@ -59,7 +57,6 @@ impl fmt::Debug for Credentials {
             .field("api_secret", &"<redacted>")
             .field("username", &self.username)
             .field("session_key", &"<redacted>")
-            .field("enabled", &self.enabled)
             .finish()
     }
 }
@@ -119,12 +116,6 @@ pub fn clear() -> Result<(), String> {
     }
 }
 
-pub fn set_enabled(enabled: bool) -> Result<(), String> {
-    let mut creds = load().ok_or("Last.fm is not configured")?;
-    creds.enabled = enabled;
-    save(&creds)
-}
-
 /// One-line connection status for `ytmtui status`. Never includes secrets.
 pub fn status_line() -> String {
     match load() {
@@ -135,11 +126,7 @@ pub fn status_line() -> String {
             } else {
                 creds.username.trim()
             };
-            format!(
-                "Last.fm: connected as {} · scrobbling {}",
-                name,
-                if creds.enabled { "on" } else { "off" }
-            )
+            format!("Last.fm: connected as {name} · scrobbling on")
         }
     }
 }
@@ -287,12 +274,10 @@ impl Client {
     }
 
     /// Build a client for the scrobbling path. `None` when Last.fm has not
-    /// been configured or scrobbling is disabled, so playback costs nothing.
+    /// been configured, so playback costs nothing. A configured account always
+    /// scrobbles — there is no switch to read.
     pub fn from_config() -> Option<Self> {
         let creds = load()?;
-        if !creds.enabled {
-            return None;
-        }
         Self::new(&creds)
     }
 
@@ -521,20 +506,20 @@ struct Current {
 }
 
 /// Tracks listening time and decides when Last.fm should hear from us.
+///
+/// A configured account is always enabled: there is no on/off state.
 #[derive(Default)]
 pub struct Scrobbler {
     configured: bool,
-    enabled: bool,
     username: Option<String>,
     current: Option<Current>,
     last_tick: Option<Instant>,
 }
 
 impl Scrobbler {
-    pub fn new(configured: bool, enabled: bool, username: Option<String>) -> Self {
+    pub fn new(configured: bool, username: Option<String>) -> Self {
         Self {
             configured,
-            enabled,
             username,
             current: None,
             last_tick: None,
@@ -545,24 +530,20 @@ impl Scrobbler {
     /// startup keeps `App::new` synchronous and allocation-free after this.
     pub fn from_config() -> Self {
         match load() {
-            Some(creds) => Self::new(true, creds.enabled, Some(creds.username)),
+            Some(creds) => Self::new(true, Some(creds.username)),
             None => Self::default(),
         }
     }
 
-    pub fn configured(&self) -> bool {
-        self.configured
-    }
-
-    pub fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    /// The name shown in the header, sanitised for terminal output.
+    /// The name shown in the header, sanitised for terminal output. A
+    /// configured account without a stored name shows a generic label.
     pub fn badge(&self) -> Option<String> {
-        let name = self.username.as_deref()?.trim();
-        if name.is_empty() {
+        if !self.configured {
             return None;
+        }
+        let name = self.username.as_deref().unwrap_or_default().trim();
+        if name.is_empty() {
+            return Some("connected".to_string());
         }
         let cleaned: String = name
             .chars()
@@ -576,7 +557,6 @@ impl Scrobbler {
     pub fn track_started(&mut self, track: &Track, duration_secs: Option<u64>) {
         self.last_tick = None;
         if !self.configured
-            || !self.enabled
             || track.artist.trim().is_empty()
             || track.title.trim().is_empty()
         {
@@ -603,7 +583,7 @@ impl Scrobbler {
         playing: bool,
         duration_secs: Option<u64>,
     ) -> Option<Action> {
-        if !self.configured || !self.enabled {
+        if !self.configured {
             return None;
         }
         let current = self.current.as_mut()?;
@@ -642,16 +622,6 @@ impl Scrobbler {
             duration_secs: current.duration_secs,
             timestamp: current.started_at,
         })
-    }
-
-    pub fn set_enabled(&mut self, enabled: bool) {
-        if self.enabled != enabled {
-            self.enabled = enabled;
-            // Restart the window so re-enabling mid-track does not count
-            // listening time from before the pause in scrobbling.
-            self.current = None;
-            self.last_tick = None;
-        }
     }
 }
 
@@ -696,7 +666,7 @@ mod tests {
     }
 
     fn enabled_scrobbler() -> Scrobbler {
-        Scrobbler::new(true, true, Some("tester".to_string()))
+        Scrobbler::new(true, Some("tester".to_string()))
     }
 
     #[test]
@@ -774,7 +744,6 @@ mod tests {
             api_secret: "super-secret".to_string(),
             username: "tester".to_string(),
             session_key: "session-secret".to_string(),
-            enabled: true,
         };
         let debug = format!("{creds:?}");
         assert!(!debug.contains("visible-key"));
@@ -783,13 +752,29 @@ mod tests {
         assert!(debug.contains("tester"));
     }
 
+    /// A file written by an older version may still carry the `enabled` flag.
+    /// It is ignored: a configured account always scrobbles.
     #[test]
-    fn credentials_default_to_enabled_when_the_field_is_missing() {
+    fn a_legacy_enabled_flag_is_ignored() {
         let creds: Credentials = serde_json::from_str(
-            r#"{"api_key":"k","api_secret":"s","username":"u","session_key":"x"}"#,
+            r#"{"api_key":"k","api_secret":"s","username":"u","session_key":"x","enabled":false}"#,
         )
         .expect("parse");
-        assert!(creds.enabled);
+        assert!(creds.complete());
+        assert_eq!(creds.username, "u");
+        // A client is built from these credentials, whatever the old flag said.
+        assert!(Client::new(&creds).is_some());
+    }
+
+    /// Incomplete credentials still yield no client, so playback stays free.
+    #[test]
+    fn incomplete_credentials_build_no_client() {
+        let creds: Credentials = serde_json::from_str(
+            r#"{"api_key":"k","api_secret":"s","username":"u","session_key":""}"#,
+        )
+        .expect("parse");
+        assert!(!creds.complete());
+        assert!(Client::new(&creds).is_none());
     }
 
     #[test]
@@ -907,19 +892,34 @@ mod tests {
     }
 
     #[test]
-    fn disabling_scrobbling_stops_all_submissions() {
+    fn a_configured_account_scrobbles_and_an_unconfigured_one_does_not() {
         let mut scrobbler = enabled_scrobbler();
+        assert!(scrobbler.badge().is_some());
         let track = track("1", "Artist", "Title");
         scrobbler.track_started(&track, Some(100));
         let start = Instant::now();
-        scrobbler.set_enabled(false);
+        assert!(matches!(
+            scrobbler.tick(start, true, Some(100)),
+            Some(Action::NowPlaying { .. })
+        ));
+
+        let mut unconfigured = Scrobbler::default();
+        assert!(unconfigured.badge().is_none());
+        unconfigured.track_started(&track, Some(100));
+        assert!(unconfigured.tick(start, true, Some(100)).is_none());
+    }
+
+    #[test]
+    fn an_unconfigured_account_never_submits() {
+        let mut scrobbler = Scrobbler::default();
+        let track = track("1", "Artist", "Title");
+        scrobbler.track_started(&track, Some(100));
+        let start = Instant::now();
         for second in 0..=100 {
             assert!(scrobbler
                 .tick(start + Duration::from_secs(second), true, Some(100))
                 .is_none());
         }
-        scrobbler.track_started(&track, Some(100));
-        assert!(scrobbler.tick(start, true, Some(100)).is_none());
     }
 
     #[test]
@@ -937,9 +937,15 @@ mod tests {
 
     #[test]
     fn the_header_badge_is_sanitised_and_absent_without_a_user() {
-        let scrobbler = Scrobbler::new(true, true, Some("  a\u{0007}b  ".to_string()));
+        let scrobbler = Scrobbler::new(true, Some("  a\u{0007}b  ".to_string()));
         assert_eq!(scrobbler.badge().as_deref(), Some("a b"));
-        assert!(Scrobbler::new(true, true, None).badge().is_none());
+        // A configured account without a name still shows a badge.
+        assert_eq!(
+            Scrobbler::new(true, None).badge().as_deref(),
+            Some("connected")
+        );
+        // An unconfigured account shows nothing.
+        assert!(Scrobbler::default().badge().is_none());
     }
 
     // -------------------------------------------------------------------

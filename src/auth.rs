@@ -540,17 +540,10 @@ pub async fn run_lastfm_setup() -> anyhow::Result<()> {
     let existing = crate::lastfm::load();
     if let Some(creds) = &existing {
         println!("  Connected as {}.", creds.username);
-        println!(
-            "  Scrobbling is {}.",
-            if creds.enabled { "on" } else { "off" }
-        );
+        println!("  Scrobbling is on and stays on while Last.fm is connected.");
         println!();
         println!("  [1] Update credentials");
-        println!(
-            "  [2] {} scrobbling",
-            if creds.enabled { "Disable" } else { "Enable" }
-        );
-        println!("  [3] Disconnect Last.fm");
+        println!("  [2] Disconnect Last.fm");
         println!("  [Enter] Keep these settings");
         println!();
         let Some(answer) = prompt_line("  Choice: ") else {
@@ -564,15 +557,6 @@ pub async fn run_lastfm_setup() -> anyhow::Result<()> {
             }
             "1" => {}
             "2" => {
-                let enabled = !creds.enabled;
-                crate::lastfm::set_enabled(enabled).map_err(anyhow::Error::msg)?;
-                println!(
-                    "  Scrobbling {}.",
-                    if enabled { "enabled" } else { "disabled" }
-                );
-                return Ok(());
-            }
-            "3" => {
                 let answer =
                     prompt_line("  Disconnect Last.fm and delete stored credentials? [y/N]: ")
                         .unwrap_or_default();
@@ -623,13 +607,12 @@ pub async fn run_lastfm_setup() -> anyhow::Result<()> {
         api_secret,
         username: auth.username,
         session_key: auth.session_key,
-        enabled: true,
     };
     crate::lastfm::save(&creds).map_err(anyhow::Error::msg)?;
 
     println!();
     println!(
-        "  Connected as {}. Scrobbling enabled.",
+        "  Connected as {}. Scrobbling is on — it runs automatically from now on.",
         creds.username
     );
     Ok(())

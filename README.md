@@ -38,7 +38,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 | :--- | :--- |
 | 🖥️ **Terminal UI** | Built with `ratatui` + `crossterm` — chrome-free, hairlines & whitespace only |
 | 🔐 **Auth wizard** | `ytmtui setup` configures YouTube Music, Last.fm, or both — browser cookie extraction included |
-| 🎧 **Last.fm scrobbling** | Now Playing updates and automatic scrobbles with background retries; toggle any time with `Ctrl+F` |
+| 🎧 **Last.fm scrobbling** | Now Playing updates and automatic scrobbles with background retries — always on once set up |
 | 🔍 **Innertube search** | Signed-in search with Top / Songs / Albums / Artists / Playlists filters |
 | 📚 **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
 | ✨ **For you** | Personal mixes, subscriptions, trending songs, community playlists, activity mixes, moods, genres, and country/global charts |
@@ -294,9 +294,9 @@ The wizard asks for the **API key**, **shared secret**, **username**, and then e
 
 Secret prompts never echo what you type, and the password hash is not kept after the exchange. Credentials are written to `~/.config/ytmtui/lastfm.json` with owner-only (`0600`) permissions; API secrets, password hashes and session keys are never displayed or logged.
 
-Running the wizard again shows the current connection and lets you update credentials, toggle scrobbling, or disconnect (which deletes the stored file).
+Running the wizard again shows the current connection and lets you update credentials or disconnect (which deletes the stored file).
 
-Once connected, scrobbling starts automatically:
+Once connected, scrobbling runs automatically — there is no switch to flip:
 
 - **Now Playing** is sent when a track actually starts playing (not while buffering or paused).
 - A track is scrobbled after half its duration, capped at four minutes; tracks under 30 seconds are ignored. Unknown durations use the four-minute cap.
@@ -305,7 +305,7 @@ Once connected, scrobbling starts automatically:
 - Each track is marked submitted before the request is sent, so retries can never duplicate a scrobble.
 - Requests run in the background with short timeouts and light retries for transient Last.fm/network errors. Playback is never blocked or interrupted.
 
-Press `Ctrl+F` to enable or disable scrobbling at runtime; the choice is persisted. The header shows `· last.fm:<username>` while connected, dimmed when scrobbling is off.
+As long as `~/.config/ytmtui/lastfm.json` holds valid credentials, every track is scrobbled. The header shows `· last.fm:<username>` in the accent colour while connected. Run `ytmtui setup lastfm` and choose **Disconnect** to stop scrobbling.
 
 ---
 
@@ -346,7 +346,6 @@ Advanced yt-dlp behavior (player clients, PO Token providers, impersonation) can
 | `m` | Toggle maximized now playing view (large cover + full-height lyrics) |
 | `X` / `Z` | Queue next / append to queue |
 | `Ctrl+A` | Toggle Auto Queue for this session |
-| `Ctrl+F` | Toggle Last.fm scrobbling (persisted) |
 | `Ctrl+R` | Cycle repeat mode |
 | `Ctrl+S` | Toggle shuffle |
 | `PgUp` / `PgDn` | Scroll lyrics or detail pane |
