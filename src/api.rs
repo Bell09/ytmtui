@@ -678,6 +678,30 @@ impl YtmApi {
         self.playlist_tracks("VLLM").await
     }
 
+    /// Similar songs from the current track's radio. The `next` endpoint
+    /// returns the same "Up next" panel the web player uses; only its first
+    /// page is read, capped so Auto Queue never holds a large response.
+    pub async fn similar_tracks(
+        &self,
+        video_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Track>> {
+        if video_id.trim().is_empty() {
+            anyhow::bail!("missing video id");
+        }
+        let limit = limit.min(50);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let body = json!({
+            "context": context(),
+            "videoId": video_id,
+            "playlistId": format!("RDAMVM{video_id}"),
+        });
+        let value = self.post_innertube(NEXT_URL, &body).await?;
+        Ok(parse_similar_tracks(&value, video_id, limit))
+    }
+
     async fn browse(&self, body: &Value) -> anyhow::Result<Value> {
         let headers = self
             .headers
@@ -1776,6 +1800,73 @@ fn parse_item(renderer: &Value) -> Option<Track> {
     })
 }
 
+/// Read the "Up next" radio panel returned by `next`. The selected row is the
+/// seed track, so it is skipped, as are repeated video ids and the seed id.
+fn parse_similar_tracks(value: &Value, anchor: &str, limit: usize) -> Vec<Track> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let Some(panel) = find_json(value, "playlistPanelRenderer") else {
+        return Vec::new();
+    };
+    let Some(items) = panel.get("contents").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut tracks = Vec::new();
+    for item in items {
+        let Some(renderer) = item.get("playlistPanelVideoRenderer") else {
+            continue;
+        };
+        if renderer.get("selected").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let Some(track) = parse_panel_track(renderer) else {
+            continue;
+        };
+        if track.id == anchor || !seen.insert(track.id.clone()) {
+            continue;
+        }
+        tracks.push(track);
+        if tracks.len() >= limit {
+            break;
+        }
+    }
+    tracks
+}
+
+fn parse_panel_track(renderer: &Value) -> Option<Track> {
+    let id = renderer.get("videoId")?.as_str()?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let title = runs_text(renderer.get("title")).unwrap_or_else(|| "Unknown Title".to_string());
+    let artist = runs_text(renderer.get("shortBylineText"))
+        .or_else(|| runs_text(renderer.get("longBylineText")))
+        .unwrap_or_default();
+    let duration = renderer
+        .get("lengthText")
+        .and_then(|text| runs_text(Some(text)))
+        .filter(|text| is_duration(text));
+    let like = renderer
+        .pointer("/menu/menuRenderer/topLevelButtons/0/likeButtonRenderer/likeStatus")
+        .and_then(Value::as_str)
+        .map(|status| status == "LIKE");
+
+    Some(Track {
+        id: id.to_string(),
+        title,
+        artist,
+        album: None,
+        duration,
+        thumbnail_url: renderer_thumb(renderer),
+        like,
+        downloaded: false,
+        set_video_id: None,
+    })
+}
+
 /// The row's playlist-membership token: the row's own edit menu carries a
 /// `playlistEditEndpoint` whose action names this exact row's `setVideoId`.
 /// Only rows listing inside *your* playlists have it.
@@ -2082,6 +2173,90 @@ mod browse_tests {
         assert_eq!(tracks[0].set_video_id.as_deref(), Some("entry-a"));
         assert_eq!(tracks[1].id, "other");
         assert_eq!(tracks[2].id, "other");
+    }
+
+    #[test]
+    fn similar_tracks_skip_the_seed_dedupe_and_respect_the_limit() {
+        let value = json!({
+            "contents": {
+                "singleColumnMusicWatchNextResultsRenderer": {
+                    "playlist": {
+                        "playlistPanelRenderer": {
+                            "contents": [
+                                {
+                                    "playlistPanelVideoRenderer": {
+                                        "videoId": "seed",
+                                        "selected": true,
+                                        "title": { "runs": [{ "text": "Seed" }] }
+                                    }
+                                },
+                                {
+                                    "playlistPanelVideoRenderer": {
+                                        "videoId": "one",
+                                        "title": { "runs": [{ "text": "First" }] },
+                                        "shortBylineText": { "runs": [{ "text": "Artist A" }] },
+                                        "lengthText": { "runs": [{ "text": "3:01" }] },
+                                        "thumbnail": {
+                                            "thumbnails": [
+                                                { "url": "small.jpg", "width": 60 },
+                                                { "url": "large.jpg", "width": 400 }
+                                            ]
+                                        }
+                                    }
+                                },
+                                {
+                                    "playlistPanelVideoRenderer": {
+                                        "videoId": "one",
+                                        "title": { "runs": [{ "text": "Duplicate" }] }
+                                    }
+                                },
+                                {
+                                    "playlistPanelVideoRenderer": {
+                                        "videoId": "",
+                                        "title": { "runs": [{ "text": "No id" }] }
+                                    }
+                                },
+                                {
+                                    "playlistPanelVideoRenderer": {
+                                        "videoId": "two",
+                                        "title": { "runs": [{ "text": "Second" }] },
+                                        "shortBylineText": { "runs": [{ "text": "Artist B" }] },
+                                        "lengthText": { "runs": [{ "text": "4:02" }] }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+
+        let tracks = parse_similar_tracks(&value, "seed", 10);
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].id, "one");
+        assert_eq!(tracks[0].artist, "Artist A");
+        assert_eq!(tracks[0].duration.as_deref(), Some("3:01"));
+        assert_eq!(tracks[0].thumbnail_url.as_deref(), Some("large.jpg"));
+        assert_eq!(tracks[1].id, "two");
+
+        assert_eq!(parse_similar_tracks(&value, "seed", 1).len(), 1);
+        assert!(parse_similar_tracks(&json!({}), "seed", 10).is_empty());
+    }
+
+    /// Live radio lookup. Ignored by default because it needs the network;
+    /// run with `cargo test live_similar_tracks -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_similar_tracks() {
+        let api = YtmApi::new();
+        let tracks = api
+            .similar_tracks("dQw4w9WgXcQ", 5)
+            .await
+            .expect("radio request");
+        assert!(!tracks.is_empty(), "radio returned no tracks");
+        assert!(tracks.len() <= 5);
+        assert!(tracks.iter().all(|track| !track.id.is_empty()));
+        assert!(tracks.iter().all(|track| track.id != "dQw4w9WgXcQ"));
     }
 
     /// Create a playlist on the signed-in account, confirm the server

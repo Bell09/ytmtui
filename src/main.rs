@@ -1,5 +1,6 @@
 mod models;
 mod api;
+mod auto_queue;
 mod player;
 mod session;
 mod app;
@@ -424,6 +425,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Like the current song — the heart in the playback
                     // bar fills in (the like toggle, on `L`).
                     KeyCode::Char('L') => app.toggle_like(),
+                    // Auto Queue: extend the queue with similar songs at
+                    // the end. Config sets the default; this toggles it for
+                    // the current session.
+                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.toggle_auto_queue()
+                    }
                     // Add the highlighted song to a library playlist —
                     // `a` opens the picker, arrows scroll, Enter adds.
                     KeyCode::Char('a' | 'A') => app.open_playlist_picker(),

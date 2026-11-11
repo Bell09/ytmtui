@@ -148,6 +148,9 @@ type OfflineScanResult = (u64, Vec<Track>);
 /// Resolved stream URL for the next queue track, or why it failed.
 type PrefetchResult = (String, Result<String, String>);
 
+/// Finished Auto Queue recommendation request: sequence number and result.
+type AutoQueueFetch = (u64, Result<Vec<Track>, String>);
+
 /// Restarts before a failed track is skipped.
 const MAX_PLAYBACK_RETRIES: u8 = 2;
 /// Prefetched URLs expire; older ones fall back to a fresh resolve.
@@ -358,6 +361,10 @@ pub struct App {
     prefetch_inflight: Option<String>,
     prefetch_tx: tokio::sync::mpsc::UnboundedSender<PrefetchResult>,
     prefetch_rx: tokio::sync::mpsc::UnboundedReceiver<PrefetchResult>,
+    /// Auto Queue policy plus its single in-flight recommendation request.
+    auto_queue: crate::auto_queue::AutoQueue,
+    auto_queue_tx: tokio::sync::mpsc::UnboundedSender<AutoQueueFetch>,
+    auto_queue_rx: tokio::sync::mpsc::UnboundedReceiver<AutoQueueFetch>,
     /// Colour theme (from pywal, wallust or matugen, reloaded live when the
     /// wallpaper tool rewrites its palette).
     pub theme: crate::theme::Theme,
@@ -533,6 +540,7 @@ impl App {
         let (page_fetch_tx, page_fetch_rx) = tokio::sync::mpsc::unbounded_channel();
         let (offline_scan_tx, offline_scan_rx) = tokio::sync::mpsc::unbounded_channel();
         let (prefetch_tx, prefetch_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (auto_queue_tx, auto_queue_rx) = tokio::sync::mpsc::unbounded_channel();
         let (account_tx, account_rx) = tokio::sync::mpsc::unbounded_channel();
         let (art_tx, art_rx) = tokio::sync::mpsc::unbounded_channel();
         let (lyrics_tx, lyrics_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -729,6 +737,11 @@ impl App {
             prefetch_inflight: None,
             prefetch_tx,
             prefetch_rx,
+            auto_queue: crate::auto_queue::AutoQueue::new(
+                crate::auto_queue::enabled_from_config(),
+            ),
+            auto_queue_tx,
+            auto_queue_rx,
             theme,
             theme_src,
             theme_mtime,
@@ -1120,6 +1133,9 @@ impl App {
                 }
             }
         }
+        // A finished recommendation extends the queue before this tick's
+        // playback transitions, then its first track is prefetched.
+        self.poll_auto_queue();
         // Widget actions (MPRIS + queue IPC) apply before this tick's own
         // transitions.
         self.apply_mpris_commands();
@@ -1148,6 +1164,10 @@ impl App {
                 }
             }
         }
+        // The queue has just reached its final track: fetch more before that
+        // track ends. One request at a time; a no-op when disabled or when
+        // repeat/offline already owns the end-of-queue behaviour.
+        self.maybe_request_auto_queue();
         // Mirror the resulting state to desktop media widgets.
         self.sync_mpris();
         self.sync_ipc();
@@ -2234,6 +2254,9 @@ impl App {
     /// stale while we were away. Playback is deliberately left alone: a
     /// queue mixing local files and online tracks keeps running either way.
     pub fn toggle_offline(&mut self) {
+        // Auto Queue has no network in offline mode, and a reply fetched
+        // just before the toggle must not land afterwards.
+        self.auto_queue.invalidate();
         // A search for the other mode must not land after the toggle.
         self.search_generation = self.search_generation.wrapping_add(1);
         // Neither must a browse page fetch from the online session.
@@ -2851,6 +2874,111 @@ impl App {
     fn take_prefetch(&mut self, id: &str) -> Option<String> {
         let (cached_id, url, at) = self.prefetch.take()?;
         (cached_id == id && at.elapsed() < PREFETCH_TTL).then_some(url)
+    }
+
+    /// Drain a finished Auto Queue request. Stale replies (queue edited,
+    /// track skipped, repeat/offline changed) are dropped by the policy
+    /// module before anything touches the queue.
+    fn poll_auto_queue(&mut self) {
+        while let Ok((seq, result)) = self.auto_queue_rx.try_recv() {
+            let current_id = self.current_track.as_ref().map(|track| track.id.as_str());
+            let context = crate::auto_queue::ApplyContext {
+                queue_version: self.queue_version,
+                current_id,
+                active: matches!(
+                    self.playback_state,
+                    PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Paused
+                ),
+                repeat: self.repeat,
+                offline: self.offline,
+            };
+            let Some(tracks) = self.auto_queue.accept(seq, result, context) else {
+                continue;
+            };
+            let added = self.extend_auto_queue(tracks);
+            if added > 0 {
+                self.status_message = format!("Auto Queue · added {added}");
+                self.prefetch_next();
+            }
+        }
+    }
+
+    /// Append recommendation rows without disturbing the existing queue.
+    /// Duplicates already present are kept, never removed.
+    fn extend_auto_queue(&mut self, tracks: Vec<Track>) -> usize {
+        let before = self.queue.len();
+        let added = crate::auto_queue::append_unique(
+            &mut self.queue,
+            tracks,
+            crate::auto_queue::ADD_LIMIT,
+        );
+        if added == 0 {
+            return 0;
+        }
+
+        if self.shuffle && !self.shuffle_order.is_empty() {
+            // The current track was last in the shuffled order, so the new
+            // rows naturally continue after it.
+            self.shuffle_order.extend(before..self.queue.len());
+            self.queue_version = self.queue_version.wrapping_add(1);
+        } else if self.shuffle {
+            self.rebuild_shuffle_order(None);
+        } else {
+            self.queue_version = self.queue_version.wrapping_add(1);
+        }
+
+        let registry = &self.registry;
+        for track in &mut self.queue[before..] {
+            track.downloaded = Self::saved(registry, &track.id);
+        }
+        self.session_dirty = true;
+        added
+    }
+
+    /// Ask for similar songs when the current track is the last one in the
+    /// playback order. The request runs off the UI thread; one request at a
+    /// time keeps memory and network use bounded.
+    fn maybe_request_auto_queue(&mut self) {
+        let Some(current) = self.current_track.as_ref() else {
+            return;
+        };
+        let anchor = current.id.clone();
+        let playing = matches!(
+            self.playback_state,
+            PlaybackState::Playing | PlaybackState::Buffering
+        );
+        let context = crate::auto_queue::RequestContext {
+            queue_version: self.queue_version,
+            anchor: &anchor,
+            has_next: self.next_queue_index().is_some(),
+            playing,
+            repeat: self.repeat,
+            offline: self.offline,
+        };
+        let Some(seq) = self.auto_queue.should_request(context) else {
+            return;
+        };
+
+        let api = self.api.clone();
+        let tx = self.auto_queue_tx.clone();
+        tokio::spawn(async move {
+            let result = api
+                .similar_tracks(&anchor, crate::auto_queue::FETCH_LIMIT)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx.send((seq, result));
+        });
+    }
+
+    /// Runtime toggle for Auto Queue. The configured default still comes from
+    /// `config.json`; this only changes the current session.
+    pub fn toggle_auto_queue(&mut self) {
+        let enabled = !self.auto_queue.enabled();
+        self.auto_queue.set_enabled(enabled);
+        self.status_message = format!(
+            "Auto Queue: {}",
+            if enabled { "on" } else { "off" }
+        );
     }
 
     /// Retry the current track, then skip it if it keeps failing. mpv is
@@ -3632,6 +3760,9 @@ impl App {
     /// `Ctrl+R`: cycle repeat off → all → one.
     pub fn cycle_repeat(&mut self) {
         self.repeat = self.repeat.next();
+        // Repeat owns the end-of-queue behaviour from here; an in-flight
+        // Auto Queue reply must not add tracks behind its back.
+        self.auto_queue.invalidate();
         self.session_dirty = true;
         self.status_message = format!("Repeat: {}", self.repeat.label());
     }

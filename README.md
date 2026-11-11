@@ -42,6 +42,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 | 📚 **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
 | ✨ **For you** | Personal mixes, subscriptions, trending songs, community playlists, activity mixes, moods, genres, and country/global charts |
 | ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, next-track prefetch, automatic retry/skip on stream failures · `m` for a maximized cover + synced lyrics view |
+| 🔁 **Auto Queue** | Fetches similar songs before the queue ends, appends only new tracks, and stays quiet offline or while repeat is active |
 | 💫 **Extras** | Synced lyrics, queue, offline mode, session resume, like/unlike, remove song from playlist, create a playlist, MP3 download with cover art and `.lrc` lyrics |
 
 ---
@@ -266,6 +267,7 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 | `l` | Toggle lyrics pane |
 | `m` | Toggle maximized now playing view (large cover + full-height lyrics) |
 | `X` / `Z` | Queue next / append to queue |
+| `Ctrl+A` | Toggle Auto Queue for this session |
 | `Ctrl+R` | Cycle repeat mode |
 | `Ctrl+S` | Toggle shuffle |
 | `PgUp` / `PgDn` | Scroll lyrics or detail pane |
@@ -290,6 +292,22 @@ The window is deliberately chrome-free — no box borders, just hairlines, white
 **For you shelves** (accessible via `b` or hotkeys `1`–`5`):
 
 Quick picks · Your daily discover · Featured playlists for you · My subscriptions · Forgotten favorites · From the community · Moods & genres · Activity mixes · Discovery mix · Mixed for you · New releases · Covers and remixes · Trending community playlists · Trending songs · Country charts · Global charts
+
+---
+
+## 🔁 Auto Queue
+
+When the queue reaches its final track, YTMTUI fetches similar songs in the background and appends up to five of them before playback ends. It requests ten candidates, keeps only one request in flight, skips tracks already in the queue, and discards replies if the queue or current track changed in the meantime.
+
+Auto Queue is enabled by default. It pauses automatically in offline mode and whenever repeat is set to **all** or **one**, so those modes keep their normal end-of-queue behavior. Press `Ctrl+A` to toggle it for the current session.
+
+To change the startup default, edit `~/.config/ytmtui/config.json`:
+
+```json
+{
+  "auto_queue": false
+}
+```
 
 ---
 
