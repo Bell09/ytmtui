@@ -99,7 +99,7 @@ install -Dm755 ytmtui-*/ytmtui ~/.local/bin/ytmtui
 |--------|--------|
 | Default | Installs to `~/.local/bin` |
 | `sh install.sh --system` | Installs to `/usr/local/bin` |
-| `YTMTUI_VERSION=0.1.20` | Pins a specific version |
+| `YTMTUI_VERSION=0.1.21` | Pins a specific version |
 
 The script supports Linux x86_64, verifies the download checksum before installing, and automatically installs missing `mpv`, `yt-dlp`, and `ffmpeg` dependencies using a supported package manager. It verifies that all three dependencies run before reporting success.
 
