@@ -42,7 +42,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 | 📚 **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
 | ✨ **For you** | Personal mixes, subscriptions, trending songs, community playlists, activity mixes, moods, genres, and country/global charts |
 | ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, next-track prefetch, automatic retry/skip on stream failures · `m` for a maximized cover + synced lyrics view |
-| 💫 **Extras** | Synced lyrics, queue, offline mode, session resume, like/unlike, MP3 download with cover art and `.lrc` lyrics |
+| 💫 **Extras** | Synced lyrics, queue, offline mode, session resume, like/unlike, remove song from playlist, create a playlist, MP3 download with cover art and `.lrc` lyrics |
 
 ---
 
