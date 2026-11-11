@@ -7,6 +7,7 @@ mod app;
 mod ui;
 mod auth;
 mod browser;
+mod lastfm;
 mod theme;
 mod art;
 mod mpris;
@@ -29,9 +30,10 @@ fn print_help() {
     println!();
     println!("Usage:");
     println!("  ytmtui                       Launch the interactive TUI");
-    println!("  ytmtui setup [--manual]      Interactive authentication wizard");
+    println!("  ytmtui setup [--manual]      Interactive setup for YouTube Music and Last.fm");
+    println!("  ytmtui setup lastfm          Configure Last.fm scrobbling directly");
     println!("  ytmtui setup --browser NAME  Try extracting cookies from a browser");
-    println!("  ytmtui status                Show the signed-in account");
+    println!("  ytmtui status                Show the signed-in account and Last.fm status");
     println!("  ytmtui playlists             List your library playlists");
     println!("  ytmtui liked                 List your liked songs");
     println!("  ytmtui tracks <id>           List tracks of a playlist/album/artist");
@@ -82,6 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "setup" => {
                 let mut manual = false;
                 let mut browser: Option<String> = None;
+                let mut service: Option<&str> = None;
                 let mut i = 2;
                 while i < args.len() {
                     match args[i].as_str() {
@@ -90,6 +93,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             browser = Some(args[i + 1].clone());
                             i += 1;
                         }
+                        "lastfm" => service = Some("lastfm"),
+                        "youtube" | "ytmusic" => service = Some("youtube"),
                         other => {
                             eprintln!("Unknown setup option: {}", other);
                             std::process::exit(1);
@@ -97,7 +102,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     i += 1;
                 }
-                if let Err(e) = auth::run_setup(manual, browser).await {
+                let result = if service == Some("lastfm") {
+                    auth::run_lastfm_setup().await
+                } else {
+                    auth::run_setup(manual, browser).await
+                };
+                if let Err(e) = result {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 }
@@ -112,6 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(name) => println!("Signed in as: {}", name),
                     None => println!("Not signed in. Run `ytmtui setup` to sign in."),
                 }
+                println!("{}", lastfm::status_line());
                 return Ok(());
             }
             "playlists" | "library" => {
@@ -430,6 +441,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // the current session.
                     KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.toggle_auto_queue()
+                    }
+                    // Last.fm scrobbling on/off for this session (persisted).
+                    KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.toggle_lastfm()
                     }
                     // Add the highlighted song to a library playlist —
                     // `a` opens the picker, arrows scroll, Enter adds.

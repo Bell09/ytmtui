@@ -413,7 +413,62 @@ fn prompt_line(prompt: &str) -> Option<String> {
     }
 }
 
+/// `ytmtui setup`: pick which service to configure. `--manual` and
+/// `--browser` keep their old meaning and go straight to YouTube Music, so
+/// existing scripts and instructions behave exactly as before.
 pub async fn run_setup(manual: bool, browser_arg: Option<String>) -> anyhow::Result<()> {
+    if manual || browser_arg.is_some() {
+        return run_youtube_setup(manual, browser_arg).await;
+    }
+
+    println!();
+    println!("============================================================");
+    println!("  YTMTUI Setup");
+    println!("============================================================");
+    println!();
+    println!("  What would you like to configure?");
+    println!("    [1] YouTube Music");
+    println!("    [2] Last.fm");
+    println!("    [3] Both");
+    println!();
+
+    let choice = loop {
+        let Some(answer) = prompt_line("  Choice [1]: ") else {
+            println!("  Setup cancelled.");
+            return Ok(());
+        };
+        let answer = answer.trim();
+        if answer.is_empty() {
+            break 1;
+        }
+        match answer.parse::<u8>() {
+            Ok(choice @ 1..=3) => break choice,
+            _ => println!("  Please enter 1, 2, or 3."),
+        }
+    };
+
+    // Configure both on request, and keep going if one fails so the other
+    // service is still usable.
+    let mut error: Option<anyhow::Error> = None;
+    if choice == 1 || choice == 3 {
+        if let Err(e) = run_youtube_setup(false, None).await {
+            error = Some(e);
+        }
+    }
+    if choice == 2 || choice == 3 {
+        if let Err(e) = run_lastfm_setup().await {
+            if error.is_none() {
+                error = Some(e);
+            }
+        }
+    }
+    match error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+async fn run_youtube_setup(manual: bool, browser_arg: Option<String>) -> anyhow::Result<()> {
     println!();
     println!("============================================================");
     println!("  YouTube Music Authentication");
@@ -471,6 +526,237 @@ pub async fn run_setup(manual: bool, browser_arg: Option<String>) -> anyhow::Res
     }
 
     Ok(())
+}
+
+/// `ytmtui setup lastfm`: authenticate a new connection or manage an existing
+/// one. Secrets are always read without echo and are never printed back.
+pub async fn run_lastfm_setup() -> anyhow::Result<()> {
+    println!();
+    println!("============================================================");
+    println!("  Last.fm Scrobbling");
+    println!("============================================================");
+    println!();
+
+    let existing = crate::lastfm::load();
+    if let Some(creds) = &existing {
+        println!("  Connected as {}.", creds.username);
+        println!(
+            "  Scrobbling is {}.",
+            if creds.enabled { "on" } else { "off" }
+        );
+        println!();
+        println!("  [1] Update credentials");
+        println!(
+            "  [2] {} scrobbling",
+            if creds.enabled { "Disable" } else { "Enable" }
+        );
+        println!("  [3] Disconnect Last.fm");
+        println!("  [Enter] Keep these settings");
+        println!();
+        let Some(answer) = prompt_line("  Choice: ") else {
+            println!("  Setup cancelled.");
+            return Ok(());
+        };
+        match answer.trim() {
+            "" => {
+                println!("  Last.fm settings unchanged.");
+                return Ok(());
+            }
+            "1" => {}
+            "2" => {
+                let enabled = !creds.enabled;
+                crate::lastfm::set_enabled(enabled).map_err(anyhow::Error::msg)?;
+                println!(
+                    "  Scrobbling {}.",
+                    if enabled { "enabled" } else { "disabled" }
+                );
+                return Ok(());
+            }
+            "3" => {
+                let answer =
+                    prompt_line("  Disconnect Last.fm and delete stored credentials? [y/N]: ")
+                        .unwrap_or_default();
+                if matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+                    crate::lastfm::clear().map_err(anyhow::Error::msg)?;
+                    println!("  Last.fm disconnected.");
+                } else {
+                    println!("  Nothing changed.");
+                }
+                return Ok(());
+            }
+            _ => {
+                println!("  Unknown choice; nothing changed.");
+                return Ok(());
+            }
+        }
+    } else {
+        println!("  Scrobble your YouTube Music listening to Last.fm.");
+        println!("  Create an API account at https://www.last.fm/api/account/create");
+        println!("  to get an API key and shared secret.");
+        println!();
+    }
+
+    let Some((api_key, api_secret, username, session_key, password_hash)) =
+        prompt_lastfm_credentials(existing.as_ref())
+    else {
+        println!("  Setup cancelled.");
+        return Ok(());
+    };
+
+    let input = crate::lastfm::prepare_auth_inputs(
+        &api_key,
+        &api_secret,
+        &username,
+        password_hash.as_deref(),
+        session_key.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("Invalid Last.fm settings: {e}"))?;
+
+    println!();
+    println!("  Authenticating with Last.fm...");
+    let auth = crate::lastfm::authenticate(input)
+        .await
+        .map_err(|e| anyhow::anyhow!("Last.fm authentication failed: {e}"))?;
+
+    let creds = crate::lastfm::Credentials {
+        api_key,
+        api_secret,
+        username: auth.username,
+        session_key: auth.session_key,
+        enabled: true,
+    };
+    crate::lastfm::save(&creds).map_err(anyhow::Error::msg)?;
+
+    println!();
+    println!(
+        "  Connected as {}. Scrobbling enabled.",
+        creds.username
+    );
+    Ok(())
+}
+
+type LastfmSetupInput = (String, String, String, Option<String>, Option<String>);
+
+/// Prompt for the Last.fm connection details. `None` means the user
+/// cancelled. Existing secret values are kept when the answer is empty and
+/// are never rendered on screen.
+fn prompt_lastfm_credentials(
+    existing: Option<&crate::lastfm::Credentials>,
+) -> Option<LastfmSetupInput> {
+    let api_key = prompt_keep("  API Key", existing.map(|c| c.api_key.as_str()))?;
+    let api_secret = prompt_keep_secret(
+        "  Shared Secret (hidden)",
+        existing.map(|c| c.api_secret.as_str()),
+    )?;
+    let username = prompt_keep("  Last.fm Username", existing.map(|c| c.username.as_str()))?;
+
+    println!();
+    println!("  Authentication method:");
+    println!("    [1] Session key (recommended)");
+    println!("    [2] MD5 password hash");
+    println!();
+    let use_session = !matches!(prompt_line("  Choice [1]: ")?.trim(), "2");
+    let (session_key, password_hash) = if use_session {
+        let key = prompt_keep_secret(
+            "  Session Key (hidden)",
+            existing.map(|c| c.session_key.as_str()),
+        )?;
+        (Some(key), None)
+    } else {
+        // A stored session key cannot replace a hash; ask for a fresh one and
+        // let authentication exchange it for a session key.
+        let hash = prompt_secret("  MD5 Password Hash (hidden): ")?;
+        (None, Some(hash))
+    };
+    Some((api_key, api_secret, username, session_key, password_hash))
+}
+
+/// Read a value, keeping `current` when the answer is empty.
+fn prompt_keep(prompt: &str, current: Option<&str>) -> Option<String> {
+    loop {
+        let label = if current.is_some() {
+            format!("{prompt} [keep current]: ")
+        } else {
+            format!("{prompt}: ")
+        };
+        let value = prompt_line(&label)?;
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+        if let Some(current) = current {
+            return Some(current.to_string());
+        }
+        println!("  This value is required.");
+    }
+}
+
+/// [`prompt_keep`] for values that must not be echoed.
+fn prompt_keep_secret(prompt: &str, current: Option<&str>) -> Option<String> {
+    loop {
+        let label = if current.is_some() {
+            format!("{prompt} [keep current]: ")
+        } else {
+            format!("{prompt}: ")
+        };
+        let value = prompt_secret(&label)?;
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+        if let Some(current) = current {
+            return Some(current.to_string());
+        }
+        println!("  This value is required.");
+    }
+}
+
+/// Read a secret without echoing it. Raw mode delivers the keystrokes
+/// directly; when it is unavailable (piped input) fall back to a normal line
+/// read — the value is still never printed.
+fn prompt_secret(prompt: &str) -> Option<String> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::terminal;
+
+    print!("{}", prompt);
+    let _ = io::stdout().flush();
+    if terminal::enable_raw_mode().is_err() {
+        return prompt_line("");
+    }
+
+    let mut value = String::new();
+    loop {
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => match key.code {
+                KeyCode::Enter => break,
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                KeyCode::Esc => {
+                    let _ = terminal::disable_raw_mode();
+                    println!();
+                    return None;
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let _ = terminal::disable_raw_mode();
+                    println!();
+                    return None;
+                }
+                KeyCode::Char(c) => value.push(c),
+                _ => {}
+            },
+            Ok(Event::Paste(text)) => value.extend(text.chars().filter(|c| !c.is_control())),
+            Ok(_) => {}
+            Err(_) => {
+                let _ = terminal::disable_raw_mode();
+                println!();
+                return None;
+            }
+        }
+    }
+    let _ = terminal::disable_raw_mode();
+    println!();
+    Some(value)
 }
 
 fn extract_cookies(browser_arg: Option<String>) -> Option<(String, Vec<(String, String)>)> {

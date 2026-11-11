@@ -37,7 +37,8 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 | | |
 | :--- | :--- |
 | 🖥️ **Terminal UI** | Built with `ratatui` + `crossterm` — chrome-free, hairlines & whitespace only |
-| 🔐 **Auth wizard** | `ytmtui setup` auto-detects your browser and extracts cookies |
+| 🔐 **Auth wizard** | `ytmtui setup` configures YouTube Music, Last.fm, or both — browser cookie extraction included |
+| 🎧 **Last.fm scrobbling** | Now Playing updates and automatic scrobbles with background retries; toggle any time with `Ctrl+F` |
 | 🔍 **Innertube search** | Signed-in search with Top / Songs / Albums / Artists / Playlists filters |
 | 📚 **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
 | ✨ **For you** | Personal mixes, subscriptions, trending songs, community playlists, activity mixes, moods, genres, and country/global charts |
@@ -200,6 +201,7 @@ ytmtui                    # launch the TUI
 ```bash
 ytmtui setup --manual          # skip browser detection, paste headers
 ytmtui setup --browser firefox # force a specific browser
+ytmtui setup lastfm            # configure Last.fm directly
 ```
 
 </details>
@@ -207,6 +209,18 @@ ytmtui setup --browser firefox # force a specific browser
 ---
 
 ## 🔑 Setup & Authentication
+
+Run `ytmtui setup` and pick what to configure:
+
+```
+[1] YouTube Music
+[2] Last.fm
+[3] Both
+```
+
+`--manual`, `--browser`, and `setup lastfm` skip the menu and go straight to the matching wizard, so existing instructions still work.
+
+### ▶️ YouTube Music
 
 The wizard walks you through signing in:
 
@@ -243,6 +257,34 @@ ytmtui setup --manual
 
 Only have the `cookie` value? Paste that — the wizard fills in the rest.
 
+### 🎧 Last.fm scrobbling
+
+Last.fm is optional and works alongside YouTube Music. Create an API account at [last.fm/api/account/create](https://www.last.fm/api/account/create), then:
+
+```bash
+ytmtui setup lastfm    # or choose Last.fm / Both from `ytmtui setup`
+```
+
+The wizard asks for the **API key**, **shared secret**, **username**, and then either:
+
+- a **session key** (recommended — verified with `user.getInfo`), or
+- an **MD5 password hash**, exchanged once for a session key via `auth.getMobileSession`.
+
+Secret prompts never echo what you type, and the password hash is not kept after the exchange. Credentials are written to `~/.config/ytmtui/lastfm.json` with owner-only (`0600`) permissions; API secrets, password hashes and session keys are never displayed or logged.
+
+Running the wizard again shows the current connection and lets you update credentials, toggle scrobbling, or disconnect (which deletes the stored file).
+
+Once connected, scrobbling starts automatically:
+
+- **Now Playing** is sent when a track actually starts playing (not while buffering or paused).
+- A track is scrobbled after half its duration, capped at four minutes; tracks under 30 seconds are ignored. Unknown durations use the four-minute cap.
+- Artist, title, album and duration are submitted when known.
+- Only genuinely playing time counts — pauses and UI stalls do not.
+- Each track is marked submitted before the request is sent, so retries can never duplicate a scrobble.
+- Requests run in the background with short timeouts and light retries for transient Last.fm/network errors. Playback is never blocked or interrupted.
+
+Press `Ctrl+F` to enable or disable scrobbling at runtime; the choice is persisted. The header shows `· last.fm:<username>` while connected, dimmed when scrobbling is off.
+
 ---
 
 ## ⌨️ Keybindings
@@ -268,6 +310,7 @@ Only have the `cookie` value? Paste that — the wizard fills in the rest.
 | `m` | Toggle maximized now playing view (large cover + full-height lyrics) |
 | `X` / `Z` | Queue next / append to queue |
 | `Ctrl+A` | Toggle Auto Queue for this session |
+| `Ctrl+F` | Toggle Last.fm scrobbling (persisted) |
 | `Ctrl+R` | Cycle repeat mode |
 | `Ctrl+S` | Toggle shuffle |
 | `PgUp` / `PgDn` | Scroll lyrics or detail pane |
@@ -338,7 +381,7 @@ If no palette is found, a built-in **green** fallback is used.
 ## 🛠️ CLI helpers
 
 ```bash
-ytmtui status            # show the signed-in account
+ytmtui status            # show the signed-in account and Last.fm status
 ytmtui playlists         # list library playlists, artists and channels
 ytmtui liked             # list liked songs
 ytmtui tracks <id>       # list tracks of a playlist / album / artist

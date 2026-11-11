@@ -365,6 +365,10 @@ pub struct App {
     auto_queue: crate::auto_queue::AutoQueue,
     auto_queue_tx: tokio::sync::mpsc::UnboundedSender<AutoQueueFetch>,
     auto_queue_rx: tokio::sync::mpsc::UnboundedReceiver<AutoQueueFetch>,
+    /// Last.fm state (pure policy) and the signed client used by background
+    /// submissions. `None` when Last.fm is not configured or is disabled.
+    pub lastfm: crate::lastfm::Scrobbler,
+    lastfm_client: Option<Arc<crate::lastfm::Client>>,
     /// Colour theme (from pywal, wallust or matugen, reloaded live when the
     /// wallpaper tool rewrites its palette).
     pub theme: crate::theme::Theme,
@@ -663,6 +667,21 @@ impl App {
             });
         }
 
+        // Last.fm: a tiny config read is enough for the header badge and the
+        // scrobbling state; the signed client is only built when enabled, so
+        // playback costs nothing when the feature is off or unconfigured.
+        let (lastfm, lastfm_client) = if cfg!(test) {
+            (crate::lastfm::Scrobbler::default(), None)
+        } else {
+            let scrobbler = crate::lastfm::Scrobbler::from_config();
+            let client = if scrobbler.enabled() {
+                crate::lastfm::Client::from_config().map(Arc::new)
+            } else {
+                None
+            };
+            (scrobbler, client)
+        };
+
         let mut app = Self {
             current_page: Page::Library,
             input_mode: InputMode::Normal,
@@ -742,6 +761,8 @@ impl App {
             ),
             auto_queue_tx,
             auto_queue_rx,
+            lastfm,
+            lastfm_client,
             theme,
             theme_src,
             theme_mtime,
@@ -1164,6 +1185,9 @@ impl App {
                 }
             }
         }
+        // Last.fm: count only time that was actually playing, and emit Now
+        // Playing / scrobble actions for the background submitter.
+        self.poll_lastfm();
         // The queue has just reached its final track: fetch more before that
         // track ends. One request at a time; a no-op when disabled or when
         // repeat/offline already owns the end-of-queue behaviour.
@@ -2747,6 +2771,12 @@ impl App {
     /// adopt the state.
     fn start_track_at(&mut self, t: Track, retry: bool, start: Option<f64>, paused: bool) {
         self.session_dirty = true;
+        // A fresh playback instance resets the Last.fm listening window.
+        // Retries (including one after a failed initial load) keep it, so a
+        // track cannot be scrobbled twice and time already heard is not lost.
+        if !retry {
+            self.lastfm.track_started(&t, parse_duration(&t.duration));
+        }
         // Gapless auto-advance: mpv already loaded this track via
         // `loadfile append-play`. Adopt it without reloading.
         if !retry
@@ -2979,6 +3009,75 @@ impl App {
             "Auto Queue: {}",
             if enabled { "on" } else { "off" }
         );
+    }
+
+    /// Advance the Last.fm state machine with this tick's playback state.
+    /// Only genuinely playing ticks count toward the scrobble threshold.
+    fn poll_lastfm(&mut self) {
+        let playing = self.playback_state == PlaybackState::Playing;
+        let duration = self
+            .current_track
+            .as_ref()
+            .and_then(|track| parse_duration(&track.duration));
+        let action = self.lastfm.tick(Instant::now(), playing, duration);
+        self.spawn_lastfm(action);
+    }
+
+    /// Send one Last.fm action on the background runtime. The request has its
+    /// own timeouts and light retries, so a dead network cannot delay a frame
+    /// or interrupt playback.
+    fn spawn_lastfm(&mut self, action: Option<crate::lastfm::Action>) {
+        let Some(client) = self.lastfm_client.clone() else {
+            return;
+        };
+        let Some(action) = action else {
+            return;
+        };
+        tokio::spawn(async move {
+            match action {
+                crate::lastfm::Action::NowPlaying {
+                    track,
+                    duration_secs,
+                } => {
+                    let _ = client.update_now_playing(&track, duration_secs).await;
+                }
+                crate::lastfm::Action::Scrobble {
+                    track,
+                    duration_secs,
+                    timestamp,
+                } => {
+                    let _ = client.scrobble(&track, timestamp, duration_secs).await;
+                }
+            }
+        });
+    }
+
+    /// `Ctrl+F`: enable or disable Last.fm scrobbling, persisting the choice
+    /// so the next launch keeps it. Also reports the connection status.
+    pub fn toggle_lastfm(&mut self) {
+        if !self.lastfm.configured() {
+            self.status_message =
+                "Last.fm is not configured — run `ytmtui setup lastfm`".to_string();
+            return;
+        }
+        let enabled = !self.lastfm.enabled();
+        match crate::lastfm::set_enabled(enabled) {
+            Ok(()) => {
+                self.lastfm.set_enabled(enabled);
+                self.lastfm_client = if enabled {
+                    crate::lastfm::Client::from_config().map(Arc::new)
+                } else {
+                    None
+                };
+                self.status_message = format!(
+                    "Last.fm scrobbling: {}",
+                    if enabled { "on" } else { "off" }
+                );
+            }
+            Err(error) => {
+                self.status_message = format!("Could not update Last.fm settings: {error}");
+            }
+        }
     }
 
     /// Retry the current track, then skip it if it keeps failing. mpv is

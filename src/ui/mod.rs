@@ -268,13 +268,24 @@ fn draw_header(f: &mut Frame, app: &App, title: Rect, search: Rect) {
     } else {
         Style::default().fg(t.brand).add_modifier(Modifier::BOLD)
     };
-    let title_spans = vec![
-        Span::styled(
-            " YTMTUI ⟢ ",
-            Style::default().fg(t.brand).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(account, account_style),
-    ];
+    let title_spans = {
+        let mut spans = vec![
+            Span::styled(
+                " YTMTUI ⟢ ",
+                Style::default().fg(t.brand).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(account, account_style),
+        ];
+        // Last.fm connection status: the username when configured, dimmed
+        // while scrobbling is disabled. Secrets never reach this string.
+        if let Some(user) = app.lastfm.badge() {
+            spans.push(Span::styled(
+                format!("  · last.fm:{user}"),
+                Style::default().fg(if app.lastfm.enabled() { t.accent } else { t.dim }),
+            ));
+        }
+        spans
+    };
     f.render_widget(Paragraph::new(Line::from(title_spans)), title);
 
     // Search input: a text line on an underline rule, no side or top borders.
