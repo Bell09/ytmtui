@@ -41,8 +41,26 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          set -eu
+          # The runner's Ubuntu mirrors intermittently fail to resolve, so
+          # retry the index update and the install. Only the OpenSSL headers
+          # are a hard requirement; pkg-config is a build helper and
+          # openssl-sys falls back to the standard library paths without it.
+          installed=0
+          for attempt in 1 2 3; do
+            if sudo apt-get update -o Acquire::Retries=5 \
+              && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config; then
+              installed=1
+              break
+            fi
+            echo "::warning::apt attempt ${attempt} failed"
+            sleep 15
+          done
+          if [ "$installed" -eq 0 ]; then
+            echo "::warning::apt install failed; continuing with the packages already present"
+          fi
+          test -f /usr/include/openssl/ssl.h || {
+            echo "::error::OpenSSL headers are missing — install libssl-dev"; exit 1; }
 
       - name: Build
         env:
