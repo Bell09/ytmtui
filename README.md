@@ -71,7 +71,24 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 ### One-line install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/Main/install.sh | sh
+curl -fsSL https://github.com/Bell09/ytmtui/releases/latest/download/install.sh | sh
+```
+
+If your network cannot resolve `raw.githubusercontent.com`, use the command
+above (it is served from the release assets) or fetch the script through the
+API:
+
+```bash
+curl -fsSL 'https://api.github.com/repos/Bell09/ytmtui/contents/install.sh?ref=Main' \
+  | python3 -c 'import sys,json,base64;sys.stdout.write(base64.b64decode(json.load(sys.stdin)["content"]).decode())' | sh
+```
+
+Without the installer at all:
+
+```bash
+curl -fL -o ytmtui.tar.gz https://github.com/Bell09/ytmtui/releases/latest/download/ytmtui-x86_64-linux.tar.gz
+tar -xzf ytmtui.tar.gz
+install -Dm755 ytmtui-*/ytmtui ~/.local/bin/ytmtui
 ```
 
 <!-- coderabbit-ai-generated:v1 -->
@@ -82,7 +99,7 @@ curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/Main/install.sh | sh
 |--------|--------|
 | Default | Installs to `~/.local/bin` |
 | `sh install.sh --system` | Installs to `/usr/local/bin` |
-| `YTMTUI_VERSION=0.1.19` | Pins a specific version |
+| `YTMTUI_VERSION=0.1.20` | Pins a specific version |
 
 The script supports Linux x86_64, verifies the download checksum before installing, and automatically installs missing `mpv`, `yt-dlp`, and `ffmpeg` dependencies using a supported package manager. It verifies that all three dependencies run before reporting success.
 

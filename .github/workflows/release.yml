@@ -56,6 +56,10 @@ jobs:
           cp README.md LICENSE "dist/ytmtui-$ver-x86_64-linux/"
           tar -C dist -czf dist/ytmtui-x86_64-linux.tar.gz "ytmtui-$ver-x86_64-linux"
           (cd dist && sha256sum ytmtui-x86_64-linux.tar.gz > ytmtui-x86_64-linux.tar.gz.sha256)
+          # Ship install.sh as a release asset too, so users whose DNS blocks
+          # raw.githubusercontent.com can still install from github.com.
+          cp install.sh dist/install.sh
+          (cd dist && sha256sum install.sh > install.sh.sha256)
 
       - uses: actions/upload-artifact@v4
         with:
@@ -155,6 +159,8 @@ jobs:
           files: |
             dist/ytmtui-x86_64-linux.tar.gz
             dist/ytmtui-x86_64-linux.tar.gz.sha256
+            dist/install.sh
+            dist/install.sh.sha256
             repo/x86_64/*.pkg.tar.zst
 
       - name: Publish pacman repo

@@ -1,9 +1,13 @@
 #!/bin/sh
 # Install the latest ytmtui release binary and its runtime dependencies.
 #
+#   curl -fsSL https://github.com/Bell09/ytmtui/releases/latest/download/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/Main/install.sh | sh
 #   sh install.sh --system
-#   YTMTUI_VERSION=0.1.19 sh install.sh
+#   YTMTUI_VERSION=0.1.20 sh install.sh
+#
+# The first URL is served from the release assets and works on networks that
+# cannot resolve raw.githubusercontent.com.
 set -eu
 
 REPO="Bell09/ytmtui"
@@ -18,7 +22,7 @@ usage() {
 Usage: install.sh [--system] [--version VERSION]
 
   --system            install to /usr/local/bin (uses sudo when needed)
-  --version VERSION   install a specific release, for example 0.1.19
+  --version VERSION   install a specific release, for example 0.1.20
 
 Environment:
   YTMTUI_INSTALL_DIR  destination directory (default: ~/.local/bin)
@@ -137,7 +141,9 @@ install_deps() {
 
     case "$pkg_manager" in
         pacman)
-            cmd="pacman -Sy --needed --noconfirm$missing"
+            # Full upgrade: a partial 'pacman -Sy' can leave installed
+            # packages on older libraries and break the system.
+            cmd="pacman -Syu --needed --noconfirm$missing"
             ;;
         apt-get)
             cmd="apt-get update && apt-get install -y$missing"
@@ -209,9 +215,31 @@ verify_deps() {
 
 # --- install ytmtui binary --------------------------------------------------
 
+# Download a URL, reporting DNS/proxy problems in plain language. Some
+# networks cannot resolve raw.githubusercontent.com while github.com works.
+download() {
+    url="$1"
+    out="$2"
+    err="$tmp/download.err"
+    if curl -fL --retry 3 --connect-timeout 20 -o "$out" "$url" 2>"$err"; then
+        return 0
+    fi
+    if grep -q "Could not resolve host" "$err" 2>/dev/null; then
+        echo "install.sh: DNS could not resolve the download host ($url)" >&2
+        echo "install.sh: try a different host, for example:" >&2
+        echo "install.sh:   curl -fL -o ytmtui.tar.gz \\" >&2
+        echo "install.sh:     https://github.com/$REPO/releases/latest/download/$ASSET" >&2
+        echo "install.sh:   tar -xzf ytmtui.tar.gz && install -Dm755 ytmtui-*/ytmtui ~/.local/bin/ytmtui" >&2
+    else
+        echo "install.sh: download failed: $url" >&2
+        sed 's/^/install.sh: /' "$err" >&2 || true
+    fi
+    return 1
+}
+
 echo "Downloading $ASSET..."
-curl -fL --retry 3 --connect-timeout 20 -o "$tmp/$ASSET" "$base/$ASSET"
-curl -fL --retry 3 --connect-timeout 20 -o "$tmp/$ASSET.sha256" "$base/$ASSET.sha256"
+download "$base/$ASSET" "$tmp/$ASSET" || fail "could not download $ASSET"
+download "$base/$ASSET.sha256" "$tmp/$ASSET.sha256" || fail "could not download $ASSET.sha256"
 
 (cd "$tmp" && sha256sum -c "$ASSET.sha256")
 
