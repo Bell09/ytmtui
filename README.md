@@ -82,7 +82,7 @@ curl -fsSL https://raw.githubusercontent.com/Bell09/ytmtui/Main/install.sh | sh
 |--------|--------|
 | Default | Installs to `~/.local/bin` |
 | `sh install.sh --system` | Installs to `/usr/local/bin` |
-| `YTMTUI_VERSION=0.1.18` | Pins a specific version |
+| `YTMTUI_VERSION=0.1.19` | Pins a specific version |
 
 The script supports Linux x86_64, verifies the download checksum before installing, and automatically installs missing `mpv`, `yt-dlp`, and `ffmpeg` dependencies using a supported package manager. It verifies that all three dependencies run before reporting success.
 
@@ -139,24 +139,29 @@ Binary lands in `target/release/ytmtui`.
 | Dependency | Purpose |
 | :--- | :--- |
 | **mpv** | Playback backend (controlled via IPC) |
+| **yt-dlp** | Stream extraction (`ytmtui` uses it directly and mpv uses it as a fallback) |
 | **Rust** ≥ 1.89 | Only needed when building from source |
 
 Install on Arch-based systems:
 
 ```bash
-sudo pacman -S mpv
+sudo pacman -S mpv yt-dlp
 ```
+
+yt-dlp evolves with YouTube; keep it reasonably current. `ytmtui status` reports whether the required tools are on `PATH` and whether a JavaScript runtime is available. ytmtui uses yt-dlp's documented defaults (no forced player client, no bundled PO Token generator), so advanced options and PO Token providers belong in yt-dlp's own configuration.
 
 ### Optional (recommended)
 
 | Dependency | Purpose |
 | :--- | :--- |
-| **yt-dlp** | Better stream extraction / fallback |
 | **ffmpeg** | Used when downloading songs as MP3 |
+| **Deno** or **Node** | JavaScript runtime for yt-dlp when a video needs YouTube's JS challenges |
 
 ```bash
-sudo pacman -S yt-dlp ffmpeg
+sudo pacman -S ffmpeg deno
 ```
+
+ytmtui never bundles or silently installs these runtimes; it only detects them and points at the missing piece.
 
 ### Rust crates (main)
 
@@ -287,6 +292,20 @@ Press `Ctrl+F` to enable or disable scrobbling at runtime; the choice is persist
 
 ---
 
+## 📡 Stream extraction & recovery
+
+yt-dlp stays the primary extractor; mpv's built-in ytdl hook is the fallback when a prefetched stream is not ready in time.
+
+- The next queue track is resolved in the background with `bestaudio/best`, a 30-second deadline, one retry for transient failures, and bounded yt-dlp retries/socket timeouts.
+- Direct stream URLs are passed to mpv together with the HTTP headers yt-dlp reports (via IPC before each load), so a required `User-Agent` or similar header is not lost.
+- Expired or failed streams are retried twice by the playback watchdog, then skipped; each retry goes through a fresh extraction rather than reusing the dead URL.
+- Extraction errors are shortened, capped, and stripped of signed URLs before they reach the footer. `ytmtui status` reports missing yt-dlp/mpv and whether a JavaScript runtime is on `PATH`.
+- No Rust-native extractor is bundled: implementing YouTube signature/cipher handling and PO Tokens would duplicate a fast-moving, security-sensitive surface and add significant maintenance and dependency weight.
+
+Advanced yt-dlp behavior (player clients, PO Token providers, impersonation) can be configured in yt-dlp's own config or plugins; ytmtui deliberately does not hardcode those choices.
+
+---
+
 ## ⌨️ Keybindings
 
 | Key | Action |
@@ -381,7 +400,7 @@ If no palette is found, a built-in **green** fallback is used.
 ## 🛠️ CLI helpers
 
 ```bash
-ytmtui status            # show the signed-in account and Last.fm status
+ytmtui status            # show the signed-in account, Last.fm and playback tooling
 ytmtui playlists         # list library playlists, artists and channels
 ytmtui liked             # list liked songs
 ytmtui tracks <id>       # list tracks of a playlist / album / artist

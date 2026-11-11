@@ -33,7 +33,7 @@ fn print_help() {
     println!("  ytmtui setup [--manual]      Interactive setup for YouTube Music and Last.fm");
     println!("  ytmtui setup lastfm          Configure Last.fm scrobbling directly");
     println!("  ytmtui setup --browser NAME  Try extracting cookies from a browser");
-    println!("  ytmtui status                Show the signed-in account and Last.fm status");
+    println!("  ytmtui status                Show accounts, Last.fm and playback tooling");
     println!("  ytmtui playlists             List your library playlists");
     println!("  ytmtui liked                 List your liked songs");
     println!("  ytmtui tracks <id>           List tracks of a playlist/album/artist");
@@ -123,6 +123,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None => println!("Not signed in. Run `ytmtui setup` to sign in."),
                 }
                 println!("{}", lastfm::status_line());
+                for line in player::tool_status_lines() {
+                    println!("{line}");
+                }
                 return Ok(());
             }
             "playlists" | "library" => {

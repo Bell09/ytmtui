@@ -145,8 +145,8 @@ type PageFetchResult = (u64, PageFetch);
 /// Finished offline-folder scan: generation plus the tracks it found.
 type OfflineScanResult = (u64, Vec<Track>);
 
-/// Resolved stream URL for the next queue track, or why it failed.
-type PrefetchResult = (String, Result<String, String>);
+/// Resolved next-track stream (URL plus headers), or why it failed.
+type PrefetchResult = (String, Result<crate::player::Stream, crate::player::ExtractError>);
 
 /// Finished Auto Queue recommendation request: sequence number and result.
 type AutoQueueFetch = (u64, Result<Vec<Track>, String>);
@@ -357,8 +357,11 @@ pub struct App {
     /// auto-advances.
     queued_next_id: Option<String>,
     /// Next track's resolved stream, keyed by video id and when it arrived.
-    prefetch: Option<(String, String, Instant)>,
+    prefetch: Option<(String, crate::player::Stream, Instant)>,
     prefetch_inflight: Option<String>,
+    /// Last background extraction failure (track id plus message), shown if
+    /// playback of that same track then fails.
+    last_extract_error: Option<(String, String)>,
     prefetch_tx: tokio::sync::mpsc::UnboundedSender<PrefetchResult>,
     prefetch_rx: tokio::sync::mpsc::UnboundedReceiver<PrefetchResult>,
     /// Auto Queue policy plus its single in-flight recommendation request.
@@ -754,6 +757,7 @@ impl App {
             queued_next_id: None,
             prefetch: None,
             prefetch_inflight: None,
+            last_extract_error: None,
             prefetch_tx,
             prefetch_rx,
             auto_queue: crate::auto_queue::AutoQueue::new(
@@ -1130,27 +1134,37 @@ impl App {
             if self.prefetch_inflight.as_deref() == Some(id.as_str()) {
                 self.prefetch_inflight = None;
             }
-            if let Ok(url) = result {
-                let id_clone = id.clone();
-                let url_clone = url.clone();
-                self.prefetch = Some((id, url, Instant::now()));
-                if !self.mpv_queued_next
-                    && self.playback_state == PlaybackState::Playing
-                {
-                    if let Some(track) = self.queue.iter().find(|t| t.id == id_clone) {
-                        match self.player
-                            .queue_next(&track.id, Some(&url_clone))
-                        {
-                            Ok(()) => {
-                                self.mpv_queued_next = true;
-                                self.queued_next_id = Some(id_clone);
-                            }
-                            Err(_) => {
-                                // mpv may not be ready yet; fall back to
-                                // loadfile replace when the track starts.
+            match result {
+                Ok(stream) => {
+                    self.last_extract_error = None;
+                    if !self.mpv_queued_next
+                        && self.playback_state == PlaybackState::Playing
+                    {
+                        if let Some(track) = self.queue.iter().find(|t| t.id == id) {
+                            match self.player.queue_next(&track.id, Some(&stream)) {
+                                Ok(()) => {
+                                    self.mpv_queued_next = true;
+                                    self.queued_next_id = Some(id.clone());
+                                }
+                                Err(_) => {
+                                    // mpv may not be ready yet; fall back to
+                                    // loadfile replace when the track starts.
+                                }
                             }
                         }
                     }
+                    self.prefetch = Some((id, stream, Instant::now()));
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    // A missing extractor affects every track, so say so now
+                    // instead of waiting for the playback watchdog.
+                    if matches!(error, crate::player::ExtractError::MissingTool) {
+                        self.status_message = message.clone();
+                    }
+                    // Keep the message for the failure path: mpv may still
+                    // succeed through its own ytdl hook.
+                    self.last_extract_error = Some((id, message));
                 }
             }
         }
@@ -2816,9 +2830,9 @@ impl App {
         let prefetched = if retry { None } else { self.take_prefetch(&t.id) };
         let result = if let Some(position) = start {
             self.player
-                .play_at(&t.id, prefetched.as_deref(), position, paused)
+                .play_at(&t.id, prefetched.as_ref(), position, paused)
         } else {
-            match self.player.play_with(&t.id, prefetched.as_deref()) {
+            match self.player.play_with(&t.id, prefetched.as_ref()) {
                 Err(_) if prefetched.is_some() => self.player.play(&t.id),
                 other => other,
             }
@@ -2892,18 +2906,23 @@ impl App {
         tokio::spawn(async move {
             let id = video.clone();
             let result = tokio::task::spawn_blocking(move || {
-                crate::player::resolve_stream(&video).map_err(|e| e.to_string())
+                crate::player::resolve_stream(&video)
             })
             .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+            .unwrap_or_else(|e| {
+                Err(crate::player::ExtractError::Failed {
+                    message: format!("Extraction task failed: {e}"),
+                    transient: false,
+                })
+            });
             let _ = tx.send((id, result));
         });
     }
 
-    /// Hand back the prefetched URL for `id` if it is still fresh.
-    fn take_prefetch(&mut self, id: &str) -> Option<String> {
-        let (cached_id, url, at) = self.prefetch.take()?;
-        (cached_id == id && at.elapsed() < PREFETCH_TTL).then_some(url)
+    /// Hand back the prefetched stream for `id` if it is still fresh.
+    fn take_prefetch(&mut self, id: &str) -> Option<crate::player::Stream> {
+        let (cached_id, stream, at) = self.prefetch.take()?;
+        (cached_id == id && at.elapsed() < PREFETCH_TTL).then_some(stream)
     }
 
     /// Drain a finished Auto Queue request. Stale replies (queue edited,
@@ -3100,12 +3119,21 @@ impl App {
             return;
         }
         self.playback_retries = 0;
-        self.status_message = format!("{} — skipping", reason);
+        let current_id = self.current_track.as_ref().map(|track| track.id.clone());
+        let extraction = self
+            .last_extract_error
+            .take()
+            .filter(|(id, _)| Some(id) == current_id.as_ref())
+            .map(|(_, error)| format!(" · {error}"))
+            .unwrap_or_default();
         match self.next_queue_index() {
-            Some(index) if index < self.queue.len() => self.jump_to(index),
+            Some(index) if index < self.queue.len() => {
+                self.status_message = format!("{} — skipping{extraction}", reason);
+                self.jump_to(index);
+            }
             _ => {
                 self.playback_state = PlaybackState::Stopped;
-                self.status_message = format!("Playback error: {}", reason);
+                self.status_message = format!("Playback error: {}{extraction}", reason);
             }
         }
     }
