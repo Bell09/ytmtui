@@ -338,7 +338,6 @@ As long as `~/.config/ytmtui/lastfm.json` holds valid credentials, every track i
 | `PgUp` / `PgDn` | Scroll lyrics or detail pane |
 | `q` | Quit |
 
----
 
 ## 🖼️ Views
 
