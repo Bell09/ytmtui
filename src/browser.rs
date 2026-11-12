@@ -321,6 +321,29 @@ fn read_chromium(db: &Path) -> Option<Vec<(String, String)>> {
     Some(cookies)
 }
 
+/// `ST-*` cookies are short-lived media tokens scoped to a single stream and
+/// can be several kilobytes each. Putting every one of them into the shared
+/// request header makes Innertube reject it with HTTP 413, so they must not be
+/// replayed against the account/library APIs.
+fn is_request_scoped_cookie(name: &str) -> bool {
+    name.starts_with("ST-")
+}
+
+/// Drop request-scoped tokens and collapse duplicate names (Firefox keeps one
+/// row per host/path). The last row wins because it is the freshest value.
+fn normalize_cookies(cookies: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(cookies.len());
+    for (name, value) in cookies.into_iter().rev() {
+        if is_request_scoped_cookie(&name) || !seen.insert(name.clone()) {
+            continue;
+        }
+        out.push((name, value));
+    }
+    out.reverse();
+    out
+}
+
 fn looks_authenticated(cookies: &[(String, String)]) -> bool {
     cookies.iter().any(|(n, _)| {
         n == "SAPISID" || n == "__Secure-3PAPISID" || n == "__Secure-1PAPISID"
@@ -334,7 +357,7 @@ fn try_browser(spec: &BrowserSpec) -> Option<Vec<(String, String)>> {
                 Kind::Firefox => read_firefox(&db),
                 Kind::Chromium => read_chromium(&db),
             };
-            if let Some(cookies) = cookies {
+            if let Some(cookies) = cookies.map(normalize_cookies) {
                 if looks_authenticated(&cookies) {
                     return Some(cookies);
                 }
@@ -366,4 +389,37 @@ pub fn cookie_header(cookies: &[(String, String)]) -> String {
         .map(|(n, v)| format!("{n}={v}"))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_scoped_stream_cookies_are_dropped() {
+        let cookies = vec![
+            ("SID".to_string(), "auth".to_string()),
+            ("ST-abc".to_string(), "large".to_string()),
+        ];
+        assert_eq!(
+            normalize_cookies(cookies),
+            vec![("SID".to_string(), "auth".to_string())]
+        );
+    }
+
+    #[test]
+    fn duplicate_cookie_names_keep_the_latest_value() {
+        let cookies = vec![
+            ("VISITOR_INFO1_LIVE".to_string(), "old".to_string()),
+            ("SID".to_string(), "auth".to_string()),
+            ("VISITOR_INFO1_LIVE".to_string(), "new".to_string()),
+        ];
+        assert_eq!(
+            normalize_cookies(cookies),
+            vec![
+                ("SID".to_string(), "auth".to_string()),
+                ("VISITOR_INFO1_LIVE".to_string(), "new".to_string()),
+            ]
+        );
+    }
 }
