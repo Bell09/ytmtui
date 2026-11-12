@@ -307,8 +307,6 @@ Once connected, scrobbling runs automatically — there is no switch to flip:
 
 As long as `~/.config/ytmtui/lastfm.json` holds valid credentials, every track is scrobbled. The header shows `· last.fm:<username>` in the accent colour while connected. Run `ytmtui setup lastfm` and choose **Disconnect** to stop scrobbling.
 
----
-
 
 ---
 
