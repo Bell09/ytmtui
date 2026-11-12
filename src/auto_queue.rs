@@ -46,6 +46,7 @@ struct Request {
     seq: u64,
     anchor: String,
     queue_version: u64,
+    invalidated: bool,
 }
 
 /// Small state machine for recommendation requests.
@@ -84,9 +85,12 @@ impl AutoQueue {
     /// Forget the last attempt so a mode change can be reconsidered, but keep
     /// an actual request tracked: the network task cannot be cancelled, and
     /// starting another would break the one-request-at-a-time bound. The
-    /// accept-time checks drop its reply if the mode really changed.
+    /// invalidation flag drops its reply even if the mode changes back.
     pub fn invalidate(&mut self) {
         self.attempted = None;
+        if let Some(request) = self.in_flight.as_mut() {
+            request.invalidated = true;
+        }
     }
 
     /// Return the sequence number for a newly started request, or `None` when
@@ -121,24 +125,28 @@ impl AutoQueue {
             seq,
             anchor: ctx.anchor.to_string(),
             queue_version: ctx.queue_version,
+            invalidated: false,
         });
         Some(seq)
     }
 
     /// Validate and consume a recommendation reply. Returns the fresh tracks
-    /// only when the request is still current; failures and stale replies are
-    /// silently discarded so playback is never interrupted.
-    pub fn accept(
+    /// only when the request is still current. Current failures can be shown
+    /// by the caller without interrupting playback; stale replies are dropped.
+    pub fn accept_result(
         &mut self,
         seq: u64,
         result: Result<Vec<Track>, String>,
         ctx: ApplyContext<'_>,
-    ) -> Option<Vec<Track>> {
+    ) -> Option<Result<Vec<Track>, String>> {
         let request = self.in_flight.as_ref()?;
         if request.seq != seq {
             return None;
         }
         let request = self.in_flight.take()?;
+        if request.invalidated {
+            return None;
+        }
         self.attempted = Some((request.anchor.clone(), request.queue_version));
 
         if !self.enabled
@@ -150,7 +158,17 @@ impl AutoQueue {
         {
             return None;
         }
-        result.ok()
+        Some(result)
+    }
+
+    #[cfg(test)]
+    fn accept(
+        &mut self,
+        seq: u64,
+        result: Result<Vec<Track>, String>,
+        ctx: ApplyContext<'_>,
+    ) -> Option<Vec<Track>> {
+        self.accept_result(seq, result, ctx).and_then(Result::ok)
     }
 }
 
@@ -362,5 +380,28 @@ mod tests {
         assert!(enabled_from_json("not json"));
         assert!(enabled_from_json(r#"{"auto_queue": true}"#));
         assert!(!enabled_from_json(r#"{"auto_queue": false}"#));
+    }
+    #[test]
+    fn toggling_off_and_on_drops_the_old_reply_then_allows_one_new_request() {
+        let mut auto = AutoQueue::new(true);
+        let seq = auto.should_request(request_ctx("a", 1)).unwrap();
+        auto.set_enabled(false);
+        auto.set_enabled(true);
+        assert!(auto.should_request(request_ctx("a", 1)).is_none());
+        assert!(
+            auto.accept_result(seq, Ok(vec![track("b")]), apply_ctx("a", 1))
+                .is_none()
+        );
+        assert!(auto.should_request(request_ctx("a", 1)).is_some());
+        assert!(auto.should_request(request_ctx("a", 1)).is_none());
+    }
+
+    #[test]
+    fn current_failure_is_reported_once_without_a_request_loop() {
+        let mut auto = AutoQueue::new(true);
+        let seq = auto.should_request(request_ctx("a", 1)).unwrap();
+        let result = auto.accept_result(seq, Err("HTTP 403".into()), apply_ctx("a", 1));
+        assert!(matches!(result, Some(Err(error)) if error == "HTTP 403"));
+        assert!(auto.should_request(request_ctx("a", 1)).is_none());
     }
 }

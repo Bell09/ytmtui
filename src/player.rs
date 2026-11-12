@@ -3,7 +3,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Current timeline reported by mpv.
@@ -13,6 +15,8 @@ pub struct Timeline {
     pub position: Option<f64>,
     /// Total duration in seconds, when known.
     pub duration: Option<f64>,
+    pub playlist_position: Option<u64>,
+    pub entry_id: Option<i64>,
 }
 
 /// How to load a track into mpv.
@@ -130,6 +134,39 @@ pub struct Player {
     /// Extra mpv arguments. Empty in production; the test suite uses it to
     /// run mpv without an audio device.
     extra_args: Vec<String>,
+    commands: SyncSender<IpcRequest>,
+    errors: Receiver<(u64, String)>,
+    error_tx: SyncSender<(u64, String)>,
+    generation: Arc<AtomicU64>,
+    resume: Arc<ResumeState>,
+}
+
+/// The low bits track active/paused; upper bits invalidate a pending seek.
+/// A compare-and-swap closes the race between restore completion and input.
+struct ResumeState {
+    mode: AtomicU64,
+    position: AtomicU64,
+}
+
+impl ResumeState {
+    fn new(position: f64, paused: bool) -> Self {
+        Self {
+            mode: AtomicU64::new(1 | ((paused as u64) << 1)),
+            position: AtomicU64::new(position.to_bits()),
+        }
+    }
+    fn active(&self) -> bool {
+        self.mode.load(Ordering::Acquire) & 1 != 0
+    }
+    fn cancel(&self) {
+        self.mode.fetch_and(!1, Ordering::AcqRel);
+    }
+}
+
+struct IpcRequest {
+    socket: String,
+    body: String,
+    generation: u64,
 }
 
 /// A socket path that no other player in this process uses. Two players (the
@@ -146,7 +183,40 @@ impl Player {
     }
 
     fn with_program(program: PathBuf) -> Self {
+        // One sleeping worker, with bounded queues. IPC acknowledgements never
+        // wait on the frame thread, and rapid input cannot grow memory forever.
+        let (commands, requests) = mpsc::sync_channel::<IpcRequest>(16);
+        let (error_tx, errors) = mpsc::sync_channel(16);
+        let generation = Arc::new(AtomicU64::new(0));
+        let current = generation.clone();
+        let worker_errors = error_tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(request) = requests.recv() {
+                if request.generation != current.load(Ordering::Acquire) {
+                    continue;
+                }
+                let result = UnixStream::connect(&request.socket)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|stream| {
+                        if request.generation != current.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
+                        exchange_commands(stream, &request.body)
+                    });
+                if let Err(error) = result {
+                    let _ = worker_errors.try_send((request.generation, error.to_string()));
+                }
+            }
+        });
         Self {
+            commands,
+            errors,
+            error_tx,
+            generation,
+            resume: Arc::new(ResumeState {
+                mode: AtomicU64::new(0),
+                position: AtomicU64::new(0),
+            }),
             process: None,
             socket_path: unique_socket_path(),
             program,
@@ -158,6 +228,13 @@ impl Player {
     /// only needs this string, so it never has to borrow the `Player`.
     pub fn socket_path(&self) -> &str {
         &self.socket_path
+    }
+
+    pub fn generation(&self) -> Arc<AtomicU64> {
+        self.generation.clone()
+    }
+    pub fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     /// Whether the wrapped mpv process is still alive.
@@ -207,17 +284,24 @@ impl Player {
         start_secs: f64,
         paused: bool,
     ) -> anyhow::Result<()> {
-        if self.is_running() {
-            self.stop();
-        }
+        self.stop();
         let target = self.resolve_target(track_id, stream);
         self.spawn_mpv(&target, stream, true)?;
         // Opening a network stream can take seconds, so the seek runs on a
         // background thread: the first frame is not held up by it.
         let socket = self.socket_path.clone();
         let position = resume_position(start_secs);
+        self.resume = Arc::new(ResumeState::new(position, paused));
+        let resume = self.resume.clone();
+        let errors = self.error_tx.clone();
+        let generation = self.current_generation();
         std::thread::spawn(move || {
-            let _ = apply_resume(&socket, position, paused);
+            if let Err(error) = apply_resume_guarded(&socket, &resume)
+                && resume.active()
+            {
+                let _ = errors.try_send((generation, error.to_string()));
+            }
+            resume.cancel();
         });
         Ok(())
     }
@@ -225,11 +309,10 @@ impl Player {
     /// Queue `track_id` after the currently playing track in mpv's playlist,
     /// for gapless playback. mpv will auto-advance to it when the current
     /// track finishes. Returns an error if mpv is not running.
-    pub fn queue_next(
-        &mut self,
-        track_id: &str,
-        stream: Option<&Stream>,
-    ) -> anyhow::Result<()> {
+    pub fn queue_next(&mut self, track_id: &str, stream: Option<&Stream>) -> anyhow::Result<()> {
+        if self.resume.active() {
+            anyhow::bail!("session restore is still loading");
+        }
         if !self.is_running() {
             anyhow::bail!("mpv is not running");
         }
@@ -267,7 +350,13 @@ impl Player {
 
         match mode {
             LoadMode::Replace => {
+                // A pending resume owns the old process. Terminating it also
+                // closes its IPC connection before any replacement can load.
+                if self.resume.active() {
+                    self.stop();
+                }
                 if self.is_running() {
+                    self.generation.fetch_add(1, Ordering::AcqRel);
                     self.playlist_clear()?;
                     self.load_target(&target, "replace", stream)
                 } else {
@@ -307,6 +396,9 @@ impl Player {
             "command": ["loadfile", target, mode]
         }))?);
         body.push('\n');
+        if mode == "replace" {
+            body.push_str("{\"command\":[\"set_property\",\"pause\",false]}\n");
+        }
         self.send_raw(&body)
     }
 
@@ -317,7 +409,30 @@ impl Player {
     }
 
     fn send_raw(&self, body: &str) -> anyhow::Result<()> {
-        send_to_socket(&self.socket_path, body)
+        let generation = self.current_generation();
+        if self
+            .commands
+            .try_send(IpcRequest {
+                socket: self.socket_path.clone(),
+                body: body.to_string(),
+                generation,
+            })
+            .is_err()
+        {
+            let message = "mpv command queue is busy".to_string();
+            let _ = self.error_tx.try_send((generation, message.clone()));
+            anyhow::bail!(message);
+        }
+        Ok(())
+    }
+
+    pub fn poll_error(&self) -> Option<String> {
+        while let Ok((generation, error)) = self.errors.try_recv() {
+            if generation == self.generation.load(Ordering::Acquire) {
+                return Some(error);
+            }
+        }
+        None
     }
 
     /// Spawn a fresh mpv process for `target`. Used for the first track and
@@ -334,6 +449,7 @@ impl Player {
         stream: Option<&Stream>,
         paused: bool,
     ) -> anyhow::Result<()> {
+        self.generation.fetch_add(1, Ordering::AcqRel);
         // Remove a socket left by a previous process; otherwise mpv can't bind.
         let _ = std::fs::remove_file(&self.socket_path);
 
@@ -391,20 +507,32 @@ impl Player {
 
     /// Toggle pause/resume via mpv's IPC socket.
     pub fn pause(&mut self) {
-        if let Ok(mut stream) = UnixStream::connect(&self.socket_path) {
-            let _ = stream.write_all(b"{\"command\":[\"cycle\",\"pause\"]}\n");
+        let mut mode = self.resume.mode.load(Ordering::Acquire);
+        while mode & 1 != 0 {
+            match self.resume.mode.compare_exchange(
+                mode,
+                mode ^ 2,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(current) => mode = current,
+            }
         }
+        let _ = self.send_command(&["cycle", "pause"]);
     }
 
     /// Seek to an absolute position via mpv's IPC socket.
     pub fn seek_to(&mut self, seconds: f64) {
-        if let Ok(mut stream) = UnixStream::connect(&self.socket_path) {
-            let cmd = format!(
-                "{{\"command\":[\"seek\",{:.3},\"absolute\"]}}\n",
-                seconds.max(0.0)
-            );
-            let _ = stream.write_all(cmd.as_bytes());
+        if self.resume.active() {
+            self.resume
+                .position
+                .store(resume_position(seconds).to_bits(), Ordering::Release);
+            if self.resume.mode.fetch_add(4, Ordering::AcqRel) & 1 != 0 {
+                return;
+            }
         }
+        let _ = self.send_command(&["seek", &format!("{:.3}", seconds.max(0.0)), "absolute"]);
     }
 
     /// Non-blocking check for mpv exiting on its own: status 0 is a normal
@@ -423,6 +551,8 @@ impl Player {
     }
 
     pub fn stop(&mut self) {
+        self.resume.cancel();
+        self.generation.fetch_add(1, Ordering::AcqRel);
         if let Some(mut p) = self.process.take() {
             let _ = p.kill();
             let _ = p.wait();
@@ -448,17 +578,85 @@ fn resume_position(seconds: f64) -> f64 {
 }
 
 /// Send a raw IPC command body to mpv's socket.
+#[cfg(test)]
 fn send_to_socket(socket_path: &str, body: &str) -> anyhow::Result<()> {
-    let mut stream = UnixStream::connect(socket_path)?;
-    stream.set_write_timeout(Some(Duration::from_millis(100)))?;
-    stream.write_all(body.as_bytes())?;
-    Ok(())
+    let stream = UnixStream::connect(socket_path)?;
+    exchange_commands(stream, body)
 }
 
-/// Send one IPC command to mpv.
-fn send_command_to(socket_path: &str, command: &[Value]) -> anyhow::Result<()> {
-    let body = serde_json::to_string(&json!({ "command": command }))? + "\n";
-    send_to_socket(socket_path, &body)
+/// Read every acknowledgement, ignoring unrelated events. Each request and
+/// reply is bounded; a broken peer cannot wedge the worker or allocate forever.
+fn exchange_commands(stream: UnixStream, body: &str) -> anyhow::Result<()> {
+    exchange_replies(stream, body).map(|_| ())
+}
+
+fn exchange_replies(mut stream: UnixStream, body: &str) -> anyhow::Result<Vec<Value>> {
+    static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    let count = body.lines().count();
+    let first_id = REQUEST_SEQUENCE.fetch_add(count as u64 + 1, Ordering::Relaxed);
+    let mut replies = vec![Value::Null; count];
+    stream.set_write_timeout(Some(Duration::from_millis(100)))?;
+    let mut pending = std::collections::HashSet::new();
+    let mut requests = String::new();
+    for (index, line) in body.lines().enumerate() {
+        let mut value: Value = serde_json::from_str(line)?;
+        let id = first_id + index as u64;
+        value["request_id"] = json!(id);
+        pending.insert(id);
+        requests.push_str(&serde_json::to_string(&value)?);
+        requests.push('\n');
+    }
+    stream.write_all(requests.as_bytes())?;
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut reader = BufReader::new(stream);
+    // Keep bytes across per-read timeouts, including a UTF-8 character
+    // split between reads. Decode only after the complete line arrives.
+    let mut line = Vec::new();
+    while !pending.is_empty() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        anyhow::ensure!(
+            !remaining.is_zero(),
+            "mpv command acknowledgement timed out"
+        );
+        reader
+            .get_ref()
+            .set_read_timeout(Some(remaining.min(Duration::from_millis(100))))?;
+        anyhow::ensure!(line.len() < 16 * 1024, "mpv reply exceeds size limit");
+        let available = (16 * 1024 - line.len()) as u64;
+        let count = match reader.by_ref().take(available).read_until(b'\n', &mut line) {
+            Ok(count) => count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        anyhow::ensure!(
+            count > 0 && line.ends_with(b"\n"),
+            "mpv sent an incomplete reply"
+        );
+        let reply: Value = serde_json::from_slice(&line)?;
+        line.clear();
+        let Some(id) = reply["request_id"].as_u64() else {
+            continue;
+        };
+        if !pending.remove(&id) {
+            continue;
+        }
+        replies[(id - first_id) as usize] = reply["data"].clone();
+        anyhow::ensure!(
+            reply["error"].as_str() == Some("success"),
+            "mpv rejected command: {}",
+            reply["error"].as_str().unwrap_or("missing status")
+        );
+    }
+    Ok(replies)
 }
 
 /// Ask mpv for a list of properties and collect the answers. The answers
@@ -523,6 +721,7 @@ fn read_properties(socket_path: &str, names: &[&str], timeout: Duration) -> Vec<
 
 /// Read one property from mpv's IPC socket. `None` when the answer does not
 /// arrive in time.
+#[cfg(test)]
 fn read_property(socket_path: &str, name: &str, timeout: Duration) -> Option<Value> {
     read_properties(socket_path, &[name], timeout)
         .into_iter()
@@ -530,94 +729,73 @@ fn read_property(socket_path: &str, name: &str, timeout: Duration) -> Option<Val
         .flatten()
 }
 
-/// Send a command and wait for mpv's answer. `true` when mpv accepted it.
-///
-/// A seek on a file that is not open yet is rejected, which is how the
-/// resume position knows when the track is ready.
-fn command_accepted(socket_path: &str, command: &[Value]) -> bool {
-    let Ok(mut stream) = UnixStream::connect(socket_path) else {
-        return false;
+/// Restore through one connection to the original process. Once connected,
+/// never reconnect: a later player may reuse the socket pathname.
+fn apply_resume_guarded(socket_path: &str, resume: &ResumeState) -> anyhow::Result<()> {
+    let deadline = Instant::now() + RESUME_WAIT;
+    let mut stream = loop {
+        anyhow::ensure!(resume.active(), "resume cancelled");
+        match UnixStream::connect(socket_path) {
+            Ok(stream) => break stream,
+            Err(error) if Instant::now() >= deadline => return Err(error.into()),
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
-    let request = json!({ "command": command, "request_id": 1 });
-    let Ok(body) = serde_json::to_string(&request) else {
-        return false;
-    };
-    if stream.write_all(body.as_bytes()).is_err() || stream.write_all(b"\n").is_err() {
-        return false;
-    }
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
+    // Keep the original connection alive, including while the file opens.
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => return false,
-            Ok(_) => {
-                let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                if value.get("request_id").and_then(Value::as_u64) != Some(1) {
+        anyhow::ensure!(resume.active(), "resume cancelled");
+        anyhow::ensure!(Instant::now() < deadline, "session restore timed out");
+        let mode = resume.mode.load(Ordering::Acquire);
+        let position = f64::from_bits(resume.position.load(Ordering::Acquire));
+        let paused = mode & 2 != 0;
+        // A zero position still waits for IPC readiness and acknowledges unpause.
+        let command = if position > 0.0 {
+            json!({"command": ["seek", format!("{position:.3}"), "absolute"]})
+        } else {
+            json!({"command": ["set_property", "pause", paused]})
+        };
+        let body = serde_json::to_string(&command)? + "\n";
+        if exchange_commands(stream.try_clone()?, &body).is_ok() {
+            if position > 0.0 {
+                // Seek acceptance can precede completion. Keep the original
+                // process paused until its timeline confirms that seek.
+                let values = exchange_replies(stream.try_clone()?,
+                    "{\"command\":[\"get_property\",\"time-pos\"]}\n{\"command\":[\"get_property\",\"duration\"]}\n").unwrap_or_default();
+                let current = values.first().and_then(Value::as_f64);
+                let duration = values.get(1).and_then(Value::as_f64);
+                if !current.is_some_and(|value| value >= position - 1.0)
+                    && !duration.is_some_and(|value| value > 0.0 && value <= position)
+                {
+                    std::thread::sleep(Duration::from_millis(50));
                     continue;
                 }
-                return value.get("error").and_then(Value::as_str) == Some("success");
+                anyhow::ensure!(resume.active(), "resume cancelled");
+                let body =
+                    serde_json::to_string(&json!({"command": ["set_property", "pause", paused]}))?
+                        + "\n";
+                exchange_commands(stream.try_clone()?, &body)?;
             }
-            Err(_) => return false,
+            if resume
+                .mode
+                .compare_exchange(mode, mode & !1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Ok(());
+            }
+            continue;
         }
+        // A process exit makes the connected socket unusable; never send a
+        // pending seek to a new process at the same filesystem path.
+        if stream.write_all(b"\n").is_err() {
+            anyhow::bail!("mpv disconnected during restore");
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
-/// Seek to `position` and keep asking until mpv reports the new position.
-///
-/// mpv only accepts a seek on a file that is open, and a network stream has
-/// to be extracted and connected first. The position is read back because
-/// mpv can accept a seek before the file is ready and then ignore it.
-/// `false` on timeout.
-fn seek_when_ready(socket_path: &str, position: f64, timeout: Duration) -> bool {
-    let command = [
-        json!("seek"),
-        json!(format!("{position:.3}")),
-        json!("absolute"),
-    ];
-    let deadline = Instant::now() + timeout;
-    loop {
-        // A position beyond the track's length is clamped by mpv: there is
-        // nothing to seek to.
-        let duration = read_property(socket_path, "duration", Duration::from_millis(500))
-            .and_then(|value| value.as_f64());
-        if duration.is_some_and(|seconds| seconds > 0.0 && seconds <= position) {
-            return true;
-        }
-        // The position shows both whether a file is open and whether the
-        // seek landed.
-        let current = read_property(socket_path, "time-pos", Duration::from_millis(500))
-            .and_then(|value| value.as_f64());
-        if current.is_some_and(|seconds| seconds >= position - 1.0) {
-            return true;
-        }
-        command_accepted(socket_path, &command);
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-/// Apply a resume position to the file mpv has open.
-///
-/// The seek belongs to the open file, so later tracks are unaffected and
-/// start at 0:00. The paused state is set afterwards: a restored session
-/// that was playing continues from its saved position, one that was paused
-/// stays paused there.
+#[cfg(test)]
 fn apply_resume(socket_path: &str, position: f64, paused: bool) -> anyhow::Result<()> {
-    if position > 0.0 {
-        seek_when_ready(socket_path, position, RESUME_WAIT);
-    }
-    send_command_to(
-        socket_path,
-        &[json!("set_property"), json!("pause"), json!(paused)],
-    )?;
-    Ok(())
+    apply_resume_guarded(socket_path, &ResumeState::new(position, paused))
 }
 
 /// Query an mpv IPC socket for `time-pos` and `duration`.
@@ -627,7 +805,7 @@ fn apply_resume(socket_path: &str, position: f64, paused: bool) -> anyhow::Resul
 pub fn timeline_path(socket_path: &str) -> Option<Timeline> {
     let answers = read_properties(
         socket_path,
-        &["time-pos", "duration"],
+        &["time-pos", "duration", "playlist-pos", "playlist"],
         Duration::from_millis(40),
     );
     let position = answers.first().and_then(|value| value.as_ref()).and_then(Value::as_f64);
@@ -635,6 +813,16 @@ pub fn timeline_path(socket_path: &str) -> Option<Timeline> {
     (position.is_some() || duration.is_some()).then_some(Timeline {
         position,
         duration,
+        playlist_position: answers
+            .get(2)
+            .and_then(|v| v.as_ref())
+            .and_then(Value::as_u64),
+        entry_id: answers
+            .get(3)
+            .and_then(|v| v.as_ref())
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.iter().find(|entry| entry["current"] == true))
+            .and_then(|entry| entry["id"].as_i64()),
     })
 }
 
@@ -1012,7 +1200,7 @@ fn js_runtime_status() -> String {
 }
 
 #[cfg(test)]
-mod player_tests {
+pub(crate) mod player_tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
@@ -1196,8 +1384,198 @@ mod player_tests {
         (path, receiver)
     }
 
+    pub(crate) fn recording_player() -> (Player, std::sync::mpsc::Receiver<String>) {
+        let (socket, commands) = fake_ipc_server("recording-player");
+        let mut player = Player::new();
+        player.socket_path = socket.to_string_lossy().into_owned();
+        player.process = Some(Command::new("sleep").arg("30").spawn().unwrap());
+        (player, commands)
+    }
+
     /// The restored track must not be started through `--start`: mpv would
     /// apply that position to every later track as well.
+    #[test]
+    fn zero_resume_waits_for_a_delayed_socket() {
+        if which("mpv").is_none() {
+            return;
+        }
+        let (dir, script) = temp_script("delayed-mpv", "#!/bin/sh\nsleep 0.3\nexec mpv \"$@\"\n");
+        let (audio_dir, source) = temp_wav("delayed-audio", 60);
+        let mut player = Player::with_program(script);
+        player.extra_args.push("--ao=null".into());
+        let local = crate::offline::local_id(&source);
+        player.play_at(&local, None, 0.0, false).unwrap();
+        assert!(wait_for_position(player.socket_path(), |position| position > 0.1));
+        player.stop();
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(audio_dir);
+    }
+
+    #[test]
+    fn switching_tracks_cancels_a_pending_resume() {
+        if which("mpv").is_none() {
+            return;
+        }
+        let (dir, script) = temp_script("slow-resume", "#!/bin/sh\nsleep 0.3\nexec mpv \"$@\"\n");
+        let (audio_dir, source) = temp_wav("cancel-resume", 60);
+        let mut player = Player::with_program(script);
+        player.extra_args.push("--ao=null".into());
+        let local = crate::offline::local_id(&source);
+        player.play_at(&local, None, 42.0, false).unwrap();
+        player.play(&local).unwrap();
+        assert!(wait_for_position(player.socket_path(), |position| position
+            > 0.1
+            && position < 5.0));
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(read_position(player.socket_path()).unwrap() < 5.0);
+        player.stop();
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(audio_dir);
+    }
+
+    #[test]
+    fn input_during_restore_controls_the_final_position_and_pause_state() {
+        if which("mpv").is_none() {
+            return;
+        }
+        let (dir, script) = temp_script("resume-input", "#!/bin/sh\nsleep 0.3\nexec mpv \"$@\"\n");
+        let (audio_dir, source) = temp_wav("resume-input-audio", 60);
+        let mut player = Player::with_program(script);
+        player.extra_args.push("--ao=null".into());
+        player
+            .play_at(&crate::offline::local_id(&source), None, 42.0, true)
+            .unwrap();
+        player.seek_to(12.0);
+        player.pause();
+        assert!(wait_for_position(player.socket_path(), |position| position
+            > 12.1
+            && position < 20.0));
+        assert_eq!(
+            read_property(player.socket_path(), "pause", Duration::from_millis(500)),
+            Some(json!(false))
+        );
+        player.stop();
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(audio_dir);
+    }
+
+    #[test]
+    fn ipc_reply_arriving_after_a_read_timeout_is_accepted() {
+        assert_eq!(delayed_ipc_reply(false), json!("café"));
+    }
+
+    #[test]
+    fn ipc_reply_fragment_survives_a_read_timeout() {
+        assert_eq!(delayed_ipc_reply(true), json!("café"));
+    }
+
+    fn delayed_ipc_reply(fragmented: bool) -> Value {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut line = String::new();
+            BufReader::new(server.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let reply = format!("{}\n", json!({
+                "request_id": request["request_id"],
+                "error": "success", "data": "café"
+            }));
+            let bytes = reply.as_bytes();
+            // Split inside a UTF-8 character to verify byte preservation
+            // as well as the acknowledgement deadline.
+            let split = if fragmented {
+                bytes.iter().position(|&byte| byte == 0xc3).unwrap() + 1
+            } else {
+                0
+            };
+            server.write_all(&bytes[..split]).unwrap();
+            std::thread::sleep(Duration::from_millis(220));
+            server.write_all(&bytes[split..]).unwrap();
+        });
+        let replies = exchange_replies(client, "{\"command\":[\"get_property\",\"title\"]}\n")
+            .expect("reply within the 500 ms deadline");
+        peer.join().unwrap();
+        replies[0].clone()
+    }
+
+    #[test]
+    fn ipc_reply_timeout_respects_the_overall_deadline() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            // Hold the socket open until the client reaches its deadline.
+            reader.get_ref().set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            reader.read_to_end(&mut Vec::new()).unwrap();
+        });
+        let started = Instant::now();
+        let error = exchange_replies(client, "{\"command\":[\"cycle\",\"pause\"]}\n")
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        peer.join().unwrap();
+        assert!(error.to_string().contains("acknowledgement timed out"), "{error}");
+        assert!(elapsed >= Duration::from_millis(450), "{elapsed:?}");
+        assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+    }
+
+    #[test]
+    fn rejected_ipc_commands_are_reported() {
+        let (path, _commands) = fake_ipc_server("error-location");
+        // Replace the normal server's path with a rejecting peer.
+        let rejected_path = path.with_file_name("rejected.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&rejected_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            stream.write_all(b"{\"event\":\"idle\"}\n").unwrap();
+            writeln!(
+                stream,
+                "{}",
+                json!({"request_id": request["request_id"], "error": "invalid parameter"})
+            )
+            .unwrap();
+        });
+        let error = send_to_socket(
+            rejected_path.to_str().unwrap(),
+            "{\"command\":[\"seek\",\"bad\"]}\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid parameter"));
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn an_unresponsive_ipc_peer_does_not_block_the_caller() {
+        let path = unique_socket_path();
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+        });
+        let mut player = Player::new();
+        player.socket_path = path.clone();
+        let started = Instant::now();
+        player.send_command(&["cycle", "pause"]).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if player.poll_error().is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        server.join().unwrap();
+        let _ = fs::remove_file(path);
+    }
+
     #[test]
     fn a_restored_track_is_never_started_with_a_start_option() {
         let (dir, script) = fake_mpv("resume-start");
@@ -1256,6 +1634,10 @@ mod player_tests {
         assert!(replace.contains("loadfile"));
         assert!(replace.contains("replace"));
         assert!(!replace.contains("start"));
+        let unpause = commands
+            .recv_timeout(Duration::from_secs(2))
+            .expect("unpause");
+        assert!(unpause.contains("pause"));
 
         // The gapless append used by the queue is just as position-free.
         player
@@ -1410,6 +1792,9 @@ mod player_tests {
             current_path(&socket),
             read_position(&socket)
         );
+        let timeline = timeline_path(&socket).expect("queued timeline");
+        assert_eq!(timeline.playlist_position, Some(1));
+        assert!(timeline.entry_id.is_some());
         let position = read_position(&socket).unwrap_or(-1.0);
         assert!(
             position < 5.0,
@@ -1451,7 +1836,9 @@ mod player_tests {
         socket_path: &str,
         condition: impl Fn(f64) -> bool,
     ) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        // Generous: the whole suite runs several real-mpv tests in parallel
+        // and a loaded machine can delay mpv's first reply.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             if let Some(position) = read_position(socket_path) {
                 if condition(position) {

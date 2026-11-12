@@ -543,32 +543,70 @@ pub fn download_path(music_dir: &Path, track: &Track) -> PathBuf {
     out_dir.join(format!("{}.mp3", stem))
 }
 
-/// Pick a free filename next to `base`: `Title.mp3`, `Title (2).mp3`, …
-/// Used when a path already belongs to a different video (or an unregistered
-/// legacy file) so a download never overwrites someone else's audio.
-fn unique_audio_path(base: &Path) -> PathBuf {
-    if !base.exists() {
-        return base.to_path_buf();
+/// Reserve the destination atomically and download into a private directory.
+/// Publishing with a hard link is atomic and refuses to overwrite an existing
+/// file, including one created by another program while the download runs.
+struct AudioReservation {
+    audio: PathBuf,
+    staging: PathBuf,
+}
+
+impl Drop for AudioReservation {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.staging);
     }
-    let stem = base
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "track".to_string());
+}
+
+fn reserve_audio_path(base: &Path) -> anyhow::Result<AudioReservation> {
+    let stem = base.file_stem().unwrap_or_default().to_string_lossy();
     let parent = base.parent().unwrap_or_else(|| Path::new("."));
-    for n in 2..10_000 {
-        let candidate = parent.join(format!("{stem} ({n}).mp3"));
-        if !candidate.exists() {
-            return candidate;
+    for n in 1..10_000 {
+        let audio = if n == 1 {
+            base.to_path_buf()
+        } else {
+            parent.join(format!("{stem} ({n}).mp3"))
+        };
+        if audio.exists() {
+            continue;
+        }
+        let staging = parent.join(format!(
+            ".{}.ytmtui-download",
+            audio.file_name().unwrap().to_string_lossy()
+        ));
+        match std::fs::create_dir(&staging) {
+            Ok(()) => {
+                let reservation = AudioReservation { audio, staging };
+                if !reservation.audio.exists() {
+                    return Ok(reservation);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
         }
     }
-    // Practically unreachable; the timestamp keeps the name unique.
-    parent.join(format!(
-        "{stem} ({}).mp3",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    ))
+    anyhow::bail!("could not reserve a free download filename")
+}
+
+/// Prefer an atomic link; some music folders live on filesystems without
+/// hard links, where an exclusive destination and bounded copy preserve the
+/// same no-overwrite guarantee.
+fn publish_audio(source: &Path, destination: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(source, destination) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Err(error),
+        Err(_) => {}
+    }
+    let mut input = std::fs::File::open(source)?;
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    if let Err(error) = std::io::copy(&mut input, &mut output).and_then(|_| output.sync_all()) {
+        drop(output);
+        let _ = std::fs::remove_file(destination);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Download one song into the music folder, cover embedded in the audio.
@@ -601,19 +639,13 @@ where
     // (e.g. a download interrupted after yt-dlp finished but before the
     // registry was saved). Anything else gets a fresh name so a title
     // collision can't overwrite or mislabel a different song.
-    let audio = if base.is_file() && existing_owner == Some(track.id.as_str()) {
-        base
-    } else {
-        unique_audio_path(&base)
-    };
-    if audio.is_file() {
-        return Ok(entry_for(audio, track));
+    if base.is_file() && existing_owner == Some(track.id.as_str()) {
+        return Ok(entry_for(base, track));
     }
-    let stem = audio
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "track".to_string());
-    let template = out_dir.join(format!("{}.%(ext)s", stem));
+    let reservation = std::sync::Arc::new(reserve_audio_path(&base)?);
+    let audio = reservation.audio.clone();
+    let staged_audio = reservation.staging.join("audio.mp3");
+    let template = reservation.staging.join("audio.%(ext)s");
 
     // yt-dlp and ffmpeg are blocking child processes; keep them off the async
     // runtime's threads so frames keep drawing while it downloads.
@@ -622,7 +654,9 @@ where
         let url = url.to_string();
         let template = template.display().to_string();
         let progress = progress.clone();
+        let reservation = reservation.clone();
         tokio::task::spawn_blocking(move || {
+            let _reservation = reservation;
             ytdlp(&url, &template, true, progress.as_ref())
         })
         .await
@@ -632,7 +666,9 @@ where
         let url = url.to_string();
         let template = template.display().to_string();
         let progress = progress.clone();
+        let reservation = reservation.clone();
         let retry = tokio::task::spawn_blocking(move || {
+            let _reservation = reservation;
             ytdlp(&url, &template, false, progress.as_ref())
         })
         .await
@@ -644,12 +680,15 @@ where
     }
 
     // `-x --audio-format mp3` plus the template fixes the name exactly.
-    if !audio.is_file() {
-        anyhow::bail!(
-            "download finished but no audio file appeared at {}",
-            audio.display()
-        );
+    if !staged_audio.is_file() {
+        anyhow::bail!("download finished but no audio file appeared");
     }
+    publish_audio(&staged_audio, &audio).map_err(|error| {
+        anyhow::anyhow!(
+            "could not publish downloaded audio without overwriting {}: {error}",
+            audio.display()
+        )
+    })?;
     Ok(entry_for(audio, track))
 }
 
@@ -699,11 +738,15 @@ mod tests {
 
         // A path that is already taken is never returned: the other file may
         // belong to a different video or be an unregistered legacy download.
-        let fresh = unique_audio_path(&base);
-        assert_eq!(fresh.file_name().unwrap(), "Song (2).mp3");
-        std::fs::write(&fresh, b"new audio").unwrap();
+        let fresh = reserve_audio_path(&base).unwrap();
+        assert_eq!(fresh.audio.file_name().unwrap(), "Song (2).mp3");
+        std::fs::write(&fresh.audio, b"new audio").unwrap();
         assert_eq!(
-            unique_audio_path(&base).file_name().unwrap(),
+            reserve_audio_path(&base)
+                .unwrap()
+                .audio
+                .file_name()
+                .unwrap(),
             "Song (3).mp3"
         );
         // The original bytes were not touched.
@@ -784,5 +827,60 @@ mod tests {
         assert_eq!(tracks.len(), 2000);
         println!("scan of {} files: {:?}", tracks.len(), elapsed);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_reservations_publish_different_files_and_clean_staging() {
+        let root = std::env::temp_dir().join(format!("ytmtui-reservations-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers: Vec<_> = (0..2)
+            .map(|index| {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let reservation = reserve_audio_path(&root.join("Song.mp3")).unwrap();
+                    barrier.wait();
+                    let source = reservation.staging.join("audio.mp3");
+                    std::fs::write(&source, [index]).unwrap();
+                    publish_audio(&source, &reservation.audio).unwrap();
+                    reservation.audio.clone()
+                })
+            })
+            .collect();
+        let paths: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_ne!(paths[0], paths[1]);
+        assert_ne!(
+            std::fs::read(&paths[0]).unwrap(),
+            std::fs::read(&paths[1]).unwrap()
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn publishing_refuses_to_overwrite_an_external_file() {
+        let root = std::env::temp_dir().join(format!("ytmtui-publish-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let reservation = reserve_audio_path(&root.join("Song.mp3")).unwrap();
+        let source = reservation.staging.join("audio.mp3");
+        std::fs::write(&source, b"new audio").unwrap();
+        std::fs::write(&reservation.audio, b"external audio").unwrap();
+        assert!(publish_audio(&source, &reservation.audio).is_err());
+        assert_eq!(
+            std::fs::read(&reservation.audio).unwrap(),
+            b"external audio"
+        );
+        drop(reservation);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

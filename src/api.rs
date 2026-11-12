@@ -698,8 +698,28 @@ impl YtmApi {
             "videoId": video_id,
             "playlistId": format!("RDAMVM{video_id}"),
         });
-        let value = self.post_innertube(NEXT_URL, &body).await?;
+        let value = self.post_recommendations(NEXT_URL, &body).await?;
         Ok(parse_similar_tracks(&value, video_id, limit))
+    }
+
+    /// One retry for connection failures and server errors; authentication
+    /// errors and empty recommendations never cause a retry loop.
+    async fn post_recommendations(&self, url: &str, body: &Value) -> anyhow::Result<Value> {
+        match self.post_innertube(url, body).await {
+            Err(error)
+                if error.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+                    error.is_timeout()
+                        || error.is_connect()
+                        || error
+                            .status()
+                            .is_some_and(|status| status.is_server_error())
+                }) =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                self.post_innertube(url, body).await
+            }
+            result => result,
+        }
     }
 
     async fn browse(&self, body: &Value) -> anyhow::Result<Value> {
@@ -735,8 +755,21 @@ impl YtmApi {
     /// with HTTP 400 (which silently loses the timed-lyrics model).
     async fn post_innertube(&self, base_url: &str, body: &Value) -> anyhow::Result<Value> {
         let url = format!("{}&key={}", base_url, API_KEY);
-        let resp = self.client.post(url).json(body).send().await?;
-        Ok(resp.json().await?)
+        let resp = self
+            .client
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
+        let value: Value = resp.json().await.map_err(reqwest::Error::without_url)?;
+        anyhow::ensure!(
+            value.get("error").is_none(),
+            "YouTube Music returned an API error"
+        );
+        Ok(value)
     }
 
     /// Rate the current song for the heart key: `like` adds it to Liked
@@ -1876,8 +1909,11 @@ fn row_set_video_id(renderer: &Value) -> Option<String> {
         .iter()
         .find_map(|item| {
             item.pointer(
-                "/menuServiceItemRenderer/playlistEditEndpoint/actions/0/setVideoId",
+                "/menuServiceItemRenderer/serviceEndpoint/playlistEditEndpoint/actions/0/setVideoId",
             )
+            .or_else(|| {
+                item.pointer("/menuServiceItemRenderer/playlistEditEndpoint/actions/0/setVideoId")
+            })
             .and_then(Value::as_str)
             .map(str::to_string)
         })
@@ -1971,6 +2007,42 @@ fn is_duration(s: &str) -> bool {
 mod browse_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn reads_removal_token_from_playlist_service_endpoint() {
+        let row = json!({
+            "playlistItemData": {"videoId": "song"},
+            "flexColumns": [{"musicResponsiveListItemFlexColumnRenderer": {
+                "text": {"runs": [{"text": "Song"}]}
+            }}],
+            "menu": {"menuRenderer": {"items": [{
+                "menuServiceItemRenderer": {"serviceEndpoint": {
+                    "playlistEditEndpoint": {"actions": [{
+                        "action": "ACTION_REMOVE_VIDEO",
+                        "setVideoId": "membership-2",
+                        "removedVideoId": "song"
+                    }]}
+                }}
+            }]}}
+        });
+        let track = parse_item(&row).expect("playlist song");
+        assert_eq!(track.set_video_id.as_deref(), Some("membership-2"));
+
+        // Equal video IDs can have different membership IDs. Do not mix
+        // them up when the playlist contains the same song more than once.
+        let mut duplicate = row.clone();
+        duplicate["menu"]["menuRenderer"]["items"][0]["menuServiceItemRenderer"]
+            ["serviceEndpoint"]["playlistEditEndpoint"]["actions"][0]["setVideoId"] =
+            json!("membership-3");
+        assert_eq!(parse_item(&duplicate).unwrap().set_video_id.as_deref(), Some("membership-3"));
+        assert_eq!(row_set_video_id(&json!({})), None);
+        let legacy = json!({"menu": {"menuRenderer": {"items": [{
+            "menuServiceItemRenderer": {"playlistEditEndpoint": {
+                "actions": [{"setVideoId": "legacy-membership"}]
+            }}
+        }]}}});
+        assert_eq!(row_set_video_id(&legacy).as_deref(), Some("legacy-membership"));
+    }
 
     #[test]
     fn strips_browse_prefix_for_playlist_edits() {
@@ -2321,5 +2393,84 @@ mod browse_tests {
         assert!(shelves.iter().any(|s| s.title == "Albums"));
         assert!(shelves.iter().any(|s| s.title == "Singles & EPs"));
         assert!(shelves.iter().any(|s| s.title == "Top songs"));
+    }
+}
+
+#[cfg(test)]
+mod http_error_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    fn consume_request(stream: &std::net::TcpStream) {
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+        assert!(length < 4096);
+        reader.read_exact(&mut vec![0; length]).unwrap();
+    }
+    #[tokio::test]
+    async fn auto_queue_http_error_is_reported_without_exposing_request_url() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            consume_request(&stream);
+            let body = r#"{"error":{"code":403,"message":"simulated rejection"}}"#;
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let api = YtmApi::new();
+        let error = api
+            .post_recommendations(
+                &format!("http://{address}/next?prettyPrint=false"),
+                &json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("403"));
+        assert!(!error.to_string().contains("key="));
+        assert!(!error.to_string().contains(&address.to_string()));
+        server.join().unwrap();
+    }
+    #[tokio::test]
+    async fn recommendations_retry_a_server_error_once() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (status, body) in [
+                ("503 Service Unavailable", r#"{"error":{}}"#),
+                ("200 OK", r#"{"ok":true}"#),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                consume_request(&stream);
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let api = YtmApi::new();
+        let value = api
+            .post_recommendations(
+                &format!("http://{address}/next?prettyPrint=false"),
+                &json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(value["ok"], true);
+        server.join().unwrap();
     }
 }

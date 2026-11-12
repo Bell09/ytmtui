@@ -20,10 +20,10 @@ type SearchResult = (u64, String, Result<SearchResults, String>);
 /// user has since opened.
 type CollectionResult = (u64, String, Result<Vec<Track>, String>);
 
-/// One background mpv timeline sample: sequence number and the reply (or
+/// One background mpv timeline sample: sequence, playback generation and reply (or
 /// `None` when the socket did not answer). Sampling off the UI thread keeps a
 /// wedged mpv from adding its timeout to input latency.
-type TimelineSample = (u64, Option<Timeline>);
+type TimelineSample = (u64, u64, Option<Timeline>);
 
 /// Finished library fetch: its generation plus playlists or an error. The
 /// generation lets a newer request supersede an in-flight one, e.g. when
@@ -376,6 +376,7 @@ pub struct App {
     /// `loadfile append-play` for gapless playback. Reset when the track
     /// changes or the user skips/stops.
     mpv_queued_next: bool,
+    mpv_entry_id: Option<i64>,
     /// The video id of the track queued in mpv's playlist (when
     /// `mpv_queued_next` is true). Used to update `current_track` when mpv
     /// auto-advances.
@@ -468,9 +469,10 @@ pub struct App {
     /// song from the account entirely.
     like_cmd_tx: tokio::sync::mpsc::UnboundedSender<LikeRequest>,
     like_rx: tokio::sync::mpsc::UnboundedReceiver<LikeResult>,
-    /// Bumped on every `L` press — only the latest press's reply may
-    /// change the state back.
+    /// Global sequence for scheduling liked-list refreshes. Pending replies
+    /// are compared per track, preserving the last confirmed rating.
     like_generation: u64,
+    pending_likes: HashMap<String, (u64, Track)>,
     /// When to re-sync the visible liked-songs list with the server
     /// (VLLM's listing converges ~5-6s after a rating change), and the
     /// press generation that scheduled it.
@@ -678,6 +680,7 @@ impl App {
         // inline. Samples are stamped so only the newest one is applied.
         let player = Player::new();
         let timeline_socket = player.socket_path().to_string();
+        let player_generation = player.generation();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let timeline_tx = timeline_tx.clone();
             handle.spawn(async move {
@@ -686,8 +689,12 @@ impl App {
                 loop {
                     ticker.tick().await;
                     seq = seq.wrapping_add(1);
+                    let generation = player_generation.load(std::sync::atomic::Ordering::Acquire);
                     let sample = crate::player::timeline_path(&timeline_socket);
-                    if timeline_tx.send((seq, sample)).is_err() {
+                    if generation != player_generation.load(std::sync::atomic::Ordering::Acquire) {
+                        continue;
+                    }
+                    if timeline_tx.send((seq, generation, sample)).is_err() {
                         break;
                     }
                 }
@@ -775,6 +782,7 @@ impl App {
             audio_started: false,
             track_end_reported: false,
             mpv_queued_next: false,
+            mpv_entry_id: None,
             queued_next_id: None,
             prefetch: None,
             prefetch_inflight: None,
@@ -824,6 +832,7 @@ impl App {
             like_cmd_tx,
             like_rx,
             like_generation: 0,
+            pending_likes: HashMap::new(),
             like_refresh_at: None,
             like_refresh_tx,
             like_refresh_rx,
@@ -1035,23 +1044,38 @@ impl App {
         // A failed heart toggle rolls its optimistic flip back — unless a
         // newer press owns the state now (rapid `L L` double-toggles).
         while let Ok((id, want, generation, result)) = self.like_rx.try_recv() {
-            if generation != self.like_generation {
+            let Some((latest, _)) = self.pending_likes.get(&id) else {
                 continue;
-            }
-            // Only the playing track's heart was flipped optimistically;
-            // a row pressed inside Liked Music shows its own truth again
-            // when the scheduled liked-list re-sync lands.
-            if self.current_track.as_ref().is_none_or(|t| t.id != id) {
-                if let Err(e) = result {
-                    self.status_message = format!("Failed to update like — {e}");
+            };
+            if generation != *latest {
+                if result.is_ok()
+                    && let Some(pending) = self.pending_likes.get_mut(&id)
+                {
+                    pending.1.like = Some(want);
                 }
                 continue;
             }
-            if let Err(e) = result {
-                if let Some(track) = self.current_track.as_mut() {
-                    track.like = Some(!want);
+            let Some((_, previous)) = self.pending_likes.remove(&id) else {
+                continue;
+            };
+            if let Err(error) = result {
+                if let Some(track) = self.current_track.as_mut().filter(|t| t.id == id) {
+                    track.like = previous.like;
                 }
-                self.status_message = format!("Failed to update like — {e}");
+                for track in self
+                    .queue
+                    .iter_mut()
+                    .chain(self.playlist_tracks.iter_mut())
+                    .chain(self.preview_tracks.iter_mut())
+                    .filter(|track| track.id == id)
+                {
+                    track.like = previous.like;
+                }
+                self.like_view_edit(&previous, previous.like == Some(true));
+                self.preview_cache.remove(LIKED_PLAYLIST);
+                // Refresh even when this failed toggle named another song.
+                self.like_refresh_at = Some((Instant::now(), self.like_generation));
+                self.status_message = format!("Failed to update like — {error}");
             }
         }
         // Finished "add to playlist" — success or error lands in the
@@ -1155,25 +1179,16 @@ impl App {
             if self.prefetch_inflight.as_deref() == Some(id.as_str()) {
                 self.prefetch_inflight = None;
             }
+            if self
+                .next_queue_index()
+                .and_then(|index| self.queue.get(index))
+                .is_none_or(|track| track.id != id)
+            {
+                continue;
+            }
             match result {
                 Ok(stream) => {
                     self.last_extract_error = None;
-                    if !self.mpv_queued_next
-                        && self.playback_state == PlaybackState::Playing
-                    {
-                        if let Some(track) = self.queue.iter().find(|t| t.id == id) {
-                            match self.player.queue_next(&track.id, Some(&stream)) {
-                                Ok(()) => {
-                                    self.mpv_queued_next = true;
-                                    self.queued_next_id = Some(id.clone());
-                                }
-                                Err(_) => {
-                                    // mpv may not be ready yet; fall back to
-                                    // loadfile replace when the track starts.
-                                }
-                            }
-                        }
-                    }
                     self.prefetch = Some((id, stream, Instant::now()));
                 }
                 Err(error) => {
@@ -1192,10 +1207,24 @@ impl App {
         // A finished recommendation extends the queue before this tick's
         // playback transitions, then its first track is prefetched.
         self.poll_auto_queue();
+        self.sync_gapless_queue();
         // Widget actions (MPRIS + queue IPC) apply before this tick's own
         // transitions.
         self.apply_mpris_commands();
         self.apply_ipc_commands();
+        self.sync_gapless_queue();
+        if let Some(error) = self.player.poll_error() {
+            self.player.stop();
+            self.mpv_queued_next = false;
+            self.queued_next_id = None;
+            if matches!(
+                self.playback_state,
+                PlaybackState::Playing | PlaybackState::Buffering | PlaybackState::Paused
+            ) {
+                self.recover_playback(&format!("mpv command failed: {error}"));
+            }
+            self.status_message = format!("Playback command failed: {error}");
+        }
         // Follow mpv's own clock. A file is only marked playing once mpv
         // reports a positive time, so the progress bar and lyrics begin with
         // the audible audio. There is deliberately no wall-clock fallback:
@@ -1763,6 +1792,8 @@ impl App {
                     self.search_filters = curate_filters(results.filters);
                 }
                 if results.hits.is_empty() {
+                    self.search_results.clear();
+                    self.selected_index = 0;
                     self.status_message = format!("No results for '{}'", query);
                 } else {
                     let mut hits = results.hits;
@@ -2800,10 +2831,8 @@ impl App {
     /// stream failure does not silently restart the song from zero.
     ///
     /// A retry deliberately skips the prefetched URL, since that URL is the
-    /// one that just failed. If mpv auto-advanced to this track via gapless
-    /// playlist playback (`mpv_queued_next` is set), the track is already
-    /// loaded — skip the `loadfile replace` that would cause a gap, and just
-    /// adopt the state.
+    /// one that just failed. Manual selections always replace playback;
+    /// confirmed gapless transitions use `adopt_gapless_track` instead.
     fn start_track_at(&mut self, t: Track, retry: bool, start: Option<f64>, paused: bool) {
         self.session_dirty = true;
         // A fresh playback instance resets the Last.fm listening window.
@@ -2812,33 +2841,6 @@ impl App {
         if !retry {
             self.lastfm.track_started(&t, parse_duration(&t.duration));
         }
-        // Gapless auto-advance: mpv already loaded this track via
-        // `loadfile append-play`. Adopt it without reloading.
-        if !retry
-            && start.is_none()
-            && self.mpv_queued_next
-            && self.queued_next_id.as_deref() == Some(&t.id)
-        {
-            self.mpv_queued_next = false;
-            self.queued_next_id = None;
-            self.track_end_reported = false;
-            self.playback_position = 0.0;
-            self.last_position = None;
-            self.position_sampled_at = None;
-            self.resume_pending = None;
-            self.audio_started = false;
-            self.play_started_at = Some(Instant::now());
-            self.last_progress_at = Some(Instant::now());
-            self.playback_duration_secs =
-                parse_duration(&t.duration).unwrap_or(210);
-            self.current_track = Some(t);
-            self.playback_state = PlaybackState::Buffering;
-            self.sync_art();
-            self.sync_lyrics();
-            self.prefetch_next();
-            return;
-        }
-
         let resuming = start.is_some();
         self.status_message = if retry {
             "Retrying…".to_string()
@@ -2875,6 +2877,8 @@ impl App {
             return;
         }
         self.playback_position = start.unwrap_or(0.0);
+        self.mpv_entry_id = None;
+        self.pending_timeline = None;
         self.last_position = None;
         self.position_sampled_at = None;
         // mpv seeks to the restored position once the file is open; until
@@ -2902,6 +2906,31 @@ impl App {
         }
     }
 
+    /// Called only after mpv identifies a different playlist entry as current.
+    fn adopt_gapless_track(&mut self, t: Track) {
+        self.session_dirty = true;
+        self.lastfm.track_started(&t, parse_duration(&t.duration));
+        self.prefetch = None;
+        self.mpv_queued_next = false;
+        self.queued_next_id = None;
+        self.track_end_reported = false;
+        self.playback_position = 0.0;
+        self.last_position = None;
+        self.position_sampled_at = None;
+        self.resume_pending = None;
+        self.audio_started = false;
+        self.play_started_at = Some(Instant::now());
+        self.last_progress_at = Some(Instant::now());
+        self.playback_duration_secs = parse_duration(&t.duration).unwrap_or(210);
+        self.current_track = Some(t);
+        self.playback_state = PlaybackState::Buffering;
+        self.sync_art();
+        self.sync_lyrics();
+        self.prefetch_next();
+        // Remove finished entries so mpv's playlist and timeline stay small.
+        let _ = self.player.playlist_clear();
+    }
+
     /// Resolve the upcoming queue track in the background so the next song
     /// starts without waiting for yt-dlp.
     fn prefetch_next(&mut self) {
@@ -2922,7 +2951,12 @@ impl App {
         }) {
             return;
         }
-        if self.prefetch_inflight.as_deref() == Some(track.id.as_str()) {
+        if self.prefetch_inflight.is_some()
+            || self
+                .last_extract_error
+                .as_ref()
+                .is_some_and(|(id, _)| id == &track.id)
+        {
             return;
         }
         let video = track.id.clone();
@@ -2942,6 +2976,46 @@ impl App {
             });
             let _ = tx.send((id, result));
         });
+    }
+
+    /// Reconcile the small mpv playlist with the actual playback order.
+    fn sync_gapless_queue(&mut self) {
+        let next = if self.repeat == RepeatMode::One {
+            None
+        } else {
+            self.next_queue_index()
+                .and_then(|index| self.queue.get(index))
+                .map(|track| track.id.as_str())
+        };
+        if self.mpv_queued_next && self.queued_next_id.as_deref() != next {
+            let _ = self.player.playlist_clear();
+            self.mpv_queued_next = false;
+            self.queued_next_id = None;
+        }
+        if self.playback_state != PlaybackState::Playing || self.mpv_queued_next {
+            return;
+        }
+        let Some(id) = next else {
+            return;
+        };
+        if self
+            .last_extract_error
+            .as_ref()
+            .is_some_and(|(failed, _)| failed == id)
+        {
+            return;
+        }
+        if let Some((cached, stream, at)) = &self.prefetch
+            && cached == id
+            && at.elapsed() < PREFETCH_TTL
+        {
+            if self.player.queue_next(id, Some(stream)).is_ok() {
+                self.mpv_queued_next = true;
+                self.queued_next_id = Some(id.to_string());
+            }
+            return;
+        }
+        self.prefetch_next();
     }
 
     /// Hand back the prefetched stream for `id` if it is still fresh.
@@ -2966,8 +3040,15 @@ impl App {
                 repeat: self.repeat,
                 offline: self.offline,
             };
-            let Some(tracks) = self.auto_queue.accept(seq, result, context) else {
+            let Some(result) = self.auto_queue.accept_result(seq, result, context) else {
                 continue;
+            };
+            let tracks = match result {
+                Ok(tracks) => tracks,
+                Err(error) => {
+                    self.status_message = format!("Auto Queue unavailable — {error}");
+                    continue;
+                }
             };
             let added = self.extend_auto_queue(tracks);
             if added > 0 {
@@ -3096,9 +3177,8 @@ impl App {
         });
     }
 
-    /// Retry the current track, then skip it if it keeps failing. mpv is
-    /// kept alive — the retry/skip is loaded via IPC `loadfile`, so playback
-    /// stays gapless even across failures.
+    /// Retry the current track at its last position, then skip it if it keeps
+    /// failing. Restoring a position uses a fresh process to isolate its seek.
     fn recover_playback(&mut self, reason: &str) {
         self.position_sampled_at = None;
         self.audio_started = false;
@@ -3112,7 +3192,9 @@ impl App {
                 "{} — retrying ({}/{})",
                 reason, self.playback_retries, MAX_PLAYBACK_RETRIES
             );
-            self.start_track(track, true);
+            let paused = self.playback_state == PlaybackState::Paused;
+            let start = (self.playback_position > 0.0 || paused).then_some(self.playback_position);
+            self.start_track_at(track, true, start, paused);
             return;
         }
         self.playback_retries = 0;
@@ -3177,10 +3259,10 @@ impl App {
             self.pending_timeline = None;
             return;
         }
-        let Some((sequence, sample)) = self.pending_timeline.take() else {
+        let Some((sequence, generation, sample)) = self.pending_timeline.take() else {
             return;
         };
-        if sequence <= self.applied_timeline {
+        if generation != self.player.current_generation() || sequence <= self.applied_timeline {
             return;
         }
         self.applied_timeline = sequence;
@@ -3211,30 +3293,24 @@ impl App {
                     self.finish_buffering();
                 }
             }
-            // Gapless: mpv auto-advances to the next track in its playlist
-            // when the current track ends. Detect this via a position reset
-            // (position jumps back to ~0) and adopt the queued track without
-            // reloading it via `loadfile replace`.
-            if let Some(prev) = self.last_position {
-                if position < prev - 1.0 {
-                    // Track changed: mpv moved to the next queued track.
-                    if let Some(queued_id) = self.queued_next_id.take() {
-                        self.mpv_queued_next = false;
-                        if let Some(pos) = self
-                            .queue
-                            .iter()
-                            .position(|t| t.id == queued_id)
-                        {
-                            self.queue_index = pos;
-                            let t = self.queue[pos].clone();
-                            self.start_track(t, false);
-                            // start_track resets last_position; don't
-                            // overwrite it with the old track's sample.
-                            return;
-                        }
-                    }
-                }
+            // Position can move backwards after an ordinary seek. Only a
+            // new mpv playlist entry proves a gapless transition occurred.
+            if timeline.playlist_position.is_some_and(|index| index > 0)
+                && timeline.entry_id.is_some()
+                && timeline.entry_id != self.mpv_entry_id
+                && let Some(id) = self.queued_next_id.clone()
+                && let Some(index) = self
+                    .next_queue_index()
+                    .filter(|&index| self.queue[index].id == id)
+            {
+                self.queue_index = index;
+                self.adopt_gapless_track(self.queue[index].clone());
+                self.mpv_entry_id = timeline.entry_id;
+                self.playback_position = position;
+                self.last_position = Some(position);
+                return;
             }
+            self.mpv_entry_id = timeline.entry_id;
             self.last_position = Some(position);
         }
         if let Some(duration) = timeline.duration.filter(|d| d.is_finite() && *d > 0.0) {
@@ -3346,11 +3422,15 @@ impl App {
         };
         // The liked-songs list on screen updates with the press too, and
         // re-syncs with the server once VLLM's listing has converged.
-        self.like_view_edit(&track.id, want);
+        self.like_view_edit(&track, want);
         self.preview_cache.remove(LIKED_PLAYLIST);
 
-        self.like_generation += 1;
+        self.like_generation = self.like_generation.wrapping_add(1);
         let generation = self.like_generation;
+        self.pending_likes
+            .entry(track.id.clone())
+            .and_modify(|pending| pending.0 = generation)
+            .or_insert((generation, track.clone()));
         self.like_refresh_at = Some((Instant::now() + Duration::from_secs(9), generation));
         // Queued, not spawned: presses apply one at a time in order.
         let _ = self
@@ -3362,7 +3442,8 @@ impl App {
     /// un-liking drops the row, liking puts it at the top (VLLM lists
     /// newest-first, so a fresh like lands on index 0). The selection
     /// sticks to its track as rows move.
-    fn like_view_edit(&mut self, vid: &str, want: bool) {
+    fn like_view_edit(&mut self, track: &Track, want: bool) {
+        let vid = track.id.as_str();
         let on_open = self.current_page == Page::Playlist
             && self.current_playlist.as_ref().is_some_and(|p| p.id == LIKED_PLAYLIST);
         let on_preview = self.current_page == Page::Library
@@ -3370,9 +3451,8 @@ impl App {
         if !on_open && !on_preview {
             return;
         }
-        let Some(track) = self.current_track.clone() else {
-            return;
-        };
+        let mut track = track.clone();
+        track.like = Some(want);
         if on_open {
             match self.playlist_tracks.iter().position(|t| t.id == vid) {
                 Some(i) if !want => {
@@ -3528,6 +3608,9 @@ impl App {
         let target = (current + delta as f64).clamp(0.0, total.max(0.0));
         let effective = (target - current).round() as i64;
         self.playback_position = target;
+        if self.resume_pending.is_some() {
+            self.resume_pending = Some((target, Instant::now()));
+        }
         self.position_sampled_at = if self.playback_state == PlaybackState::Playing {
             Some(Instant::now())
         } else {
@@ -4466,4 +4549,236 @@ mod shuffle_tests {
         assert!(!order.contains(&5));
     }
 
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    fn track(id: &str) -> Track {
+        Track {
+            id: id.into(),
+            title: id.into(),
+            artist: "Artist".into(),
+            album: None,
+            duration: Some("3:00".into()),
+            thumbnail_url: None,
+            like: None,
+            downloaded: false,
+            set_video_id: None,
+        }
+    }
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.auto_queue.set_enabled(false);
+        app.queue = vec![track("first"), track("second"), track("third")];
+        app.current_track = Some(track("first"));
+        app.playback_state = PlaybackState::Playing;
+        app
+    }
+
+    #[tokio::test]
+    async fn empty_search_clears_old_rows_and_selection() {
+        let mut app = app();
+        app.search_results = vec![SearchHit::Track(track("old"))];
+        app.selected_index = 5;
+        app.apply_search_result("nothing".into(), Ok(SearchResults::default()));
+        assert!(app.search_results.is_empty());
+        assert_eq!(app.selected_index, 0);
+        assert!(app.status_message.contains("No results"));
+    }
+
+    #[tokio::test]
+    async fn manual_next_replaces_the_prequeued_track_explicitly() {
+        let mut app = app();
+        let (player, commands) = crate::player::player_tests::recording_player();
+        app.player = player;
+        app.mpv_queued_next = true;
+        app.queued_next_id = Some("second".into());
+        app.play_next();
+        let first = commands.recv_timeout(Duration::from_secs(2)).unwrap();
+        let second = commands.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(first.contains("playlist-clear"));
+        assert!(second.contains("loadfile") && second.contains("replace"));
+        assert_eq!(app.current_track.as_ref().unwrap().id, "second");
+    }
+
+    #[tokio::test]
+    async fn rewinding_does_not_advance_the_queue() {
+        let mut app = app();
+        app.playback_position = 100.0;
+        app.last_position = Some(100.0);
+        app.mpv_queued_next = true;
+        app.queued_next_id = Some("second".into());
+        app.pending_timeline = Some((
+            1,
+            app.player.current_generation(),
+            Some(Timeline {
+                position: Some(90.0),
+                duration: Some(180.0),
+                playlist_position: Some(0),
+                entry_id: Some(1),
+            }),
+        ));
+        app.poll_player_timeline();
+        assert_eq!(app.queue_index, 0);
+        assert_eq!(app.current_track.as_ref().unwrap().id, "first");
+        assert_eq!(app.playback_position, 90.0);
+    }
+
+    #[tokio::test]
+    async fn gapless_advance_adopts_the_entry_without_reloading() {
+        let mut app = app();
+        let (player, commands) = crate::player::player_tests::recording_player();
+        app.player = player;
+        app.mpv_entry_id = Some(1);
+        app.mpv_queued_next = true;
+        app.queued_next_id = Some("second".into());
+        app.pending_timeline = Some((
+            1,
+            app.player.current_generation(),
+            Some(Timeline {
+                position: Some(0.2),
+                duration: Some(180.0),
+                playlist_position: Some(1),
+                entry_id: Some(2),
+            }),
+        ));
+        app.poll_player_timeline();
+        assert_eq!(app.queue_index, 1);
+        assert_eq!(app.current_track.as_ref().unwrap().id, "second");
+        assert!(
+            commands
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .contains("playlist-clear")
+        );
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_stale_prefetch_is_not_cached_or_queued() {
+        let mut app = app();
+        app.prefetch_inflight = Some("third".into());
+        app.prefetch_tx
+            .send((
+                "third".into(),
+                Ok(crate::player::Stream {
+                    url: "https://example.invalid/audio".into(),
+                    headers: vec![],
+                }),
+            ))
+            .unwrap();
+        app.update();
+        assert!(app.prefetch.is_none());
+        assert!(!app.mpv_queued_next);
+    }
+
+    #[tokio::test]
+    async fn changing_next_track_clears_the_mpv_queue() {
+        let mut app = app();
+        let (player, commands) = crate::player::player_tests::recording_player();
+        app.player = player;
+        app.mpv_queued_next = true;
+        app.queued_next_id = Some("third".into());
+        app.sync_gapless_queue();
+        assert!(!app.mpv_queued_next);
+        assert!(app.queued_next_id.is_none());
+        assert!(
+            commands
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .contains("playlist-clear")
+        );
+    }
+
+    #[tokio::test]
+    async fn another_tracks_like_does_not_hide_a_failure() {
+        let mut app = app();
+        app.current_track.as_mut().unwrap().like = Some(true);
+        app.like_generation = 2;
+        app.pending_likes.insert(
+            "first".into(),
+            (
+                1,
+                Track {
+                    like: Some(false),
+                    ..track("first")
+                },
+            ),
+        );
+        app.pending_likes
+            .insert("second".into(), (2, track("second")));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.like_rx = rx;
+        tx.send(("first".into(), true, 1, Err("denied".into())))
+            .unwrap();
+        app.update();
+        assert_eq!(app.current_track.as_ref().unwrap().like, Some(false));
+        assert!(app.status_message.contains("denied"));
+        assert!(app.pending_likes.contains_key("second"));
+        assert!(!app.pending_likes.contains_key("first"));
+    }
+
+    #[tokio::test]
+    async fn repeated_failed_likes_restore_the_confirmed_state() {
+        let mut app = app();
+        app.pending_likes
+            .insert("first".into(), (2, track("first")));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.like_rx = rx;
+        tx.send(("first".into(), true, 1, Err("first failed".into())))
+            .unwrap();
+        tx.send(("first".into(), false, 2, Err("second failed".into())))
+            .unwrap();
+        app.update();
+        assert_eq!(app.current_track.as_ref().unwrap().like, None);
+    }
+    #[tokio::test]
+    async fn telemetry_from_an_old_playback_generation_is_ignored() {
+        let mut app = app();
+        app.playback_position = 12.0;
+        app.pending_timeline = Some((
+            1,
+            app.player.current_generation().wrapping_add(1),
+            Some(Timeline {
+                position: Some(90.0),
+                duration: Some(180.0),
+                playlist_position: Some(1),
+                entry_id: Some(2),
+            }),
+        ));
+        app.poll_player_timeline();
+        assert_eq!(app.playback_position, 12.0);
+        assert_eq!(app.queue_index, 0);
+    }
+    #[tokio::test]
+    async fn a_failed_unlike_restores_the_target_row_when_another_song_is_playing() {
+        let mut app = app();
+        let original = Track {
+            like: Some(true),
+            ..track("second")
+        };
+        app.current_page = Page::Playlist;
+        app.current_playlist = Some(Playlist {
+            id: LIKED_PLAYLIST.into(),
+            title: "Liked Music".into(),
+            subtitle: String::new(),
+            track_count: None,
+            kind: PlaylistKind::Playlist,
+        });
+        app.playlist_tracks.clear();
+        app.pending_likes
+            .insert(original.id.clone(), (1, original.clone()));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        app.like_rx = rx;
+        tx.send((original.id.clone(), false, 1, Err("denied".into())))
+            .unwrap();
+        app.update();
+        assert_eq!(app.playlist_tracks.len(), 1);
+        assert_eq!(app.playlist_tracks[0].id, original.id);
+        assert_eq!(app.playlist_tracks[0].like, Some(true));
+        assert_eq!(app.current_track.as_ref().unwrap().id, "first");
+    }
 }
