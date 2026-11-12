@@ -29,6 +29,10 @@ fn default_paused() -> bool {
     true
 }
 
+fn default_volume() -> u8 {
+    100
+}
+
 /// Owned session file shape used when loading.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
@@ -50,6 +54,9 @@ pub struct SessionState {
     /// `true` means restore paused; `false` resumes playback.
     #[serde(default = "default_paused")]
     pub paused: bool,
+    /// Software volume, 0–100.
+    #[serde(default = "default_volume")]
+    pub volume: u8,
 }
 
 /// Borrowed snapshot used when saving, so writing the queue does not clone it.
@@ -64,6 +71,7 @@ pub struct SessionRef<'a> {
     pub shuffle: bool,
     pub shuffle_order: &'a [usize],
     pub paused: bool,
+    pub volume: u8,
 }
 
 impl SessionState {
@@ -136,6 +144,7 @@ impl SessionState {
             self.position_secs = 0.0;
         }
         self.position_secs = self.position_secs.min(MAX_POSITION_SECS);
+        self.volume = self.volume.min(100);
         true
     }
 
@@ -275,6 +284,7 @@ mod session_tests {
             shuffle: true,
             shuffle_order: vec![1, 2, 0],
             paused: true,
+            volume: 73,
         }
     }
 
@@ -320,6 +330,7 @@ mod session_tests {
             shuffle: state.shuffle,
             shuffle_order: &state.shuffle_order,
             paused: state.paused,
+            volume: state.volume,
         };
         let json = serde_json::to_value(&borrowed).unwrap();
         let decoded: SessionState = serde_json::from_value(json).unwrap();
@@ -493,5 +504,14 @@ mod session_tests {
         assert!(!state.shuffle);
         assert!(state.paused);
         assert_eq!(state.position_secs, 0.0);
+        assert_eq!(state.volume, 100);
+    }
+
+    #[test]
+    fn sanitize_clamps_an_out_of_range_volume() {
+        let mut state = sample();
+        state.volume = 250;
+        assert!(state.sanitize());
+        assert_eq!(state.volume, 100);
     }
 }

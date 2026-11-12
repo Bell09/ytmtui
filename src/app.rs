@@ -886,12 +886,14 @@ impl App {
             shuffle,
             shuffle_order,
             paused,
+            volume,
             ..
         } = state;
         let Some(track) = current else {
             return;
         };
 
+        self.player.set_volume(volume);
         self.queue = queue;
         self.queue_index = queue_index;
         self.repeat = repeat;
@@ -945,6 +947,7 @@ impl App {
                 self.playback_state,
                 PlaybackState::Playing | PlaybackState::Buffering
             ),
+            volume: self.player.volume(),
         })
     }
 
@@ -3906,6 +3909,23 @@ impl App {
         self.status_message = format!("Shuffle: {}", if self.shuffle { "on" } else { "off" });
     }
 
+    /// Set software volume (0–100). Keeps mpv in sync and marks the session
+    /// dirty so the level survives a restart.
+    pub fn set_volume(&mut self, volume: i16) {
+        let volume = volume.clamp(0, 100) as u8;
+        if volume == self.player.volume() {
+            return;
+        }
+        self.player.set_volume(volume);
+        self.session_dirty = true;
+        self.status_message = format!("Volume: {volume}%");
+    }
+
+    /// Nudge the volume by `delta` percentage points.
+    pub fn adjust_volume(&mut self, delta: i16) {
+        self.set_volume(self.player.volume() as i16 + delta);
+    }
+
     pub fn toggle_play(&mut self) {
         if self.current_track.is_none() {
             return;
@@ -4012,6 +4032,9 @@ impl App {
                     let target = pos_us as f64 / 1_000_000.0;
                     self.seek_relative((target - current).round() as i64);
                 }
+                MprisCmd::SetVolume(volume) => {
+                    self.set_volume((volume.clamp(0.0, 1.0) * 100.0).round() as i16);
+                }
             }
         }
     }
@@ -4049,6 +4072,7 @@ impl App {
             length_us,
             art_url: &art_url,
             pos_us: (self.position_secs_f64() * 1_000_000.0) as i64,
+            volume: self.player.volume() as f64 / 100.0,
         });
     }
 

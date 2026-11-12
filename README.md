@@ -42,7 +42,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 | 🔍 **Innertube search** | Signed-in search with Top / Songs / Albums / Artists / Playlists filters |
 | 📚 **Your library** | Master–detail browser of playlists, artists & channels with lazy track preview |
 | ✨ **For you** | Personal mixes, subscriptions, trending songs, community playlists, activity mixes, moods, genres, and country/global charts |
-| ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, next-track prefetch, · `m` for a maximized cover + synced lyrics view |
+| ▶️ **Playback** | Real-time progress bar, true pause/resume via `mpv` IPC, software volume (`+` / `-`, also exposed over MPRIS), next-track prefetch, · `m` for a maximized cover + synced lyrics view |
 | 🔁 **Auto Queue** | Fetches similar songs whenever the queue ends |
 | 💫 **Extras** | Synced lyrics, queue, offline mode, session resume, like/unlike, remove song from playlist, create a playlist, MP3 download with embedded cover art and `.lrc` lyrics |
 
@@ -135,6 +135,64 @@ sudo pacman -Sy ytmtui
 ```
 
 > Packages are currently unsigned (`TrustAll`). Future updates are picked up with `pacman -Syu`.
+
+### NixOS & Nix (flake)
+
+The fork ships a flake with a wrapped package — `mpv`, `yt-dlp` and `ffmpeg`
+are added to `PATH` automatically:
+
+```bash
+# Run without installing
+nix run github:sh1zicus/ytmtui
+
+# Install into your profile
+nix profile install github:sh1zicus/ytmtui
+```
+
+#### NixOS
+
+Add the fork as a flake input and import the module:
+
+```nix
+{
+  inputs.ytmtui.url = "github:sh1zicus/ytmtui";
+  inputs.ytmtui.inputs.nixpkgs.follows = "nixpkgs";
+
+  outputs = { self, nixpkgs, ytmtui, ... }: {
+    nixosConfigurations.host = nixpkgs.lib.nixosSystem {
+      modules = [
+        ytmtui.nixosModules.default
+        # ...
+      ];
+    };
+  };
+}
+```
+
+Or add only the package:
+
+```nix
+environment.systemPackages = [
+  ytmtui.packages.${pkgs.stdenv.hostPlatform.system}.default
+];
+```
+
+#### Home Manager
+
+```nix
+{ inputs, pkgs, ... }: {
+  home.packages = [
+    inputs.ytmtui.packages.${pkgs.stdenv.hostPlatform.system}.default
+  ];
+}
+```
+
+After changing the input, refresh the lock and rebuild:
+
+```bash
+nix flake update ytmtui
+sudo nixos-rebuild switch --flake /etc/nixos#nixos
+```
 
 ### From source
 
@@ -316,6 +374,7 @@ As long as `~/.config/ytmtui/lastfm.json` holds valid credentials, every track i
 | `Enter` | Play / open selection |
 | `Space` | Play / Pause |
 | `←` / `→` | Seek -5s / +5s |
+| `+` (`=`) / `-` | Volume +5% / -5% |
 | `n` / `p` | Next / previous track |
 | `1`–`5` | Jump to **Trending / Mix / Community / Moods / Genres** |
 | `/` | Focus search bar |

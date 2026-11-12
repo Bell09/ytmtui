@@ -397,6 +397,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Seek ±10s (only acts while music is playing or paused).
                     KeyCode::Left => app.seek_relative(-10),
                     KeyCode::Right => app.seek_relative(10),
+                    // Software volume ±5% (`=` is the unshifted `+` key).
+                    KeyCode::Char('+') | KeyCode::Char('=') => app.adjust_volume(5),
+                    KeyCode::Char('-') => app.adjust_volume(-5),
                     // Skip through the queue.
                     KeyCode::Char('n') => app.play_next(),
                     KeyCode::Char('p') => app.play_previous(),

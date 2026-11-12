@@ -1553,6 +1553,7 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
         ("c", "create"),
         ("space", "pause"),
         ("←→", "seek"),
+        ("+ -", "vol"),
         ("n p", "skip"),
         ("L", "like"),
         ("l", "lyrics"),
@@ -1563,6 +1564,7 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
         Page::Queue => vec![
             ("enter", "play"),
             ("←→", "seek"),
+            ("+ -", "vol"),
             ("d", "del"),
             ("a", "add"),
             ("r", "remove"),

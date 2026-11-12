@@ -114,6 +114,8 @@ const DIAGNOSTIC_CHARS: usize = 320;
 /// network stream has to be extracted and connected first, so this is
 /// generous; the seek is skipped rather than delayed past the track.
 const RESUME_WAIT: Duration = Duration::from_secs(30);
+/// Software volume ceiling (mpv's own `volume-max` defaults higher).
+const MAX_VOLUME: u8 = 100;
 
 /// Thin wrapper around a persistent `mpv` process.
 ///
@@ -130,6 +132,9 @@ pub struct Player {
     /// Extra mpv arguments. Empty in production; the test suite uses it to
     /// run mpv without an audio device.
     extra_args: Vec<String>,
+    /// Software volume applied to the next mpv process and kept in sync over
+    /// IPC while it runs.
+    volume: u8,
 }
 
 /// A socket path that no other player in this process uses. Two players (the
@@ -151,6 +156,7 @@ impl Player {
             socket_path: unique_socket_path(),
             program,
             extra_args: Vec::new(),
+            volume: MAX_VOLUME,
         }
     }
 
@@ -158,6 +164,19 @@ impl Player {
     /// only needs this string, so it never has to borrow the `Player`.
     pub fn socket_path(&self) -> &str {
         &self.socket_path
+    }
+
+    /// Current software volume, 0–100.
+    pub fn volume(&self) -> u8 {
+        self.volume
+    }
+
+    /// Set software volume, 0–100. Stored for future mpv processes and sent
+    /// to the running one when present.
+    pub fn set_volume(&mut self, volume: u8) {
+        self.volume = volume.min(MAX_VOLUME);
+        let value = self.volume.to_string();
+        let _ = self.send_command(&["set_property", "volume", &value]);
     }
 
     /// Whether the wrapped mpv process is still alive.
@@ -360,7 +379,8 @@ impl Player {
                 "--ytdl-raw-options=no-playlist=,no-progress=,\
                  socket-timeout=10,retries=2,extractor-retries=1",
             )
-            .arg(format!("--input-ipc-server={}", self.socket_path));
+            .arg(format!("--input-ipc-server={}", self.socket_path))
+            .arg(format!("--volume={}", self.volume));
         if let Some(stream) = stream {
             let fields = stream.cli_header_fields();
             if !fields.is_empty() {
@@ -1239,6 +1259,38 @@ mod player_tests {
         );
         player.stop();
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A fresh mpv starts with the volume the player is holding.
+    #[test]
+    fn volume_is_passed_to_a_fresh_mpv() {
+        let (dir, script) = fake_mpv("volume-spawn");
+        let mut player = Player::with_program(script);
+        player.set_volume(73);
+        player
+            .spawn_mpv("https://example.invalid/audio", None, false)
+            .expect("spawn");
+        let argv = recorded_argv(&dir);
+        assert!(
+            argv.iter().any(|arg| arg == "--volume=73"),
+            "mpv must receive the configured volume: {argv:?}"
+        );
+        player.stop();
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Changing the volume while mpv runs goes through its IPC socket.
+    #[test]
+    fn set_volume_sends_an_ipc_property() {
+        let (path, commands) = fake_ipc_server("volume-ipc");
+        let mut player = Player::new();
+        player.socket_path = path.to_string_lossy().into_owned();
+
+        player.set_volume(42);
+        let command = commands.recv_timeout(Duration::from_secs(2)).expect("command");
+        assert!(command.contains("set_property"), "unexpected command: {command}");
+        assert!(command.contains("volume"), "unexpected command: {command}");
+        assert!(command.contains("42"), "unexpected command: {command}");
     }
 
     /// The load commands themselves carry no position: mpv starts the file

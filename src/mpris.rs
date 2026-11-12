@@ -26,10 +26,10 @@ pub enum MprisCmd {
     Previous,
     Seek(i64),
     SetPosition(i64),
+    SetVolume(f64),
 }
 
 /// Playback picture advertised over D-Bus.
-#[derive(Default)]
 pub struct MprisState {
     pub status: String,
     pub track_key: String,
@@ -39,6 +39,24 @@ pub struct MprisState {
     pub length_us: i64,
     pub art_url: String,
     pub pos_us: i64,
+    /// Software volume in MPRIS units (0.0–1.0).
+    pub volume: f64,
+}
+
+impl Default for MprisState {
+    fn default() -> Self {
+        Self {
+            status: String::new(),
+            track_key: String::new(),
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            length_us: 0,
+            art_url: String::new(),
+            pos_us: 0,
+            volume: 1.0,
+        }
+    }
 }
 
 /// One tick of playback truth, fed to [`MprisHandle::apply`].
@@ -51,6 +69,7 @@ pub struct Snapshot<'a> {
     pub length_us: i64,
     pub art_url: &'a str,
     pub pos_us: i64,
+    pub volume: f64,
 }
 
 /// `OwnedValue` for anything convertible to a D-Bus value (strings, string
@@ -92,6 +111,10 @@ impl MprisHandle {
         self.read().pos_us
     }
 
+    pub fn volume(&self) -> f64 {
+        self.read().volume
+    }
+
     /// The `mpris:metadata` map for the current (or last) track.
     pub fn metadata(&self) -> HashMap<String, OwnedValue> {
         let st = self.read();
@@ -117,10 +140,11 @@ impl MprisHandle {
 
     /// Mirror this tick's state and emit signals for whatever changed.
     pub fn apply(&self, s: Snapshot<'_>) {
-        let (track_changed, status_changed, seek_pos) = {
+        let (track_changed, status_changed, volume_changed, seek_pos) = {
             let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
             let track_changed = st.track_key != s.track_key;
             let status_changed = st.status != s.status;
+            let volume_changed = (st.volume - s.volume).abs() > f64::EPSILON;
             // A jump beyond normal ticking means a seek (or a track cut,
             // handled by the id change below).
             let jumped = !track_changed
@@ -136,19 +160,28 @@ impl MprisHandle {
             st.length_us = s.length_us;
             set_string(&mut st.art_url, s.art_url);
             st.pos_us = s.pos_us;
+            st.volume = s.volume;
             let seek_pos = if track_changed || jumped {
                 Some(s.pos_us)
             } else {
                 None
             };
-            (track_changed, status_changed, seek_pos)
+            (
+                track_changed,
+                status_changed,
+                volume_changed,
+                seek_pos,
+            )
         };
 
-        if status_changed || track_changed {
+        if status_changed || track_changed || volume_changed {
             let mut changed: Vec<(&'static str, OwnedValue)> =
                 vec![("PlaybackStatus", ov(self.status()))];
             if track_changed {
                 changed.push(("Metadata", self.metadata().into()));
+            }
+            if volume_changed {
+                changed.push(("Volume", ov(self.volume())));
             }
             self.emit_properties(changed);
         }
@@ -300,7 +333,11 @@ impl Player {
     }
     #[zbus(property)]
     async fn volume(&self) -> f64 {
-        1.0
+        self.handle.volume()
+    }
+    #[zbus(property)]
+    async fn set_volume(&self, volume: f64) {
+        let _ = self.tx.send(MprisCmd::SetVolume(volume));
     }
     #[zbus(property)]
     async fn can_control(&self) -> bool {
