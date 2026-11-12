@@ -9,7 +9,7 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 
 [![Rust](https://img.shields.io/badge/Rust-1.89%2B-0d1117?style=for-the-badge&logo=rust&logoColor=22c55e&labelColor=161b22)](https://www.rust-lang.org/)
 [![mpv](https://img.shields.io/badge/mpv-backend-0d1117?style=for-the-badge&logo=mpv&logoColor=4ade80&labelColor=161b22)](https://mpv.io/)
-[![License](https://img.shields.io/badge/License-All_Rights_Reserved-red?style=for-the-badge)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 [![AUR](https://img.shields.io/badge/AUR-ytmtui-0d1117?style=for-the-badge&logo=archlinux&logoColor=4ade80&labelColor=161b22)](https://aur.archlinux.org/packages/ytmtui)
 [![Linux](https://img.shields.io/badge/Linux-only-0d1117?style=for-the-badge&logo=linux&logoColor=22c55e&labelColor=161b22)](https://github.com/Bell09/ytmtui)
 
@@ -394,7 +394,8 @@ ytmtui tracks <id>       # list tracks of a playlist / album / artist
 
 ## 📄 License
 
-**Proprietary License – All Rights Reserved**  
-Copyright (c) 2026 Quim Ashley M. Castillo
+YTMTUI is licensed under the **MIT License**.
 
-See [LICENSE](LICENSE) for details. Permission is required before copying, modifying, or redistributing YTMTUI.
+Copyright (c) 2026 YTMTUI contributors
+
+See [LICENSE](LICENSE) for details.
