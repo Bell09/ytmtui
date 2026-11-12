@@ -454,6 +454,15 @@ pub struct App {
     pub lyrics_open: bool,
     /// Maximized cover + lyrics view, toggled with `m`.
     pub now_playing: bool,
+    /// `?` keyboard cheatsheet overlay. It is pure UI state: opening it never
+    /// touches playback.
+    pub help_open: bool,
+    /// First visible cheatsheet row, clamped when the overlay is rendered.
+    pub help_scroll: u16,
+    /// Largest valid `help_scroll`, recomputed on each render.
+    pub help_max_scroll: u16,
+    /// Height (rows) of the cheatsheet viewport, recomputed on each render.
+    pub help_viewport: u16,
     /// Video id the current lyrics state belongs to.
     pub lyrics_track: Option<String>,
     pub lyrics_state: crate::lyrics::LyricsState,
@@ -823,6 +832,10 @@ impl App {
             details_viewport: 0,
             lyrics_open: false,
             now_playing: false,
+            help_open: false,
+            help_scroll: 0,
+            help_max_scroll: 0,
+            help_viewport: 0,
             lyrics_track: None,
             lyrics_state: crate::lyrics::LyricsState::default(),
             lyrics_scroll: None,
@@ -3377,6 +3390,39 @@ impl App {
         }
     }
 
+    /// `?`: open the keyboard cheatsheet at the top. Playback is untouched.
+    pub fn open_help(&mut self) {
+        self.help_open = true;
+        self.help_scroll = 0;
+    }
+
+    /// `Esc`/`q` on the cheatsheet.
+    pub fn close_help(&mut self) {
+        self.help_open = false;
+    }
+
+    /// Scroll the cheatsheet by `delta` lines, clamped to what was rendered.
+    pub fn scroll_help(&mut self, delta: i32) {
+        let max = i32::from(self.help_max_scroll);
+        self.help_scroll = (i32::from(self.help_scroll) + delta).clamp(0, max) as u16;
+    }
+
+    /// `PgUp`/`PgDn` on the cheatsheet: nearly a full screen at a time.
+    pub fn scroll_help_page(&mut self, direction: i32) {
+        let page = i32::from(self.help_viewport.saturating_sub(1).max(1));
+        self.scroll_help(direction * page);
+    }
+
+    /// `Home` on the cheatsheet.
+    pub fn help_home(&mut self) {
+        self.help_scroll = 0;
+    }
+
+    /// `End` on the cheatsheet.
+    pub fn help_end(&mut self) {
+        self.help_scroll = self.help_max_scroll;
+    }
+
     /// `L`: like the currently-playing song — cycle between liked and no
     /// rating (a disliked track lands on LIKE). The flip is optimistic: the
     /// playback bar's heart and the status message change on the keypress
@@ -4576,6 +4622,33 @@ mod regression_tests {
         app.current_track = Some(track("first"));
         app.playback_state = PlaybackState::Playing;
         app
+    }
+
+    #[tokio::test]
+    async fn help_opens_at_top_closes_and_scrolls_within_bounds() {
+        let mut app = app();
+        app.help_max_scroll = 12;
+        app.help_viewport = 6;
+        app.open_help();
+        assert!(app.help_open);
+        assert_eq!(app.help_scroll, 0);
+
+        app.scroll_help(-1);
+        assert_eq!(app.help_scroll, 0, "cannot scroll above the first row");
+        app.scroll_help(4);
+        assert_eq!(app.help_scroll, 4);
+        app.scroll_help_page(1);
+        assert_eq!(app.help_scroll, 9);
+        app.scroll_help_page(1);
+        assert_eq!(app.help_scroll, 12, "clamped to the last rendered row");
+
+        app.help_home();
+        assert_eq!(app.help_scroll, 0);
+        app.help_end();
+        assert_eq!(app.help_scroll, 12);
+
+        app.close_help();
+        assert!(!app.help_open);
     }
 
     #[tokio::test]

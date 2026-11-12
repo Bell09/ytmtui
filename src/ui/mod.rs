@@ -11,6 +11,7 @@ use ratatui::{
 };
 use std::time::{Duration, Instant};
 use crate::app::{App, InputMode, PlaybackState};
+use crate::keymap;
 use crate::models::{BrowseRow, Page, Playlist, PlaylistKind, SearchHit, Track};
 use crate::theme::Theme;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -99,6 +100,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         if app.input_mode == InputMode::CreatePlaylist {
             draw_create_playlist_dialog(f, app, rows[1]);
+        }
+        if app.help_open {
+            draw_help_overlay(f, app, rows[1]);
         }
         return;
     }
@@ -218,6 +222,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if app.input_mode == InputMode::CreatePlaylist {
         draw_create_playlist_dialog(f, app, rows[1]);
+    }
+    if app.help_open {
+        draw_help_overlay(f, app, rows[1]);
     }
 }
 
@@ -1522,6 +1529,158 @@ fn draw_browse_picker(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, rows[1], &mut state);
 }
 
+/// Decorative connectors for the cheatsheet rows, in the stitched style of the
+/// search rule. All are six cells wide so descriptions line up.
+const HELP_CONNECTORS: [&str; 6] = [
+    "━━━'.━",
+    "━,'━━━",
+    "━━━',━",
+    "━.'━━━",
+    "━━.'━━",
+    "━'━━━.",
+];
+
+/// Scrollable keyboard cheatsheet (`?`). Rows come from the same binding table
+/// that dispatches keys, so this screen cannot drift from the application.
+fn draw_help_overlay(f: &mut Frame, app: &mut App, area: Rect) {
+    let t = app.theme;
+    let width = 82.min(area.width.saturating_sub(4) as usize) as u16;
+    let height = area.height.saturating_sub(2);
+    if width < 36 || height < 7 {
+        return;
+    }
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    // Erase the page drawn beneath. This is a floating panel without a boxed
+    // border: a title line over the scrolling content, then the footer.
+    f.render_widget(Clear, rect);
+
+    let inner = rect.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // title
+            Constraint::Min(1),    // shortcuts
+            Constraint::Length(1), // footer
+        ])
+        .split(inner);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "keybinds",
+            Style::default().fg(t.accent2).add_modifier(Modifier::BOLD),
+        ))),
+        rows[0],
+    );
+    let content = rows[1];
+    let footer = rows[2];
+
+    let sections = keymap::help_sections();
+    let key_width = sections
+        .iter()
+        .flat_map(|section| section.lines.iter())
+        .map(|line| display_width(&line.keys))
+        .max()
+        .unwrap_or(1);
+    // Key column, two spaces, connector, two spaces; descriptions wrap into
+    // the column after it. Wrapping here (rather than with Paragraph) keeps the
+    // scroll offset, page size and percentage exact on narrow terminals.
+    let description_x = key_width.saturating_add(10);
+    let description_w = (content.width as usize)
+        .saturating_sub(description_x)
+        .max(8);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut connector = 0usize;
+    for (index, section) in sections.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::default());
+        }
+        for entry in &section.lines {
+            let pad = key_width.saturating_sub(display_width(&entry.keys));
+            let wrapped = wrap_words(entry.description, description_w);
+            let (first, rest) = wrapped.split_first().expect("wrap_words is never empty");
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{}{}", " ".repeat(pad), entry.keys),
+                    Style::default()
+                        .fg(t.accent2)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    HELP_CONNECTORS[connector % HELP_CONNECTORS.len()],
+                    Style::default().fg(t.dim),
+                ),
+                Span::styled("  ", Style::default()),
+                Span::styled(first.clone(), Style::default().fg(t.fg)),
+            ]));
+            for continuation in rest {
+                lines.push(Line::from(vec![
+                    Span::raw(" ".repeat(description_x)),
+                    Span::styled(continuation.clone(), Style::default().fg(t.fg)),
+                ]));
+            }
+            connector += 1;
+        }
+    }
+
+    let max_scroll = lines.len().saturating_sub(content.height as usize) as u16;
+    app.help_max_scroll = max_scroll;
+    app.help_viewport = content.height;
+    let scroll = app.help_scroll.min(max_scroll);
+    app.help_scroll = scroll;
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), content);
+
+    let percent = if max_scroll == 0 {
+        100
+    } else {
+        (usize::from(scroll) * 100 / usize::from(max_scroll)).min(100)
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("{percent}%"),
+            Style::default().fg(t.dim),
+        ))),
+        footer,
+    );
+    let mut hints = Vec::new();
+    if max_scroll > 0 {
+        hints.push(Span::styled(
+            "↑↓",
+            Style::default()
+                .fg(t.accent2)
+                .add_modifier(Modifier::BOLD),
+        ));
+        hints.push(Span::styled(" scroll ", Style::default().fg(t.dim)));
+        hints.push(Span::styled("· ", Style::default().fg(t.dim)));
+    }
+    hints.push(Span::styled(
+        "esc",
+        Style::default()
+            .fg(t.accent2)
+            .add_modifier(Modifier::BOLD),
+    ));
+    hints.push(Span::styled(" / ", Style::default().fg(t.dim)));
+    hints.push(Span::styled(
+        "q",
+        Style::default()
+            .fg(t.accent2)
+            .add_modifier(Modifier::BOLD),
+    ));
+    hints.push(Span::styled(" close", Style::default().fg(t.dim)));
+    f.render_widget(
+        Paragraph::new(Line::from(hints)).alignment(Alignment::Right),
+        footer,
+    );
+}
+
 fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
 
@@ -1557,6 +1716,7 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
         ("L", "like"),
         ("l", "lyrics"),
         ("m", "max art"),
+        ("?", "help"),
         ("q", "quit"),
     ];
     let hints: Vec<(&str, &str)> = match app.current_page {
@@ -2398,6 +2558,28 @@ fn display_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
+/// Greedy word wrap used by the cheatsheet. Always returns at least one line.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+        } else if display_width(&current) + 1 + display_width(word) <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 /// Pad `s` with trailing spaces up to `width` display columns.
 fn pad(s: &str, width: usize) -> String {
     let mut out = s.to_string();
@@ -2406,6 +2588,49 @@ fn pad(s: &str, width: usize) -> String {
         out.push_str(&" ".repeat(width - w));
     }
     out
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::{draw, App};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn help_overlay_lists_shortcuts_and_scrolls_to_the_end() {
+        let mut app = App::new();
+        app.open_help();
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let top = buffer_text(&terminal);
+        assert!(top.contains("keybinds"));
+        assert!(top.contains("Ctrl+C"));
+        assert!(top.contains("Open this cheatsheet"));
+        assert!(top.contains("↑ / ↓"));
+        assert!(!top.contains("Global"), "section headers are not rendered");
+
+        app.help_end();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let end = buffer_text(&terminal);
+        assert!(end.contains("Close the cheatsheet"));
+        assert!(end.contains("100%"));
+        assert!(
+            !end.contains("Cheatsheet"),
+            "section headers are not rendered"
+        );
+    }
 }
 
 #[cfg(test)]

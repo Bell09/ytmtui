@@ -310,16 +310,22 @@ As long as `~/.config/ytmtui/lastfm.json` holds valid credentials, every track i
 
 ## ⌨️ Keybindings
 
+Press `?` in the app for the complete, scrollable cheatsheet, including every
+screen, picker and text-entry mode. The everyday keys are:
+
 | Key | Action |
 | :--- | :--- |
 | `↑` / `↓` | Navigate lists |
 | `Enter` | Play / open selection |
 | `Space` | Play / Pause |
-| `←` / `→` | Seek -5s / +5s |
+| `←` / `→` | Seek -10s / +10s |
 | `n` / `p` | Next / previous track |
 | `1`–`5` | Jump to **Trending / Mix / Community / Moods / Genres** |
 | `/` | Focus search bar |
 | `Tab` / `⇧Tab` | Cycle search filters |
+| `b` | Open the Browse shelf picker |
+| `z` | Open the queue (`Esc` returns) |
+| `J` / `K` | Move the selected queue track down / up |
 | `Esc` | Back / leave the maximized view |
 | `d` | Download highlighted song as MP3 with cover art and synced `.lrc` (or delete in queue) |
 | `a` | Add highlighted song to a library playlist — arrows scroll, `Enter` adds |
@@ -334,7 +340,9 @@ As long as `~/.config/ytmtui/lastfm.json` holds valid credentials, every track i
 | `Ctrl+R` | Cycle repeat mode |
 | `Ctrl+S` | Toggle shuffle |
 | `PgUp` / `PgDn` | Scroll lyrics or detail pane |
+| `?` | Open the keyboard cheatsheet |
 | `q` | Quit |
+| `Ctrl+C` | Quit from any screen or text field |
 
 ## 🖼️ Views
 
@@ -348,7 +356,7 @@ The window is deliberately chrome-free — no box borders, just hairlines, white
 | ✨ **For you** | Press `b` for the shelf picker. `1`–`5` jump straight to the first five shelves |
 | 🎚️ **Playback bar** | Indicator, track, time and a full-width progress bar that only advances while playing |
 | 🖼️ **Now playing** | Press `m` for a large centred cover beside full-height synced lyrics (2× text in Kitty ≥ 0.40). `PgUp` / `PgDn` scrolls · `m` or `Esc` returns |
-| ℹ️ **Footer** | Status message and compact keybinding cheat-sheet |
+| ℹ️ **Footer** | Status message and compact keybinding guide · press `?` for the full scrollable cheatsheet |
 
 **For you shelves** (accessible via `b` or hotkeys `1`–`5`):
 

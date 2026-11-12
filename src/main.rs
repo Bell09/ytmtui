@@ -5,6 +5,7 @@ mod player;
 mod session;
 mod app;
 mod ui;
+mod keymap;
 mod auth;
 mod browser;
 mod lastfm;
@@ -17,12 +18,13 @@ mod offline;
 
 use std::{env, io, io::Write, time::{Duration, Instant}};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use app::{App, InputMode};
+use keymap::{Action, Context};
 use models::Page;
 
 fn print_help() {
@@ -309,193 +311,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if event::poll(Duration::from_millis(100))? {
             needs_redraw = true;
             if let Event::Key(key) = event::read()? {
-                // Global hotkeys
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    app.should_quit = true;
-                    break;
-                }
+                // Ctrl+C is global; every other key is resolved by the
+                // context that currently owns the keyboard. The binding table
+                // in `keymap` is shared with the `?` cheatsheet.
+                let context = if app.help_open {
+                    Context::Help
+                } else if app.input_mode == InputMode::Search {
+                    Context::Search
+                } else if app.input_mode == InputMode::CreatePlaylist {
+                    Context::CreatePlaylist
+                } else if app.picker_open {
+                    Context::AddPicker
+                } else if app.browse_picker_open {
+                    Context::BrowsePicker
+                } else {
+                    Context::Normal
+                };
+                let action = keymap::action_for(Context::Global, key.code, key.modifiers)
+                    .or_else(|| keymap::action_for(context, key.code, key.modifiers));
+                let Some(action) = action else { continue };
 
-                // Text-entry mode captures all keys.
-                if app.input_mode == InputMode::Search {
-                    match key.code {
-                        KeyCode::Enter => {
-                            app.input_mode = InputMode::Normal;
-                            app.perform_search();
-                        }
-                        KeyCode::Esc => {
-                            app.input_mode = InputMode::Normal;
-                            app.search_query.clear();
-                        }
-                        KeyCode::Backspace => {
-                            app.search_query.pop();
-                        }
-                        KeyCode::Char(c) => {
-                            app.search_query.push(c);
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                // Creating a new playlist: type a name, then press Enter.
-                if app.input_mode == InputMode::CreatePlaylist {
-                    match key.code {
-                        KeyCode::Enter => {
-                            let title = std::mem::take(&mut app.create_playlist_query);
-                            app.input_mode = InputMode::Normal;
-                            app.create_playlist_submit(title);
-                        }
-                        KeyCode::Esc => {
-                            app.input_mode = InputMode::Normal;
-                            app.create_playlist_query.clear();
-                        }
-                        KeyCode::Backspace => {
-                            app.create_playlist_query.pop();
-                        }
-                        KeyCode::Char(c) => {
-                            app.create_playlist_query.push(c);
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                // The add-to-playlist picker owns the keyboard while it's
-                // open — the page underneath keeps its selection untouched.
-                if app.picker_open {
-                    match key.code {
-                        KeyCode::Down | KeyCode::Char('j') => app.picker_next(),
-                        KeyCode::Up | KeyCode::Char('k') => app.picker_previous(),
-                        KeyCode::Enter => app.picker_add_selected(),
-                        KeyCode::Esc => app.close_playlist_picker(),
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                // The browse section picker (opened with `b`) owns the keyboard
-                // while it's open.
-                if app.browse_picker_open {
-                    match key.code {
-                        KeyCode::Down | KeyCode::Char('j') => app.browse_picker_next(),
-                        KeyCode::Up | KeyCode::Char('k') => app.browse_picker_previous(),
-                        KeyCode::Enter => app.browse_picker_select().await,
-                        KeyCode::Esc => app.close_browse_picker(),
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                match key.code {
-                    // Quit.
-                    KeyCode::Char('q') => {
-                        app.should_quit = true;
-                    }
-                    // Move within the current list.
-                    KeyCode::Down => app.next(),
-                    KeyCode::Up => app.previous(),
-                    // Seek ±10s (only acts while music is playing or paused).
-                    KeyCode::Left => app.seek_relative(-10),
-                    KeyCode::Right => app.seek_relative(10),
-                    // Skip through the queue.
-                    KeyCode::Char('n') => app.play_next(),
-                    KeyCode::Char('p') => app.play_previous(),
-                    // Play/pause.
-                    KeyCode::Char(' ') => app.toggle_play(),
-                    // Jump straight to one of the first five browse shelves
-                    // (the `b` picker lists all of them).
-                    KeyCode::Char(digit @ '1'..='5') => {
-                        let section = digit as usize - '1' as usize;
-                        app.open_browse_section(section).await;
-                    }
-                    // The queue page: `z` opens it, Esc leaves it.
-                    KeyCode::Char('z') => app.open_queue(),
-                    // Browse page: `b` opens the section picker from anywhere.
-                    KeyCode::Char('b') => app.open_browse_picker().await,
-                    // Offline mode: the local music folder instead of the
-                    // account's library. Press again to go back online.
-                    KeyCode::Char('o') => app.toggle_offline(),
-                    // Queue the highlighted track:
-                    // X plays it next, Z appends it.
-                    KeyCode::Char('X') => app.queue_focused_next(),
-                    KeyCode::Char('Z') => {
-                        if let Some(t) = app.selected_track() {
-                            app.queue_append(t);
-                        }
-                    }
-                    // Queue page operations.
-                    KeyCode::Char('d') => {
-                        // On the queue `d` deletes the row — its long-standing
-                        // meaning. Anywhere else a song is highlighted, `d`
-                        // saves it for offline and marks it with a check.
-                        if app.current_page == Page::Queue {
-                            app.queue_remove_selected();
-                        } else {
-                            app.download_selected();
-                        }
-                    }
-                    KeyCode::Char('J') => app.queue_move(true),
-                    KeyCode::Char('K') => app.queue_move(false),
-                    // Like the current song — the heart in the playback
-                    // bar fills in (the like toggle, on `L`).
-                    KeyCode::Char('L') => app.toggle_like(),
-                    // Auto Queue: extend the queue with similar songs at
-                    // the end. Config sets the default; this toggles it for
-                    // the current session.
-                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.toggle_auto_queue()
-                    }
-                    // Add the highlighted song to a library playlist —
-                    // `a` opens the picker, arrows scroll, Enter adds.
-                    KeyCode::Char('a' | 'A') => app.open_playlist_picker(),
-                    // Create a new playlist: `c` opens a name prompt.
-                    KeyCode::Char('c') => {
-                        app.input_mode = InputMode::CreatePlaylist;
-                        app.create_playlist_query.clear();
-                    }
-                    // Drop the highlighted song from the open playlist.
-                    // Guarded against Ctrl+R so repeat cycling keeps its key.
-                    KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.remove_selected_from_playlist()
-                    }
-                    // Toggle the lyrics pane on the right.
-                    KeyCode::Char('l') => app.toggle_lyrics(),
-                    // Maximized cover + lyrics view.
-                    KeyCode::Char('m') => app.toggle_now_playing(),
-                    // Repeat / shuffle.
-                    KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.cycle_repeat()
-                    }
-                    KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.toggle_shuffle()
-                    }
-                    // Play the selected track or open the selected collection.
-                    KeyCode::Enter => app.activate_selected().await,
-                    // Cycle the search filters (search page only).
-                    KeyCode::Tab if app.current_page == Page::Search => {
-                        app.cycle_search_filter(true);
-                    }
-                    KeyCode::BackTab if app.current_page == Page::Search => {
-                        app.cycle_search_filter(false);
-                    }
-                    // Scroll the lyrics pane while it's open, otherwise the
-                    // Library detail pane.
-                    KeyCode::PageDown => {
-                        if app.lyrics_open || app.now_playing {
-                            app.scroll_lyrics(10);
-                        } else if app.current_page == Page::Library {
-                            app.scroll_details(1);
-                        }
-                    }
-                    KeyCode::PageUp => {
-                        if app.lyrics_open || app.now_playing {
-                            app.scroll_lyrics(-10);
-                        } else if app.current_page == Page::Library {
-                            app.scroll_details(-1);
-                        }
-                    }
-                    // Back from a collection; from search, back to the library.
-                    KeyCode::Esc => {
+                match action {
+                    Action::Quit => app.should_quit = true,
+                    Action::OpenHelp => app.open_help(),
+                    Action::CloseHelp => app.close_help(),
+                    Action::HelpLineUp => app.scroll_help(-1),
+                    Action::HelpLineDown => app.scroll_help(1),
+                    Action::HelpPageUp => app.scroll_help_page(-1),
+                    Action::HelpPageDown => app.scroll_help_page(1),
+                    Action::HelpTop => app.help_home(),
+                    Action::HelpBottom => app.help_end(),
+                    Action::NextRow => app.next(),
+                    Action::PreviousRow => app.previous(),
+                    Action::Activate => app.activate_selected().await,
+                    Action::Back => {
                         if app.now_playing {
                             app.now_playing = false;
                         } else if app.current_page == Page::Browse {
@@ -513,13 +362,105 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.sync_preview();
                         }
                     }
-                    // Focus the search bar.
-                    KeyCode::Char('/') => {
+                    Action::OpenBrowseSection(section) => {
+                        app.open_browse_section(section).await;
+                    }
+                    Action::OpenBrowsePicker => app.open_browse_picker().await,
+                    Action::FocusSearch => {
                         app.current_page = Page::Search;
                         app.input_mode = InputMode::Search;
                         app.search_query.clear();
                     }
-                    _ => {}
+                    Action::CycleSearchFilter(forward) => {
+                        if app.current_page == Page::Search {
+                            app.cycle_search_filter(forward);
+                        }
+                    }
+                    Action::ScrollPage(delta) => {
+                        if app.lyrics_open || app.now_playing {
+                            app.scroll_lyrics(i32::from(delta) * 10);
+                        } else if app.current_page == Page::Library {
+                            app.scroll_details(isize::from(delta));
+                        }
+                    }
+                    Action::ToggleOffline => app.toggle_offline(),
+                    Action::TogglePlay => app.toggle_play(),
+                    Action::SeekBack => app.seek_relative(-10),
+                    Action::SeekForward => app.seek_relative(10),
+                    Action::PlayNext => app.play_next(),
+                    Action::PlayPrevious => app.play_previous(),
+                    Action::ToggleLike => app.toggle_like(),
+                    Action::ToggleLyrics => app.toggle_lyrics(),
+                    Action::ToggleNowPlaying => app.toggle_now_playing(),
+                    Action::ToggleAutoQueue => app.toggle_auto_queue(),
+                    Action::CycleRepeat => app.cycle_repeat(),
+                    Action::ToggleShuffle => app.toggle_shuffle(),
+                    Action::OpenQueue => app.open_queue(),
+                    Action::QueuePlayNext => app.queue_focused_next(),
+                    Action::QueueAppend => {
+                        if let Some(track) = app.selected_track() {
+                            app.queue_append(track);
+                        }
+                    }
+                    Action::QueueMoveDown => app.queue_move(true),
+                    Action::QueueMoveUp => app.queue_move(false),
+                    Action::DownloadOrDelete => {
+                        // On the queue `d` deletes the row — its long-standing
+                        // meaning. Anywhere else a song is highlighted, `d`
+                        // saves it for offline and marks it with a check.
+                        if app.current_page == Page::Queue {
+                            app.queue_remove_selected();
+                        } else {
+                            app.download_selected();
+                        }
+                    }
+                    Action::OpenAddPicker => app.open_playlist_picker(),
+                    Action::StartCreatePlaylist => {
+                        app.input_mode = InputMode::CreatePlaylist;
+                        app.create_playlist_query.clear();
+                    }
+                    Action::RemoveFromPlaylist => app.remove_selected_from_playlist(),
+                    Action::SearchSubmit => {
+                        app.input_mode = InputMode::Normal;
+                        app.perform_search();
+                    }
+                    Action::SearchCancel => {
+                        app.input_mode = InputMode::Normal;
+                        app.search_query.clear();
+                    }
+                    Action::SearchBackspace => {
+                        app.search_query.pop();
+                    }
+                    Action::SearchInsert => {
+                        if let KeyCode::Char(c) = key.code {
+                            app.search_query.push(c);
+                        }
+                    }
+                    Action::CreateSubmit => {
+                        let title = std::mem::take(&mut app.create_playlist_query);
+                        app.input_mode = InputMode::Normal;
+                        app.create_playlist_submit(title);
+                    }
+                    Action::CreateCancel => {
+                        app.input_mode = InputMode::Normal;
+                        app.create_playlist_query.clear();
+                    }
+                    Action::CreateBackspace => {
+                        app.create_playlist_query.pop();
+                    }
+                    Action::CreateInsert => {
+                        if let KeyCode::Char(c) = key.code {
+                            app.create_playlist_query.push(c);
+                        }
+                    }
+                    Action::AddPickerNext => app.picker_next(),
+                    Action::AddPickerPrevious => app.picker_previous(),
+                    Action::AddPickerConfirm => app.picker_add_selected(),
+                    Action::AddPickerCancel => app.close_playlist_picker(),
+                    Action::BrowsePickerNext => app.browse_picker_next(),
+                    Action::BrowsePickerPrevious => app.browse_picker_previous(),
+                    Action::BrowsePickerConfirm => app.browse_picker_select().await,
+                    Action::BrowsePickerCancel => app.close_browse_picker(),
                 }
             }
         }
