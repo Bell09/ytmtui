@@ -309,17 +309,6 @@ As long as `~/.config/ytmtui/lastfm.json` holds valid credentials, every track i
 
 ---
 
-## 📡 Stream extraction & recovery
-
-yt-dlp stays the primary extractor; mpv's built-in ytdl hook is the fallback when a prefetched stream is not ready in time.
-
-- The next queue track is resolved in the background with `bestaudio/best`, a 30-second deadline, one retry for transient failures, and bounded yt-dlp retries/socket timeouts.
-- Direct stream URLs are passed to mpv together with the HTTP headers yt-dlp reports (via IPC before each load), so a required `User-Agent` or similar header is not lost.
-- Expired or failed streams are retried twice by the playback watchdog, then skipped; each retry goes through a fresh extraction rather than reusing the dead URL.
-- Extraction errors are shortened, capped, and stripped of signed URLs before they reach the footer. `ytmtui status` reports missing yt-dlp/mpv and whether a JavaScript runtime is on `PATH`.
-- No Rust-native extractor is bundled: implementing YouTube signature/cipher handling and PO Tokens would duplicate a fast-moving, security-sensitive surface and add significant maintenance and dependency weight.
-
-Advanced yt-dlp behavior (player clients, PO Token providers, impersonation) can be configured in yt-dlp's own config or plugins; ytmtui deliberately does not hardcode those choices.
 
 ---
 
