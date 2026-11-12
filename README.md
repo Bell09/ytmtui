@@ -360,20 +360,6 @@ Quick picks · Your daily discover · Featured playlists for you · My subscript
 
 ---
 
-## 🔁 Auto Queue
-
-When the queue reaches its final track, YTMTUI fetches similar songs in the background and appends up to five of them before playback ends. It requests ten candidates, keeps only one request in flight, skips tracks already in the queue, and discards replies if the queue or current track changed in the meantime.
-
-Auto Queue is enabled by default. It pauses automatically in offline mode and whenever repeat is set to **all** or **one**, so those modes keep their normal end-of-queue behavior. Press `Ctrl+A` to toggle it for the current session.
-
-To change the startup default, edit `~/.config/ytmtui/config.json`:
-
-```json
-{
-  "auto_queue": false
-}
-```
-
 ---
 
 ## 🎨 Theming
