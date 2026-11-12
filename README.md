@@ -360,8 +360,6 @@ Quick picks · Your daily discover · Featured playlists for you · My subscript
 
 ---
 
----
-
 ## 🎨 Theming
 
 YTMTUI automatically picks up the newest color palette written by your wallpaper tools.
