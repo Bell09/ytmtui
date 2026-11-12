@@ -58,7 +58,6 @@ featuring an **mpv** backend · download songs with Embedded album art + lyrics 
 <img src="assets/screenshots/2026-11-06-213210_hyprshot.png" width="48%" alt="Avril Lavigne — I'm with You · browse shelves" />
 <img src="assets/screenshots/slow%20dancing%20in%20the%20dark.png" width="48%" alt="Joji — SLOW DANCING IN THE DARK" />
 
-
 <img src="assets/screenshots/2026-11-06-214330_hyprshot.png" width="48%" alt="liana flores — rises the moon" />
 <img src="assets/screenshots/no%20Vacation.png" width="48%" alt="Yam Yam — No Vacation" />
 
@@ -307,7 +306,6 @@ Once connected, scrobbling runs automatically — there is no switch to flip:
 
 As long as `~/.config/ytmtui/lastfm.json` holds valid credentials, every track is scrobbled. The header shows `· last.fm:<username>` in the accent colour while connected. Run `ytmtui setup lastfm` and choose **Disconnect** to stop scrobbling.
 
-
 ---
 
 ## ⌨️ Keybindings
@@ -337,7 +335,6 @@ As long as `~/.config/ytmtui/lastfm.json` holds valid credentials, every track i
 | `Ctrl+S` | Toggle shuffle |
 | `PgUp` / `PgDn` | Scroll lyrics or detail pane |
 | `q` | Quit |
-
 
 ## 🖼️ Views
 
