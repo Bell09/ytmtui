@@ -3,8 +3,9 @@
 //! WezTerm, Ghostty, Konsole) show a true inline image; elsewhere it is
 //! drawn with quadrant blocks at two pixels per cell in both axes.
 
-use crate::models::Track;
+use crate::models::{Playlist, SearchHit, Track};
 use image::RgbaImage;
+use std::borrow::Cow;
 
 /// How album art can be rendered in this terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +155,54 @@ pub fn cover_urls(t: &Track) -> Vec<String> {
         }
     }
     urls
+}
+
+/// Small thumbnail URL for a list row. YouTube video ids get the compact
+/// `mqdefault` still, while local files use their sidecar path (or the file
+/// itself, whose embedded tag is read at fetch time). API-provided artwork is
+/// kept when it is not already a full-size `i.ytimg.com` still, so Google's
+/// image server can be asked for a 128-pixel copy instead.
+pub fn track_thumbnail_url(t: &Track) -> Option<Cow<'_, str>> {
+    if crate::offline::is_local(&t.id) {
+        if let Some(path) = t.thumbnail_url.as_deref().filter(|p| !p.is_empty()) {
+            return Some(Cow::Borrowed(path));
+        }
+        return crate::offline::local_path(&t.id)
+            .map(|path| Cow::Owned(path.display().to_string()));
+    }
+    if !t.id.is_empty() {
+        if let Some(url) = t.thumbnail_url.as_deref().filter(|u| !u.is_empty()) {
+            if !url.contains("i.ytimg.com") {
+                return Some(Cow::Borrowed(url));
+            }
+        }
+        return Some(Cow::Owned(format!(
+            "https://i.ytimg.com/vi/{}/mqdefault.jpg",
+            t.id
+        )));
+    }
+    t.thumbnail_url
+        .as_deref()
+        .filter(|u| !u.is_empty())
+        .map(Cow::Borrowed)
+}
+
+/// Thumbnail URL for either kind of search/browse row.
+pub fn hit_thumbnail_url(hit: &SearchHit) -> Option<Cow<'_, str>> {
+    match hit {
+        SearchHit::Track(track) => track_thumbnail_url(track),
+        SearchHit::Collection(collection) => collection_thumbnail_url(collection),
+    }
+}
+
+/// Collections only carry whatever the API returned; their browse ids are not
+/// video ids, so there is no URL to derive when it is missing.
+pub fn collection_thumbnail_url(collection: &Playlist) -> Option<Cow<'_, str>> {
+    collection
+        .thumbnail_url
+        .as_deref()
+        .filter(|u| !u.is_empty())
+        .map(Cow::Borrowed)
 }
 
 /// Decode a path: an image file if possible, otherwise the cover embedded in
@@ -334,6 +383,32 @@ pub async fn fetch_discovery_thumbnail(client: &reqwest::Client, url: &str) -> O
         .await
         .ok()
         .flatten()
+}
+
+/// Fetch one list-row thumbnail. HTTP(S) URLs use the small Google rewrite;
+/// anything else is a local path, including audio files whose embedded cover
+/// is extracted by `cover_from_disk`.
+pub async fn fetch_thumbnail(client: &reqwest::Client, url: &str) -> Option<RgbaImage> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return fetch_discovery_thumbnail(client, url).await;
+    }
+    let path = match url.strip_prefix("file://") {
+        Some(rest) => urlencoding::decode(rest)
+            .map(|decoded| decoded.into_owned())
+            .unwrap_or_else(|_| rest.to_string()),
+        None => url.to_string(),
+    };
+    tokio::task::spawn_blocking(move || decode_local_thumbnail(&path))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn decode_local_thumbnail(path: &str) -> Option<RgbaImage> {
+    let source = cover_from_disk(path)?;
+    let small = image::DynamicImage::ImageRgba8(source).thumbnail(64, 64).into_rgba8();
+    let square = center_square(small)?;
+    Some(fit_square(&square, 32, 16))
 }
 
 fn decode_discovery_thumbnail(bytes: Vec<u8>) -> Option<RgbaImage> {
