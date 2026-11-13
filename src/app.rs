@@ -136,6 +136,14 @@ const DISCOVERY_ART_CACHE: usize = 24;
 /// wide terminals; extra cards show a placeholder instead.
 pub const DISCOVERY_ART_VISIBLE_MAX: usize = 16;
 const _: () = assert!(DISCOVERY_ART_VISIBLE_MAX < DISCOVERY_ART_CACHE);
+/// Decoded 32x16 thumbnails shared by every scrolling list (about 2 KB
+/// each). The cap is large enough to hold a full Home/Explore feed, so
+/// preloading a feed cannot evict covers that are about to scroll into view.
+const THUMB_CACHE: usize = 1024;
+/// Covers fetched at once. Visible rows still take priority over background
+/// preloads, but a few parallel requests keep a fresh screen from filling
+/// with placeholders one fetch at a time.
+const THUMB_FETCH_CONCURRENCY: usize = 6;
 
 /// Background home-feed refresh for the browse picker.
 type BrowseResult = Result<Vec<BrowseShelf>, String>;
@@ -316,6 +324,19 @@ pub struct App {
     discovery_art_handle: Option<tokio::task::JoinHandle<()>>,
     discovery_art_tx: tokio::sync::mpsc::UnboundedSender<(String, Option<image::RgbaImage>)>,
     discovery_art_rx: tokio::sync::mpsc::UnboundedReceiver<(String, Option<image::RgbaImage>)>,
+    /// Decoded row/card thumbnails shared across every scrolling list
+    /// (about 2 KB each). Retained at most `THUMB_CACHE` entries.
+    pub thumb_art: std::collections::HashMap<String, Option<image::RgbaImage>>,
+    thumb_art_order: std::collections::VecDeque<String>,
+    /// URLs waiting for a fetch. Visible rows jump ahead of background
+    /// Home/Explore preloads.
+    thumb_visible: std::collections::VecDeque<String>,
+    thumb_background: std::collections::VecDeque<String>,
+    /// Queued plus in-flight URLs, so a URL is requested only once.
+    thumb_requested: std::collections::HashSet<String>,
+    thumb_inflight: usize,
+    thumb_tx: tokio::sync::mpsc::UnboundedSender<(String, Option<image::RgbaImage>)>,
+    thumb_rx: tokio::sync::mpsc::UnboundedReceiver<(String, Option<image::RgbaImage>)>,
     discovery_tx: tokio::sync::mpsc::UnboundedSender<DiscoveryResult>,
     discovery_rx: tokio::sync::mpsc::UnboundedReceiver<DiscoveryResult>,
     pub browse_loaded: bool,
@@ -621,6 +642,7 @@ impl App {
         let (browse_refresh_tx, browse_refresh_rx) = tokio::sync::mpsc::unbounded_channel();
         let (discovery_tx, discovery_rx) = tokio::sync::mpsc::unbounded_channel();
         let (discovery_art_tx, discovery_art_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (thumb_tx, thumb_rx) = tokio::sync::mpsc::unbounded_channel();
         let (page_fetch_tx, page_fetch_rx) = tokio::sync::mpsc::unbounded_channel();
         let (offline_scan_tx, offline_scan_rx) = tokio::sync::mpsc::unbounded_channel();
         let (prefetch_tx, prefetch_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -793,6 +815,14 @@ impl App {
             discovery_art_handle: None,
             discovery_art_tx,
             discovery_art_rx,
+            thumb_art: std::collections::HashMap::new(),
+            thumb_art_order: std::collections::VecDeque::new(),
+            thumb_visible: std::collections::VecDeque::new(),
+            thumb_background: std::collections::VecDeque::new(),
+            thumb_requested: std::collections::HashSet::new(),
+            thumb_inflight: 0,
+            thumb_tx,
+            thumb_rx,
             discovery_tx,
             discovery_rx,
             browse_loaded: false,
