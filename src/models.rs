@@ -43,6 +43,8 @@ pub struct Playlist {
     pub title: String,
     pub subtitle: String,
     pub track_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_url: Option<String>,
     pub kind: PlaylistKind,
 }
 
@@ -89,6 +91,15 @@ impl SearchHit {
 pub struct BrowseShelf {
     pub title: String,
     pub items: Vec<SearchHit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub more: Option<BrowseEndpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowseEndpoint {
+    pub browse_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<String>,
 }
 
 /// One line on the browse page. Headers render but the cursor skips them.

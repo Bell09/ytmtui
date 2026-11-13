@@ -24,15 +24,12 @@ pub fn graphics_mode() -> Graphics {
 
     // Kitty graphics protocol is spoken by Kitty, WezTerm, Ghostty and
     // Konsole. Environment variables each terminal sets:
-    let kitty = std::env::var_os("KITTY_WINDOW_ID").is_some()
-        || term.contains("kitty");
+    let kitty = std::env::var_os("KITTY_WINDOW_ID").is_some() || term.contains("kitty");
     let wezterm = std::env::var_os("WEZTERM_PANE").is_some()
         || std::env::var_os("WEZTERM_EXECUTABLE").is_some()
         || term_program.contains("WezTerm");
-    let ghostty = std::env::var_os("GHOSTTY").is_some()
-        || term_program.contains("Ghostty");
-    let konsole = std::env::var_os("KONSOLE_VERSION").is_some()
-        || term.contains("konsole");
+    let ghostty = std::env::var_os("GHOSTTY").is_some() || term_program.contains("Ghostty");
+    let konsole = std::env::var_os("KONSOLE_VERSION").is_some() || term.contains("konsole");
 
     if kitty || wezterm || ghostty || konsole {
         Graphics::Kitty
@@ -65,7 +62,10 @@ pub fn text_scaling() -> bool {
         }
         // Kitty: check the CLI version (0.40+).
         if std::env::var_os("KITTY_WINDOW_ID").is_some() || term.contains("kitty") {
-            let Ok(out) = std::process::Command::new("kitty").arg("--version").output() else {
+            let Ok(out) = std::process::Command::new("kitty")
+                .arg("--version")
+                .output()
+            else {
                 return false;
             };
             let text = String::from_utf8_lossy(&out.stdout);
@@ -73,8 +73,14 @@ pub fn text_scaling() -> bool {
                 return false;
             };
             let mut parts = ver.split('.');
-            let major = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
-            let minor = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+            let major = parts
+                .next()
+                .and_then(|p| p.parse::<u32>().ok())
+                .unwrap_or(0);
+            let minor = parts
+                .next()
+                .and_then(|p| p.parse::<u32>().ok())
+                .unwrap_or(0);
             return (major, minor) >= (0, 40);
         }
         // Konsole speaks the Kitty graphics protocol but not OSC 66.
@@ -166,7 +172,9 @@ fn embedded_cover(path: &str) -> Option<RgbaImage> {
     use lofty::file::TaggedFileExt;
     let tagged = lofty::read_from_path(path).ok()?;
     let picture = tagged.tags().iter().flat_map(|tag| tag.pictures()).next()?;
-    image::load_from_memory(picture.data()).ok().map(|img| img.to_rgba8())
+    image::load_from_memory(picture.data())
+        .ok()
+        .map(|img| img.to_rgba8())
 }
 
 /// Centre-crop to a square, trimming letterbox bars (album art is centred).
@@ -241,6 +249,110 @@ pub async fn fetch_cover(urls: Vec<String>) -> Option<RgbaImage> {
     None
 }
 
+/// Largest download, and largest decoded side, accepted for a discovery card.
+/// Cards are drawn at 32x16 pixels, so anything bigger is wasted memory.
+const DISCOVERY_MAX_BYTES: usize = 256 * 1024;
+const DISCOVERY_MAX_SIDE: u32 = 1280;
+const DISCOVERY_MAX_ALLOC: u64 = 8 * 1024 * 1024;
+/// Side length asked of Google's image server for a card cover.
+const DISCOVERY_COVER_SIDE: u32 = 128;
+
+/// Google-hosted covers end in a size option such as `=w544-h544-l90-rj`.
+/// Ask the server for a card-sized copy rather than downloading and decoding
+/// the large one only to shrink it to 32x16. Any other URL (notably signed
+/// `i.ytimg.com` links, which cannot be edited) is returned untouched.
+fn card_cover_url(url: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let host = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split('/').next())
+        .unwrap_or("");
+    if !(host.ends_with(".googleusercontent.com") || host.ends_with(".ggpht.com")) {
+        return Cow::Borrowed(url);
+    }
+    let Some((head, options)) = url.rsplit_once('=') else {
+        return Cow::Borrowed(url);
+    };
+    if options.is_empty()
+        || !options
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Cow::Borrowed(url);
+    }
+    let mut changed = false;
+    let mut out = String::with_capacity(url.len());
+    out.push_str(head);
+    out.push('=');
+    for (index, token) in options.split('-').enumerate() {
+        if index > 0 {
+            out.push('-');
+        }
+        let (prefix, digits) = token.split_at(token.len().min(1));
+        match (prefix, digits.parse::<u32>()) {
+            ("w" | "h" | "s", Ok(side)) if side > DISCOVERY_COVER_SIDE => {
+                changed = true;
+                out.push_str(prefix);
+                out.push_str(&DISCOVERY_COVER_SIDE.to_string());
+            }
+            _ => out.push_str(token),
+        }
+    }
+    if changed {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(url)
+    }
+}
+
+/// A small, bounded thumbnail for discovery cards. The response, decoder and
+/// final cache entry have limits so opening a shelf does not retain large art.
+pub async fn fetch_discovery_thumbnail(client: &reqwest::Client, url: &str) -> Option<RgbaImage> {
+    let url = card_cover_url(url);
+    let mut response = client
+        .get(url.as_ref())
+        .header(reqwest::header::USER_AGENT, "Mozilla/5.0")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    let length = response.content_length();
+    if length.is_some_and(|len| len > DISCOVERY_MAX_BYTES as u64) {
+        return None;
+    }
+    // Size the buffer once from Content-Length so it never doubles.
+    let mut bytes = Vec::with_capacity(length.map_or(16 * 1024, |len| len as usize));
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if bytes.len().saturating_add(chunk.len()) > DISCOVERY_MAX_BYTES {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    tokio::task::spawn_blocking(move || decode_discovery_thumbnail(bytes))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn decode_discovery_thumbnail(bytes: Vec<u8>) -> Option<RgbaImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(DISCOVERY_MAX_SIDE);
+    limits.max_image_height = Some(DISCOVERY_MAX_SIDE);
+    limits.max_alloc = Some(DISCOVERY_MAX_ALLOC);
+    reader.limits(limits);
+    let decoded = reader.decode().ok()?;
+    // Downscale before converting or cropping, so those copies stay tiny.
+    let small = decoded.thumbnail(64, 64).into_rgba8();
+    drop(decoded);
+    let square = center_square(small)?;
+    Some(fit_square(&square, 32, 16))
+}
+
 /// Resize the cover to an exact pixel canvas (Lanczos3), never cropping: the
 /// art block letterboxes whatever doesn't fit.
 pub fn fit_square(src: &RgbaImage, px_w: u32, px_h: u32) -> RgbaImage {
@@ -271,8 +383,7 @@ pub fn png_bytes(img: &RgbaImage) -> Option<Vec<u8>> {
 
 /// Base64 for kitty payloads; avoids an extra dependency.
 fn base64(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let n = ((chunk[0] as u32) << 16)
@@ -297,7 +408,15 @@ fn base64(data: &[u8]) -> String {
 /// Escape bytes that draw `png` inline over a `cols`×`rows` cell area at
 /// (`x`, `y`), chunked per the kitty spec. Kitty scales the `px_w`×`px_h`
 /// pixels to the cell block, so one high-res payload works at any size.
-pub fn kitty_transfer(x: u16, y: u16, cols: u16, rows: u16, px_w: u32, px_h: u32, png: &[u8]) -> Vec<u8> {
+pub fn kitty_transfer(
+    x: u16,
+    y: u16,
+    cols: u16,
+    rows: u16,
+    px_w: u32,
+    px_h: u32,
+    png: &[u8],
+) -> Vec<u8> {
     let payload = base64(png);
     let mut out = Vec::with_capacity(payload.len() + 128);
     // Move the cursor to the art's top-left cell (1-based CUP).
@@ -328,4 +447,82 @@ pub fn kitty_transfer(x: u16, y: u16, cols: u16, rows: u16, px_w: u32, px_h: u32
 /// Delete all visible inline images (terminal cleanup on exit).
 pub fn kitty_cleanup() -> Vec<u8> {
     b"\x1b_Ga=d,d=A\x1b\\".to_vec()
+}
+
+#[cfg(test)]
+mod discovery_memory_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn thumbnail_keeps_the_center_and_has_fixed_small_dimensions() {
+        let mut source = RgbaImage::from_pixel(1200, 600, image::Rgba([0, 0, 255, 255]));
+        for y in 0..600 {
+            for x in 300..900 {
+                source.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
+            }
+        }
+        let bytes = png_bytes(&source).unwrap();
+        drop(source);
+        let thumbnail = decode_discovery_thumbnail(bytes).unwrap();
+        assert_eq!(thumbnail.dimensions(), (32, 16));
+        for (x, y) in [(2, 8), (16, 8), (29, 8)] {
+            let pixel = thumbnail.get_pixel(x, y);
+            assert!(pixel[0] > 200 && pixel[2] < 50, "{pixel:?}");
+        }
+    }
+
+    #[test]
+    fn card_cover_url_requests_a_small_google_cover_and_leaves_other_urls_alone() {
+        let big = "https://lh3.googleusercontent.com/abc_DEF-12=w544-h544-l90-rj";
+        assert_eq!(
+            card_cover_url(big),
+            "https://lh3.googleusercontent.com/abc_DEF-12=w128-h128-l90-rj"
+        );
+        let square = "https://yt3.ggpht.com/xyz=s400-c-k-c0x00ffffff-no-rj";
+        assert_eq!(
+            card_cover_url(square),
+            "https://yt3.ggpht.com/xyz=s128-c-k-c0x00ffffff-no-rj"
+        );
+        // Already small, signed, unknown host, or no size option: unchanged.
+        for url in [
+            "https://lh3.googleusercontent.com/abc=w60-h60-l90-rj",
+            "https://i.ytimg.com/vi/id/sddefault.jpg?sqp=-oaymwEj&rs=AOn4",
+            "https://example.invalid/cover=w544-h544",
+            "https://lh3.googleusercontent.com/no-size-option",
+            "https://lh3.googleusercontent.com/abc=w544-h544?token=1",
+        ] {
+            assert!(
+                matches!(card_cover_url(url), std::borrow::Cow::Borrowed(_)),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn thumbnail_rejects_images_above_the_existing_dimension_limit() {
+        let source = RgbaImage::from_pixel(DISCOVERY_MAX_SIDE + 1, 1, image::Rgba([0, 0, 0, 255]));
+        assert!(decode_discovery_thumbnail(png_bytes(&source).unwrap()).is_none());
+    }
+
+    #[tokio::test]
+    async fn thumbnail_fetch_uses_shared_client_and_rejects_oversized_response() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1048577\r\n\r\n")
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        assert!(
+            fetch_discovery_thumbnail(&client, &format!("http://{address}/cover"))
+                .await
+                .is_none()
+        );
+        server.join().unwrap();
+    }
 }

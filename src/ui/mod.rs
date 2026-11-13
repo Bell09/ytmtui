@@ -2,18 +2,18 @@
 //! whitespace and right-aligned metadata; a one-cell gutter keeps content off
 //! the terminal edges; the pywal palette colours active vs. secondary things.
 
-use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
-    Frame,
-};
-use std::time::{Duration, Instant};
 use crate::app::{App, InputMode, PlaybackState};
 use crate::keymap;
 use crate::models::{BrowseRow, Page, Playlist, PlaylistKind, SearchHit, Track};
 use crate::theme::Theme;
+use ratatui::{
+    Frame,
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+};
+use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Decorative rule under the search input.
@@ -112,10 +112,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // lyrics, borderless. It only shows when there's room for a readable pane
     // plus the content's minimum width.
     let lyrics_w = if app.lyrics_open {
-        rows[1]
-            .width
-            .saturating_sub(sidebar_w + 1 + 10)
-            .min(40)
+        rows[1].width.saturating_sub(sidebar_w + 1 + 10).min(40)
     } else {
         0
     };
@@ -164,7 +161,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let mut list_area = body[0];
     let mut art_area: Option<Rect> = None;
     let current_id = app.current_track.as_ref().map(|t| t.id.as_str());
-    if app.art_track.as_deref().is_some_and(|id| Some(id) == current_id) {
+    if app
+        .art_track
+        .as_deref()
+        .is_some_and(|id| Some(id) == current_id)
+    {
         // Floating look: two cells of empty margin around the block, one cell
         // of inset inside it, and a small cap so it reads as a card and never
         // touches the list above or the playback line below.
@@ -186,9 +187,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let parts = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(4),                       // list
-                    Constraint::Length(1),                    // gap
-                    Constraint::Length(art_rows + PAD * 2),   // padded block
+                    Constraint::Min(4),                     // list
+                    Constraint::Length(1),                  // gap
+                    Constraint::Length(art_rows + PAD * 2), // padded block
                 ])
                 .split(body[0]);
             list_area = parts[0];
@@ -423,22 +424,64 @@ fn large_art_rect(area: Rect) -> Rect {
 /// count. The selected row gets a `▌` cursor and selection colours.
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(area);
+    let highlight = Style::default()
+        .fg(t.selection_fg)
+        .bg(t.selection_bg)
+        .add_modifier(Modifier::BOLD);
+    let nav = ["Home", "Explore", "Library"]
+        .iter()
+        .enumerate()
+        .map(|(index, title)| {
+            let active = match index {
+                0 => {
+                    app.discovery_page == Some(crate::app::DiscoveryPage::Home)
+                        && app.current_page == Page::Browse
+                }
+                1 => {
+                    app.discovery_page == Some(crate::app::DiscoveryPage::Explore)
+                        && app.current_page == Page::Browse
+                }
+                _ => app.current_page == Page::Library,
+            };
+            let style = if active {
+                Style::default()
+                    .fg(t.accent_bright)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t.fg)
+            };
+            ListItem::new(Line::from(Span::styled(format!(" {title}"), style)))
+        })
+        .collect::<Vec<_>>();
+    let mut nav_state = ListState::default();
+    if app.sidebar_focused {
+        nav_state.select(Some(app.sidebar_index));
+    }
+    f.render_stateful_widget(
+        List::new(nav)
+            .highlight_style(highlight)
+            .highlight_symbol("▌"),
+        sections[0],
+        &mut nav_state,
+    );
 
-    // Cursor only makes sense on Library, where this list is what selection
-    // controls; elsewhere the sidebar is informational.
-    let show_cursor = app.current_page == Page::Library && !app.playlists.is_empty();
-
-    // Item text width: minus the 2-column cursor column and a left pad.
+    let show_cursor =
+        app.current_page == Page::Library && !app.sidebar_focused && !app.playlists.is_empty();
     let text_w = (area.width as usize).saturating_sub(3);
-
     let mut items = vec![ListItem::new(Line::from(vec![
-        Span::styled(" LIBRARY", Style::default().fg(t.bright).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " LIBRARY",
+            Style::default().fg(t.bright).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!(" · {}", app.playlists.len()),
             Style::default().fg(t.dim),
         ),
     ]))];
-
     if app.playlists.is_empty() {
         let msg = if app.library_loaded {
             " No playlists found."
@@ -450,23 +493,25 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(t.dim),
         ))));
     }
-
     for (i, playlist) in app.playlists.iter().enumerate() {
-        let is_selected = show_cursor && i == app.selected_index;
-        items.push(sidebar_item(t, playlist, text_w, is_selected));
+        items.push(sidebar_item(
+            t,
+            playlist,
+            text_w,
+            show_cursor && i == app.selected_index,
+        ));
     }
-
-    let list = List::new(items).highlight_style(
-        Style::default()
-            .fg(t.selection_fg)
-            .bg(t.selection_bg)
-            .add_modifier(Modifier::BOLD),
-    ).highlight_symbol("▌");
     let mut state = ListState::default();
     if show_cursor {
-        state.select(Some(app.selected_index + 1)); // +1 for the title row
+        state.select(Some(app.selected_index + 1));
     }
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(
+        List::new(items)
+            .highlight_style(highlight)
+            .highlight_symbol("▌"),
+        sections[1],
+        &mut state,
+    );
 }
 
 fn sidebar_item(
@@ -580,11 +625,7 @@ fn draw_album_art(f: &mut Frame, app: &mut App, area: Rect) {
         app.art_fitted = app.art_source.as_ref().map(|src| {
             (
                 (core, rows),
-                crate::art::fit_square(
-                    src,
-                    u32::from(core) * 2,
-                    u32::from(rows) * 2,
-                ),
+                crate::art::fit_square(src, u32::from(core) * 2, u32::from(rows) * 2),
             )
         });
     }
@@ -696,13 +737,12 @@ fn draw_playback_bar(f: &mut Frame, app: &App, area: Rect) {
             "⏳",
             Style::default().fg(t.warn).add_modifier(Modifier::BOLD),
         ),
-        PlaybackState::Playing => (
-            "▶",
-            Style::default().fg(t.ok).add_modifier(Modifier::BOLD),
-        ),
+        PlaybackState::Playing => ("▶", Style::default().fg(t.ok).add_modifier(Modifier::BOLD)),
         PlaybackState::Paused => (
             "⏸",
-            Style::default().fg(t.warn_bright).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(t.warn_bright)
+                .add_modifier(Modifier::BOLD),
         ),
         PlaybackState::Stopped => (
             "⏹",
@@ -828,10 +868,7 @@ fn draw_playback_bar(f: &mut Frame, app: &App, area: Rect) {
             ));
         } else {
             // Idle: an empty dim track, no playhead.
-            spans.push(Span::styled(
-                "─".repeat(bar_w),
-                Style::default().fg(t.dim),
-            ));
+            spans.push(Span::styled("─".repeat(bar_w), Style::default().fg(t.dim)));
         }
     }
     spans.push(Span::styled(right, right_style));
@@ -982,9 +1019,7 @@ fn lyric_rows(pos: f64, lyrics: &crate::lyrics::Lyrics) -> (Vec<LyricRow>, Optio
             let gap_after: Vec<bool> = (0..lines.len().saturating_sub(1))
                 .map(|i| {
                     let (ts, text) = &lines[i];
-                    lines[i + 1].0 - ts >= 6.0
-                        || text.trim() == "♪"
-                        || text.trim().is_empty()
+                    lines[i + 1].0 - ts >= 6.0 || text.trim() == "♪" || text.trim().is_empty()
                 })
                 .collect();
             let mut rows = Vec::with_capacity(lines.len() * 2);
@@ -1068,8 +1103,8 @@ fn draw_scaled_lyrics(
     }
 
     let viewport = (inner.height as usize / SCALED_LINE_H).max(1);
-    let offset = lyrics_row_offset(&mut app.lyrics_scroll, centre_row, scaled.len(), viewport)
-        as usize;
+    let offset =
+        lyrics_row_offset(&mut app.lyrics_scroll, centre_row, scaled.len(), viewport) as usize;
     app.lyrics_offset = offset as u16;
 
     let t = &app.theme;
@@ -1328,9 +1363,7 @@ fn draw_playlist_picker(f: &mut Frame, app: &App, area: Rect) {
             .border_style(Style::default().fg(t.dim))
             .title(Span::styled(
                 " add to playlist ",
-                Style::default()
-                    .fg(t.accent2)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.accent2).add_modifier(Modifier::BOLD),
             )),
         rect,
     );
@@ -1443,9 +1476,7 @@ fn draw_create_playlist_dialog(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 "enter create",
-                Style::default()
-                    .fg(t.accent2)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.accent2).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" · ", Style::default().fg(t.dim)),
             Span::styled("esc cancel", Style::default().fg(Color::White)),
@@ -1478,9 +1509,7 @@ fn draw_browse_picker(f: &mut Frame, app: &App, area: Rect) {
             .border_style(Style::default().fg(t.dim))
             .title(Span::styled(
                 " browse shelves ",
-                Style::default()
-                    .fg(t.accent2)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.accent2).add_modifier(Modifier::BOLD),
             )),
         rect,
     );
@@ -1531,14 +1560,7 @@ fn draw_browse_picker(f: &mut Frame, app: &App, area: Rect) {
 
 /// Decorative connectors for the cheatsheet rows, in the stitched style of the
 /// search rule. All are six cells wide so descriptions line up.
-const HELP_CONNECTORS: [&str; 6] = [
-    "━━━'.━",
-    "━,'━━━",
-    "━━━',━",
-    "━.'━━━",
-    "━━.'━━",
-    "━'━━━.",
-];
+const HELP_CONNECTORS: [&str; 6] = ["━━━'.━", "━,'━━━", "━━━',━", "━.'━━━", "━━.'━━", "━'━━━."];
 
 /// Scrollable keyboard cheatsheet (`?`). Rows come from the same binding table
 /// that dispatches keys, so this screen cannot drift from the application.
@@ -1609,9 +1631,7 @@ fn draw_help_overlay(f: &mut Frame, app: &mut App, area: Rect) {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{}{}", " ".repeat(pad), entry.keys),
-                    Style::default()
-                        .fg(t.accent2)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.accent2).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("  ", Style::default()),
                 Span::styled(
@@ -1654,25 +1674,19 @@ fn draw_help_overlay(f: &mut Frame, app: &mut App, area: Rect) {
     if max_scroll > 0 {
         hints.push(Span::styled(
             "↑↓",
-            Style::default()
-                .fg(t.accent2)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(t.accent2).add_modifier(Modifier::BOLD),
         ));
         hints.push(Span::styled(" scroll ", Style::default().fg(t.dim)));
         hints.push(Span::styled("· ", Style::default().fg(t.dim)));
     }
     hints.push(Span::styled(
         "esc",
-        Style::default()
-            .fg(t.accent2)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(t.accent2).add_modifier(Modifier::BOLD),
     ));
     hints.push(Span::styled(" / ", Style::default().fg(t.dim)));
     hints.push(Span::styled(
         "q",
-        Style::default()
-            .fg(t.accent2)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(t.accent2).add_modifier(Modifier::BOLD),
     ));
     hints.push(Span::styled(" close", Style::default().fg(t.dim)));
     f.render_widget(
@@ -1735,17 +1749,38 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
             ("q", "quit"),
         ],
         Page::Search => {
-            let mut hints = vec![("/", "search"), ("tab", "filter"), ("b", "browse"), ("esc", "back")];
+            let mut hints = vec![
+                ("/", "search"),
+                ("tab", "filter"),
+                ("b", "browse"),
+                ("esc", "back"),
+            ];
             hints.extend(guide);
             hints
         }
         Page::Library => {
-            let mut hints = vec![("esc", "back"), ("/", "search"), ("b", "browse"), mode];
+            let mut hints = vec![
+                ("tab", "sidebar"),
+                ("esc", "back"),
+                ("/", "search"),
+                ("b", "browse"),
+                mode,
+            ];
             hints.extend(guide);
             hints
         }
         Page::Browse => {
-            let mut hints = vec![("enter", "play/open"), ("esc", "back")];
+            let mut hints = if app.discovery_page.is_some() && app.discovery_is_root() {
+                vec![
+                    ("tab", "sidebar"),
+                    ("[ ]", "item"),
+                    ("P", "play all"),
+                    ("enter", "play/open"),
+                    ("esc", "back"),
+                ]
+            } else {
+                vec![("tab", "sidebar"), ("enter", "play/open"), ("esc", "back")]
+            };
             hints.extend(guide);
             hints
         }
@@ -1809,16 +1844,14 @@ fn draw_footer_bar(f: &mut Frame, app: &App, area: Rect) {
     let status_gap = if compact { 2 } else { 1 };
     // The status is drawn with one leading cell of breathing room, so leave
     // that cell out of the budget as well as the gap to the guide.
-    let mut status_budget =
-        (area.width as usize).saturating_sub(hint_w + status_gap + 1);
+    let mut status_budget = (area.width as usize).saturating_sub(hint_w + status_gap + 1);
     if compact && status_budget < 8 {
         let (ultra_spans, ultra_w) = build_hints(true, true);
         // Shorten even when the status still cannot fit: a guide that fits
         // the row is worth more than one clipped mid-word.
         if ultra_w < hint_w {
             hint_spans = ultra_spans;
-            status_budget =
-                (area.width as usize).saturating_sub(ultra_w + status_gap + 1);
+            status_budget = (area.width as usize).saturating_sub(ultra_w + status_gap + 1);
         }
     }
 
@@ -1880,9 +1913,7 @@ fn visible_window(len: usize, selected: usize, viewport: u16) -> (usize, usize) 
     }
     let viewport = (viewport as usize).min(len);
     let selected = selected.min(len - 1);
-    let start = selected
-        .saturating_sub(viewport / 2)
-        .min(len - viewport);
+    let start = selected.saturating_sub(viewport / 2).min(len - viewport);
     (start, start + viewport)
 }
 
@@ -1890,6 +1921,9 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
     match app.current_page {
         Page::Search => draw_search(f, app, area),
         Page::Library => draw_library_detail(f, app, area),
+        Page::Browse if app.discovery_page.is_some() && app.discovery_is_root() => {
+            draw_discovery(f, app, area)
+        }
         Page::Browse => draw_browse(f, app, area),
         Page::Playlist => draw_playlist_page(f, app, area),
         Page::Queue => draw_queue_page(f, app, area),
@@ -1914,7 +1948,9 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled("  ", Style::default()));
             }
             let style = if i == app.search_filter {
-                Style::default().fg(t.accent_bright).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(t.accent_bright)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(t.dim)
             };
@@ -1934,8 +1970,7 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let width = rows[1].width as usize;
-    let (start, end) =
-        visible_window(app.search_results.len(), app.selected_index, rows[1].height);
+    let (start, end) = visible_window(app.search_results.len(), app.selected_index, rows[1].height);
     let items: Vec<ListItem> = if app.search_results.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             " Nothing here yet — press / to search.",
@@ -1962,16 +1997,200 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
             .collect()
     };
 
-    let list = List::new(items).highlight_style(
-        Style::default()
-            .fg(t.selection_fg)
-            .bg(t.selection_bg),
-    );
+    let list =
+        List::new(items).highlight_style(Style::default().fg(t.selection_fg).bg(t.selection_bg));
     let mut state = ListState::default();
     if !app.search_results.is_empty() {
         state.select(Some(app.selected_index.saturating_sub(start)));
     }
     f.render_stateful_widget(list, rows[1], &mut state);
+}
+
+/// Render feed shelves as compact horizontal cards. Only the viewport is
+/// rendered, and a focused shelf scrolls horizontally with its selection.
+fn draw_discovery(f: &mut Frame, app: &mut App, area: Rect) {
+    let theme = &app.theme;
+    let mut groups = Vec::new();
+    let mut i = 0;
+    while i < app.browse_rows.len() {
+        let BrowseRow::Header(title) = &app.browse_rows[i] else {
+            i += 1;
+            continue;
+        };
+        let start = i + 1;
+        let mut end = start;
+        while end < app.browse_rows.len() && matches!(app.browse_rows[end], BrowseRow::Item(_)) {
+            end += 1;
+        }
+        if start < end {
+            groups.push((title, start, end));
+        }
+        i = end;
+    }
+    if groups.is_empty() {
+        f.render_widget(Paragraph::new(app.status_message.as_str()), area);
+        return;
+    }
+    let selected_group = groups
+        .iter()
+        .position(|(_, start, end)| (*start..*end).contains(&app.selected_index))
+        .unwrap_or(0);
+    let compact = |title: &str| {
+        title.eq_ignore_ascii_case("filters")
+            || title.eq_ignore_ascii_case("explore")
+            || contains_ascii_ci(title, "mood")
+            || contains_ascii_ci(title, "genre")
+    };
+    let group_height = |title: &str| -> usize {
+        if area.height < 11 || area.width < 20 {
+            4
+        } else if compact(title) {
+            5
+        } else {
+            11
+        }
+    };
+    let mut first = selected_group;
+    let mut occupied = group_height(groups[first].0);
+    while first > 0 && occupied + group_height(groups[first - 1].0) <= usize::from(area.height) {
+        first -= 1;
+        occupied += group_height(groups[first].0);
+    }
+    let card_width = usize::from(area.width).clamp(1, 20);
+    let columns = (usize::from(area.width) / card_width).max(1);
+    // At most one cover is wanted per frame, and only when a fetch could start,
+    // so a steady frame allocates no URL strings.
+    let fetch_allowed = app.discovery_art_idle();
+    let mut wanted_url: Option<&str> = None;
+    let mut art_cards = 0usize;
+    let mut top = usize::from(area.y);
+    for (group_index, (title, start, end)) in groups.iter().enumerate().skip(first) {
+        let y = top as u16;
+        if y >= area.bottom() {
+            break;
+        }
+        let height = group_height(title);
+        let grid_rows = if compact(title) && height > 4 { 3 } else { 1 };
+        let slots = columns * grid_rows;
+        let count = end - start;
+        let chosen = app.selected_index.saturating_sub(*start).min(count - 1);
+        let offset = if group_index == selected_group {
+            // Slide a row at a time so the selected card is always in view,
+            // including in the compact three-row grids.
+            chosen.saturating_sub(slots - 1).div_ceil(columns) * columns
+        } else {
+            0
+        };
+        let arrows = if count > slots { "  ‹ ›" } else { "" };
+        let mut label = title.to_uppercase();
+        label.push_str(arrows);
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                label,
+                Style::default()
+                    .fg(theme.accent_bright)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(area.x, y, area.width, 1),
+        );
+        for (slot, row) in (*start + offset..*end).take(slots).enumerate() {
+            let BrowseRow::Item(hit) = &app.browse_rows[row] else {
+                continue;
+            };
+            let (name, detail, url) = match hit {
+                SearchHit::Track(track) => {
+                    (&track.title, &track.artist, track.thumbnail_url.as_ref())
+                }
+                SearchHit::Collection(collection) => (
+                    &collection.title,
+                    &collection.subtitle,
+                    collection.thumbnail_url.as_ref(),
+                ),
+            };
+            let x = area
+                .x
+                .saturating_add(((slot % columns) * card_width) as u16);
+            let width = area.right().saturating_sub(x).min(card_width as u16);
+            if width == 0 || y + 1 >= area.bottom() {
+                continue;
+            }
+            let selected = row == app.selected_index && !app.sidebar_focused;
+            let style = if selected {
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg)
+            };
+            let art_rows = if height == 11 { 7u16 } else { 0 };
+            if art_rows > 0
+                && let Some(url) = url
+            {
+                art_cards += 1;
+                // Beyond the cap a card shows the placeholder only, so the
+                // visible covers always fit in the cache.
+                let shown = art_cards <= crate::app::DISCOVERY_ART_VISIBLE_MAX;
+                if shown && fetch_allowed && wanted_url.is_none() && !app.discovery_art_cached(url)
+                {
+                    wanted_url = Some(url.as_str());
+                }
+                if let Some(Some(img)) = app.discovery_art.get(url).filter(|_| shown) {
+                    let art_width = width.min(16);
+                    for py in 0..art_rows {
+                        if y + 1 + py >= area.bottom() {
+                            break;
+                        }
+                        let mut spans = Vec::with_capacity(usize::from(art_width));
+                        for px in 0..art_width {
+                            let x = u32::from(px) * 2;
+                            let y = u32::from(py) * 2;
+                            spans.push(quadrant_span(&[
+                                *img.get_pixel(x, y),
+                                *img.get_pixel(x + 1, y),
+                                *img.get_pixel(x, y + 1),
+                                *img.get_pixel(x + 1, y + 1),
+                            ]));
+                        }
+                        f.render_widget(
+                            Paragraph::new(Line::from(spans)),
+                            Rect::new(x, y + 1 + py, art_width, 1),
+                        );
+                    }
+                } else {
+                    f.render_widget(
+                        Paragraph::new("▧").style(Style::default().fg(theme.dim)),
+                        Rect::new(x, y + 1, width, 1),
+                    );
+                }
+            }
+            let text_y = y + 1 + art_rows + (slot / columns) as u16;
+            if text_y < area.bottom() {
+                f.render_widget(
+                    Paragraph::new(truncate(name, width as usize)).style(style),
+                    Rect::new(x, text_y, width, 1),
+                );
+            }
+            if grid_rows == 1 && text_y + 1 < area.bottom() {
+                f.render_widget(
+                    Paragraph::new(truncate(detail, width as usize))
+                        .style(Style::default().fg(theme.dim)),
+                    Rect::new(x, text_y + 1, width, 1),
+                );
+            }
+        }
+        top += height;
+    }
+    let wanted_url = wanted_url.map(str::to_owned);
+    app.request_discovery_art(wanted_url.as_deref());
+}
+
+/// ASCII case-insensitive `contains` that allocates nothing.
+fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 /// "For you": mixes, trending songs, community picks and the mood/genre
@@ -2010,10 +2229,7 @@ fn draw_browse(f: &mut Frame, app: &App, area: Rect) {
                             .fg(t.accent_bright)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(
-                        "  ",
-                        Style::default().fg(t.dim),
-                    ),
+                    Span::styled("  ", Style::default().fg(t.dim)),
                 ])),
                 BrowseRow::Item(hit) => {
                     let playing = match hit {
@@ -2031,11 +2247,8 @@ fn draw_browse(f: &mut Frame, app: &App, area: Rect) {
             }
         })
         .collect();
-    let list = List::new(items).highlight_style(
-        Style::default()
-            .fg(t.selection_fg)
-            .bg(t.selection_bg),
-    );
+    let list =
+        List::new(items).highlight_style(Style::default().fg(t.selection_fg).bg(t.selection_bg));
     let mut state = ListState::default();
     state.select(Some(app.selected_index.saturating_sub(start)));
     f.render_stateful_widget(list, area, &mut state);
@@ -2062,9 +2275,7 @@ fn draw_library_detail(f: &mut Frame, app: &mut App, area: Rect) {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     format!("{} ", kind_glyph(playlist.kind)),
-                    Style::default()
-                        .fg(t.accent2)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.accent2).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     truncate(&playlist.title, width.saturating_sub(2)),
@@ -2096,7 +2307,11 @@ fn draw_library_detail(f: &mut Frame, app: &mut App, area: Rect) {
                 total_lines = 1;
                 let waiting = !crate::offline::is_local(playlist.id.as_str());
                 lines.push(Line::from(Span::styled(
-                    if waiting { " Loading…" } else { " Nothing here yet" },
+                    if waiting {
+                        " Loading…"
+                    } else {
+                        " Nothing here yet"
+                    },
                     Style::default().fg(if waiting { t.warn } else { t.dim }),
                 )));
             } else {
@@ -2172,11 +2387,7 @@ fn draw_playlist_page(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(t.bright).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(
-                    " · {} · {} tracks",
-                    kind,
-                    app.playlist_tracks.len()
-                ),
+                format!(" · {} · {} tracks", kind, app.playlist_tracks.len()),
                 Style::default().fg(t.dim),
             ),
         ])),
@@ -2213,11 +2424,8 @@ fn draw_playlist_page(f: &mut Frame, app: &App, area: Rect) {
             })
             .collect()
     };
-    let list = List::new(items).highlight_style(
-        Style::default()
-            .fg(t.selection_fg)
-            .bg(t.selection_bg),
-    );
+    let list =
+        List::new(items).highlight_style(Style::default().fg(t.selection_fg).bg(t.selection_bg));
     let mut state = ListState::default();
     if !app.playlist_tracks.is_empty() {
         state.select(Some(app.selected_index.saturating_sub(start)));
@@ -2284,11 +2492,8 @@ fn draw_queue_page(f: &mut Frame, app: &App, area: Rect) {
             })
             .collect()
     };
-    let list = List::new(items).highlight_style(
-        Style::default()
-            .fg(t.selection_fg)
-            .bg(t.selection_bg),
-    );
+    let list =
+        List::new(items).highlight_style(Style::default().fg(t.selection_fg).bg(t.selection_bg));
     let mut state = ListState::default();
     if !app.queue.is_empty() {
         state.select(Some(app.selected_index.saturating_sub(start)));
@@ -2309,12 +2514,8 @@ fn hit_row(
     pct: Option<u8>,
 ) -> ListItem<'static> {
     match hit {
-        SearchHit::Track(track) => {
-            track_row(theme, 0, track, width, is_selected, playing, pct)
-        }
-        SearchHit::Collection(collection) => {
-            collection_row(theme, collection, width, is_selected)
-        }
+        SearchHit::Track(track) => track_row(theme, 0, track, width, is_selected, playing, pct),
+        SearchHit::Collection(collection) => collection_row(theme, collection, width, is_selected),
     }
 }
 
@@ -2330,7 +2531,15 @@ fn track_row(
     playing: bool,
     pct: Option<u8>,
 ) -> ListItem<'static> {
-    ListItem::new(track_line(theme, number, track, width, is_selected, playing, pct))
+    ListItem::new(track_line(
+        theme,
+        number,
+        track,
+        width,
+        is_selected,
+        playing,
+        pct,
+    ))
 }
 
 fn track_line(
@@ -2381,7 +2590,9 @@ fn track_line(
         let index_style = if is_selected {
             Style::default()
         } else if playing {
-            Style::default().fg(theme.ok_soft).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.ok_soft)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)
         };
@@ -2402,10 +2613,12 @@ fn track_line(
     // column. It peels off first when the row
     // narrows, then the artist, then the duration — the title always
     // keeps a workable budget.
-    let album = truncate(track.album.as_deref().unwrap_or(""), (width / 3).clamp(8, 24));
+    let album = truncate(
+        track.album.as_deref().unwrap_or(""),
+        (width / 3).clamp(8, 24),
+    );
     let album_w = display_width(&album);
-    let show_album =
-        !album.is_empty() && show_artist && avail >= album_w + artist_w + dur_w + 18;
+    let show_album = !album.is_empty() && show_artist && avail >= album_w + artist_w + dur_w + 18;
 
     let right_w = (if show_dur { dur_w } else { 0 })
         + (if show_artist { artist_w + 2 } else { 0 })
@@ -2592,8 +2805,8 @@ fn pad(s: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod help_tests {
-    use super::{draw, App};
-    use ratatui::{backend::TestBackend, Terminal};
+    use super::{App, draw};
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
         let buffer = terminal.backend().buffer();
@@ -2659,7 +2872,10 @@ mod header_tests {
 
     #[test]
     fn header_keeps_malformed_names_on_one_line() {
-        assert_eq!(header_account(false, Some(" Test\nAccount ")), "Test Account");
+        assert_eq!(
+            header_account(false, Some(" Test\nAccount ")),
+            "Test Account"
+        );
         assert_eq!(header_account(false, Some("Test\tAccount")), "Test Account");
     }
 
@@ -2675,5 +2891,187 @@ mod header_tests {
 
         // Without a configured account there is no badge at all.
         assert!(lastfm_badge(&Scrobbler::default(), &theme).is_none());
+    }
+}
+
+#[cfg(test)]
+mod discovery_render_tests {
+    use super::*;
+    use crate::app::DiscoveryPage;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn collection(title: &str) -> BrowseRow {
+        BrowseRow::Item(SearchHit::Collection(Playlist {
+            id: title.into(),
+            title: title.into(),
+            subtitle: "Artists".into(),
+            track_count: None,
+            thumbnail_url: None,
+            kind: PlaylistKind::Playlist,
+        }))
+    }
+
+    #[tokio::test]
+    async fn sidebar_navigation_stays_visible_when_library_scrolls() {
+        let mut app = App::new();
+        app.current_page = Page::Library;
+        app.playlists = (0..40)
+            .map(|i| Playlist {
+                id: format!("id{i}"),
+                title: format!("Playlist {i}"),
+                subtitle: String::new(),
+                track_count: None,
+                thumbnail_url: None,
+                kind: PlaylistKind::Playlist,
+            })
+            .collect();
+        app.selected_index = 39;
+        let mut terminal = Terminal::new(TestBackend::new(30, 12)).unwrap();
+        terminal
+            .draw(|frame| draw_sidebar(frame, &app, Rect::new(0, 0, 30, 12)))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let text = (0..12)
+            .map(|y| (0..30).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("Home") && text.contains("Explore") && text.contains("Library"),
+            "{text}"
+        );
+        assert!(text.contains("Playlist 39"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn wide_terminals_cap_covers_so_the_cache_cannot_thrash() {
+        let mut app = App::new();
+        app.current_page = Page::Browse;
+        app.discovery_page = Some(DiscoveryPage::Home);
+        app.browse_rows
+            .push(BrowseRow::Header("Mixed for you".into()));
+        for i in 0..30 {
+            let url = format!("https://example.invalid/{i}");
+            app.browse_rows
+                .push(BrowseRow::Item(SearchHit::Collection(Playlist {
+                    id: format!("id{i}"),
+                    title: format!("Mix {i}"),
+                    subtitle: String::new(),
+                    track_count: None,
+                    thumbnail_url: Some(url.clone()),
+                    kind: PlaylistKind::Playlist,
+                })));
+            app.discovery_art
+                .insert(url, Some(image::RgbaImage::new(32, 16)));
+        }
+        app.selected_index = 1;
+        let mut terminal = Terminal::new(TestBackend::new(400, 30)).unwrap();
+        terminal
+            .draw(|frame| draw_discovery(frame, &mut app, Rect::new(0, 0, 400, 30)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let cap = crate::app::DISCOVERY_ART_VISIBLE_MAX as u16;
+        // Cards are 20 columns wide; the cover starts one row under the title.
+        assert_ne!(buffer[(0, 1)].symbol(), "▧");
+        assert_ne!(buffer[((cap - 1) * 20, 1)].symbol(), "▧");
+        assert_eq!(buffer[(cap * 20, 1)].symbol(), "▧");
+        assert!(app.discovery_art_idle(), "all covers were already cached");
+    }
+
+    #[tokio::test]
+    async fn selected_cards_scroll_into_view_at_the_end_of_long_shelves() {
+        let mut app = App::new();
+        app.current_page = Page::Browse;
+        app.discovery_page = Some(DiscoveryPage::Home);
+        app.browse_rows
+            .push(BrowseRow::Header("Mixed for you".into()));
+        for i in 0..30 {
+            let title = format!("Mix {i}");
+            app.browse_rows
+                .push(BrowseRow::Item(SearchHit::Collection(Playlist {
+                    id: title.clone(),
+                    title,
+                    subtitle: String::new(),
+                    track_count: None,
+                    thumbnail_url: None,
+                    kind: PlaylistKind::Playlist,
+                })));
+        }
+        app.selected_index = 30;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw_discovery(frame, &mut app, Rect::new(0, 0, 80, 24)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Mix 29"), "{text}");
+
+        // Compact groups use three rows of cards; the last row must still
+        // slide into view when the selection enters it.
+        let mut app = App::new();
+        app.current_page = Page::Browse;
+        app.discovery_page = Some(DiscoveryPage::Home);
+        app.browse_rows
+            .push(BrowseRow::Header("Moods & genres".into()));
+        for i in 0..20 {
+            let title = format!("Mood {i}");
+            app.browse_rows
+                .push(BrowseRow::Item(SearchHit::Collection(Playlist {
+                    id: title.clone(),
+                    title,
+                    subtitle: String::new(),
+                    track_count: None,
+                    thumbnail_url: None,
+                    kind: PlaylistKind::Mood,
+                })));
+        }
+        app.selected_index = 13;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw_discovery(frame, &mut app, Rect::new(0, 0, 80, 24)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Mood 12"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn home_displays_shelf_items_horizontally_and_survives_small_terminals() {
+        let mut app = App::new();
+        app.current_page = Page::Browse;
+        app.discovery_page = Some(DiscoveryPage::Home);
+        app.browse_rows = vec![
+            BrowseRow::Header("Mixed for you".into()),
+            collection("My Mix 1"),
+            collection("My Mix 2"),
+        ];
+        app.selected_index = 1;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw_discovery(frame, &mut app, Rect::new(0, 0, 80, 24)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let line = (0..80).map(|x| buffer[(x, 8)].symbol()).collect::<String>();
+        assert!(
+            line.contains("My Mix 1") && line.contains("My Mix 2"),
+            "{line}"
+        );
+        let mut small = Terminal::new(TestBackend::new(18, 4)).unwrap();
+        small
+            .draw(|frame| draw_discovery(frame, &mut app, Rect::new(0, 0, 18, 4)))
+            .unwrap();
     }
 }

@@ -1,12 +1,21 @@
 use crate::auth::Auth;
-use crate::models::{BrowseShelf, Playlist, PlaylistKind, SearchHit, Track};
+use crate::models::{BrowseEndpoint, BrowseShelf, Playlist, PlaylistKind, SearchHit, Track};
 use reqwest::Client;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
+
+/// Home continuation pages fetched up front. A page is a large JSON tree
+/// while it is parsed, so the feed is bounded instead of drained.
+const DISCOVERY_HOME_PAGES: usize = 4;
+/// Shelves kept from Home, and items kept per Home shelf (the rest of a
+/// long shelf stays reachable through its "More…" row).
+const DISCOVERY_HOME_SHELVES: usize = 16;
+const DISCOVERY_SHELF_ITEMS: usize = 30;
+/// Items kept from one "More…" page.
+const DISCOVERY_MORE_ITEMS: usize = 100;
 
 const API_KEY: &str = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
 const CLIENT_VERSION: &str = "1.20261102.01.00";
-const BROWSE_URL: &str =
-    "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false";
+const BROWSE_URL: &str = "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false";
 const NEXT_URL: &str = "https://music.youtube.com/youtubei/v1/next?prettyPrint=false";
 const LIKE_URL: &str = "https://music.youtube.com/youtubei/v1/like/";
 /// Playlist edits live under `browse/edit_playlist` these days — the old
@@ -55,6 +64,11 @@ impl YtmApi {
             headers: Auth::load_headers(),
             visitor_id: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Reuse the existing connection pool for anonymous thumbnail requests.
+    pub(crate) fn thumbnail_client(&self) -> Client {
+        self.client.clone()
     }
 
     /// Make sure the session has a visitor id before the first personalised
@@ -124,11 +138,7 @@ impl YtmApi {
     /// `None` performs the default (mixed) search. Uses the authenticated
     /// Innertube endpoint when signed in, otherwise falls back to the public
     /// search API.
-    pub async fn search(
-        &self,
-        query: &str,
-        params: Option<&str>,
-    ) -> anyhow::Result<SearchResults> {
+    pub async fn search(&self, query: &str, params: Option<&str>) -> anyhow::Result<SearchResults> {
         if let Some(ref headers) = self.headers {
             if let Ok(results) = self.search_authenticated(query, params, headers).await {
                 if !results.hits.is_empty() || params.is_some() {
@@ -216,7 +226,86 @@ impl YtmApi {
             let title = p.title.to_lowercase();
             !(title.contains("episode") && title.contains("later"))
         });
+        // The sidebar never draws covers; don't keep their URLs alive.
+        for playlist in &mut playlists {
+            playlist.thumbnail_url = None;
+        }
+        playlists.shrink_to_fit();
         Ok(playlists)
+    }
+
+    /// Load personalized Home and Explore sections independently. The existing
+    /// shelf picker continues to use `for_you` and its compatibility mapping.
+    pub async fn discovery_home(&self) -> anyhow::Result<Vec<BrowseShelf>> {
+        let value = self
+            .browse(&json!({ "context": context(), "browseId": "FEmusic_home" }))
+            .await?;
+        let filters = home_filter_items(&value);
+        let mut shelves = self
+            .home_shelves_from_first(value, DISCOVERY_HOME_PAGES, DISCOVERY_HOME_SHELVES)
+            .await?;
+        bound_shelves(&mut shelves);
+        if !filters.is_empty() {
+            shelves.insert(
+                0,
+                BrowseShelf {
+                    title: "Filters".into(),
+                    items: filters,
+                    more: None,
+                },
+            );
+        }
+        shelves.shrink_to_fit();
+        Ok(shelves)
+    }
+
+    pub async fn discovery_home_filter(&self, params: &str) -> anyhow::Result<Vec<BrowseShelf>> {
+        let value = self
+            .browse(&json!({ "context": context(), "browseId": "FEmusic_home", "params": params }))
+            .await?;
+        let mut shelves = self
+            .home_shelves_from_first(value, DISCOVERY_HOME_PAGES, DISCOVERY_HOME_SHELVES)
+            .await?;
+        bound_shelves(&mut shelves);
+        shelves.shrink_to_fit();
+        Ok(shelves)
+    }
+
+    pub async fn discovery_more(
+        &self,
+        browse_id: &str,
+        params: Option<&str>,
+    ) -> anyhow::Result<Vec<SearchHit>> {
+        let mut body = json!({ "context": context(), "browseId": browse_id });
+        if let Some(params) = params.filter(|params| !params.is_empty()) {
+            body["params"] = json!(params);
+        }
+        let value = self.browse(&body).await?;
+        let mut hits = Vec::new();
+        collect_discovery_items(&value, &mut hits);
+        drop(value);
+        hits.shrink_to_fit();
+        Ok(hits)
+    }
+
+    pub async fn discovery_explore(&self) -> anyhow::Result<Vec<BrowseShelf>> {
+        // One response is resident at a time: each page's JSON tree is
+        // reduced to shelves and freed before the next page is requested,
+        // so peak memory is the largest page rather than the sum of all.
+        let mut shelves = Vec::new();
+        {
+            let body = json!({ "context": context(), "browseId": "FEmusic_explore" });
+            let value = self.browse(&body).await?;
+            collect_browse_shelves(&value, &mut shelves);
+        }
+        if let Ok(categories) = self.moods_and_genres_shelves().await {
+            shelves.extend(categories);
+        }
+        if let Ok(charts) = self.charts_shelves().await {
+            shelves.extend(charts);
+        }
+        shelves.shrink_to_fit();
+        Ok(shelves)
     }
 
     /// The "For you" browse page: home shelves, trending songs, community
@@ -285,10 +374,8 @@ impl YtmApi {
             collect_search_hits(&value, &mut hits);
             for hit in hits {
                 if let Some(playlist) = hit.collection() {
-                    let wanted = matches!(
-                        playlist.kind,
-                        PlaylistKind::Artist | PlaylistKind::Channel
-                    );
+                    let wanted =
+                        matches!(playlist.kind, PlaylistKind::Artist | PlaylistKind::Channel);
                     if wanted && seen.insert(playlist.id.clone()) {
                         items.push(hit);
                     }
@@ -311,6 +398,7 @@ impl YtmApi {
         }
         items.truncate(60);
         Ok(Some(BrowseShelf {
+            more: None,
             title: "My subscriptions".to_string(),
             items,
         }))
@@ -351,11 +439,9 @@ impl YtmApi {
             return Ok(None);
         }
         Ok(Some(BrowseShelf {
+            more: None,
             title: label.to_string(),
-            items: playlists
-                .into_iter()
-                .map(SearchHit::Collection)
-                .collect(),
+            items: playlists.into_iter().map(SearchHit::Collection).collect(),
         }))
     }
 
@@ -369,8 +455,7 @@ impl YtmApi {
             .into_iter()
             .filter(|hit| match hit.collection() {
                 Some(playlist) => {
-                    playlist.kind == PlaylistKind::Playlist
-                        && seen.insert(playlist.id.clone())
+                    playlist.kind == PlaylistKind::Playlist && seen.insert(playlist.id.clone())
                 }
                 None => false,
             })
@@ -380,6 +465,7 @@ impl YtmApi {
             return Ok(None);
         }
         Ok(Some(BrowseShelf {
+            more: None,
             title: "Featured playlists for you".to_string(),
             items,
         }))
@@ -397,6 +483,7 @@ impl YtmApi {
         collect_renderers(&value, "musicResponsiveListItemRenderer", &mut top);
         if !top.is_empty() {
             shelves.push(BrowseShelf {
+                more: None,
                 title: "Top songs".to_string(),
                 items: top.into_iter().map(SearchHit::Track).collect(),
             });
@@ -429,11 +516,9 @@ impl YtmApi {
             }
             if !releases.is_empty() {
                 shelves.push(BrowseShelf {
+                    more: None,
                     title: label.to_string(),
-                    items: releases
-                        .into_iter()
-                        .map(SearchHit::Collection)
-                        .collect(),
+                    items: releases.into_iter().map(SearchHit::Collection).collect(),
                 });
             }
         }
@@ -445,13 +530,24 @@ impl YtmApi {
     /// Duplicate titles across continuation pages are dropped; the first
     /// copy wins.
     async fn home_for_you_shelves(&self, max_pages: usize) -> anyhow::Result<Vec<BrowseShelf>> {
-        let mut body = json!({ "context": context(), "browseId": "FEmusic_home" });
-        let mut value = self.browse(&body).await?;
+        let body = json!({ "context": context(), "browseId": "FEmusic_home" });
+        let value = self.browse(&body).await?;
+        self.home_shelves_from_first(value, max_pages, usize::MAX)
+            .await
+    }
+
+    async fn home_shelves_from_first(
+        &self,
+        mut value: Value,
+        max_pages: usize,
+        max_shelves: usize,
+    ) -> anyhow::Result<Vec<BrowseShelf>> {
+        let mut body;
         let mut seen_tokens = Vec::new();
         let mut seen_titles: Vec<String> = Vec::new();
         let mut shelves = Vec::new();
 
-        for _ in 0..max_pages {
+        for page_index in 0..max_pages {
             let mut page = Vec::new();
             collect_browse_shelves(&value, &mut page);
             for mut shelf in page {
@@ -465,10 +561,21 @@ impl YtmApi {
                 }
                 shelves.push(shelf);
             }
+            if shelves.len() >= max_shelves {
+                shelves.truncate(max_shelves);
+                break;
+            }
             // Keep following the section token even when a page only repeats
             // shelves we already have: YouTube sometimes shuffles the new
             // ones onto a later page.
-            match section_continuation(&value) {
+            if page_index + 1 == max_pages {
+                break;
+            }
+            let token = section_continuation(&value);
+            // Free this page's JSON tree before the next one downloads, so
+            // only one page is ever resident.
+            drop(std::mem::take(&mut value));
+            match token {
                 Some(token) if !seen_tokens.contains(&token) => {
                     seen_tokens.push(token.clone());
                     body = json!({ "context": context(), "continuation": token });
@@ -504,6 +611,7 @@ impl YtmApi {
             return Ok(None);
         };
         Ok(Some(BrowseShelf {
+            more: None,
             title: "Discovery mix".to_string(),
             items: vec![SearchHit::Collection(playlist)],
         }))
@@ -536,10 +644,12 @@ impl YtmApi {
     /// response has one, otherwise pull the activity buttons out of the
     /// mood grid.
     async fn moods_and_genres_shelves(&self) -> anyhow::Result<Vec<BrowseShelf>> {
-        let value = self.browse(&json!({
-            "context": context(),
-            "browseId": "FEmusic_moods_and_genres",
-        })).await?;
+        let value = self
+            .browse(&json!({
+                "context": context(),
+                "browseId": "FEmusic_moods_and_genres",
+            }))
+            .await?;
         let mut grids = Vec::new();
         collect_navigation_grids(&value, &mut grids);
         let mut shelves = Vec::new();
@@ -588,6 +698,7 @@ impl YtmApi {
             }
             if !items.is_empty() {
                 shelves.push(BrowseShelf {
+                    more: None,
                     title: label.to_string(),
                     items,
                 });
@@ -595,6 +706,7 @@ impl YtmApi {
         }
         if !has_activity_grid && !activity_items.is_empty() {
             shelves.push(BrowseShelf {
+                more: None,
                 title: "Activity mixes".to_string(),
                 items: activity_items,
             });
@@ -609,11 +721,13 @@ impl YtmApi {
         browse_id: &str,
         params: &str,
     ) -> anyhow::Result<Vec<Playlist>> {
-        let value = self.browse(&json!({
-            "context": context(),
-            "browseId": browse_id,
-            "params": params,
-        })).await?;
+        let value = self
+            .browse(&json!({
+                "context": context(),
+                "browseId": browse_id,
+                "params": params,
+            }))
+            .await?;
         let mut playlists = Vec::new();
         collect_two_row_playlists(&value, &mut playlists);
         if playlists.is_empty() {
@@ -681,11 +795,7 @@ impl YtmApi {
     /// Similar songs from the current track's radio. The `next` endpoint
     /// returns the same "Up next" panel the web player uses; only its first
     /// page is read, capped so Auto Queue never holds a large response.
-    pub async fn similar_tracks(
-        &self,
-        video_id: &str,
-        limit: usize,
-    ) -> anyhow::Result<Vec<Track>> {
+    pub async fn similar_tracks(&self, video_id: &str, limit: usize) -> anyhow::Result<Vec<Track>> {
         if video_id.trim().is_empty() {
             anyhow::bail!("missing video id");
         }
@@ -860,9 +970,7 @@ impl YtmApi {
                         !s.get("statusText")
                             .and_then(Value::as_str)
                             .is_none_or(|t| t.eq_ignore_ascii_case("SUCCEEDED"))
-                            || !s.get("success")
-                                .and_then(Value::as_bool)
-                                .is_none_or(|b| b)
+                            || !s.get("success").and_then(Value::as_bool).is_none_or(|b| b)
                     });
                     if failed {
                         let snippet: String = trimmed.chars().take(120).collect();
@@ -1006,9 +1114,9 @@ impl YtmApi {
                 .and_then(Value::as_array)
             {
                 if !data.is_empty() {
-                    let all_cued = data.iter().all(|d| {
-                        d.get("lyricLine").is_some() && d.get("cueRange").is_some()
-                    });
+                    let all_cued = data
+                        .iter()
+                        .all(|d| d.get("lyricLine").is_some() && d.get("cueRange").is_some());
                     if all_cued {
                         let lines: Vec<(f64, String)> = data
                             .iter()
@@ -1016,9 +1124,9 @@ impl YtmApi {
                                 let text = d.get("lyricLine")?.as_str()?.to_string();
                                 // The API sends milliseconds as strings.
                                 let raw = d.pointer("/cueRange/startTimeMilliseconds")?;
-                                let ms = raw.as_u64().or_else(|| {
-                                    raw.as_str().and_then(|s| s.parse::<u64>().ok())
-                                })?;
+                                let ms = raw
+                                    .as_u64()
+                                    .or_else(|| raw.as_str().and_then(|s| s.parse::<u64>().ok()))?;
                                 Some((ms as f64 / 1000.0, text))
                             })
                             .collect();
@@ -1062,11 +1170,20 @@ impl YtmApi {
                 let mut tracks = Vec::new();
                 for item in json.iter().take(20) {
                     if let Some(id) = item["videoId"].as_str() {
-                        let title = item["title"].as_str().unwrap_or("Unknown Title").to_string();
-                        let artist = item["author"].as_str().unwrap_or("Unknown Artist").to_string();
+                        let title = item["title"]
+                            .as_str()
+                            .unwrap_or("Unknown Title")
+                            .to_string();
+                        let artist = item["author"]
+                            .as_str()
+                            .unwrap_or("Unknown Artist")
+                            .to_string();
                         let duration_secs = item["lengthSeconds"].as_i64().unwrap_or(0);
-                        let duration =
-                            Some(format!("{:02}:{:02}", duration_secs / 60, duration_secs % 60));
+                        let duration = Some(format!(
+                            "{:02}:{:02}",
+                            duration_secs / 60,
+                            duration_secs % 60
+                        ));
                         tracks.push(Track {
                             id: id.to_string(),
                             title,
@@ -1302,7 +1419,10 @@ fn parse_collection(renderer: &Value) -> Option<Playlist> {
     };
 
     let texts = flex_texts(renderer);
-    let title = texts.first().cloned().unwrap_or_else(|| "Unknown".to_string());
+    let title = texts
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "Unknown".to_string());
     let subtitle = texts.get(1).cloned().unwrap_or_default();
     let track_count = parse_track_count(&subtitle);
 
@@ -1311,6 +1431,7 @@ fn parse_collection(renderer: &Value) -> Option<Playlist> {
         title,
         subtitle,
         track_count,
+        thumbnail_url: renderer_small_thumb(renderer),
         kind,
     })
 }
@@ -1414,6 +1535,93 @@ pub fn category_parts(id: &str) -> Option<(&str, &str)> {
     id.strip_prefix(CATEGORY_PREFIX)?.split_once('|')
 }
 
+/// Home filter chips carry opaque YouTube browse parameters. Keep only
+/// Home endpoints; never infer a filter from its localized display name.
+fn home_filter_items(value: &Value) -> Vec<SearchHit> {
+    fn walk(value: &Value, output: &mut Vec<SearchHit>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(chip) = map.get("chipCloudChipRenderer") {
+                    if let (Some(title), Some(endpoint)) = (
+                        runs_text(chip.get("text")),
+                        chip.pointer("/navigationEndpoint/browseEndpoint"),
+                    ) {
+                        if endpoint.get("browseId").and_then(Value::as_str) == Some("FEmusic_home")
+                        {
+                            if let Some(params) = endpoint.get("params").and_then(Value::as_str) {
+                                output.push(SearchHit::Collection(Playlist {
+                                    id: format!("home-filter:{params}"),
+                                    title,
+                                    subtitle: "Filter".into(),
+                                    track_count: None,
+                                    thumbnail_url: None,
+                                    kind: PlaylistKind::Mood,
+                                }));
+                            }
+                        }
+                    }
+                }
+                for child in map.values() {
+                    walk(child, output);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    walk(child, output);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut output = Vec::new();
+    walk(value, &mut output);
+    output
+}
+
+/// Collect the items of a "More…" page. Duplicates are found by scanning the
+/// (bounded) output, so no side table or formatted keys are allocated.
+fn collect_discovery_items(value: &Value, out: &mut Vec<SearchHit>) {
+    fn visit(value: &Value, out: &mut Vec<SearchHit>) {
+        if out.len() >= DISCOVERY_MORE_ITEMS {
+            return;
+        }
+        match value {
+            Value::Object(map) => {
+                if let Some(hit) = parse_browse_item(value) {
+                    let duplicate = out.iter().any(|seen| match (seen, &hit) {
+                        (SearchHit::Track(a), SearchHit::Track(b)) => a.id == b.id,
+                        (SearchHit::Collection(a), SearchHit::Collection(b)) => a.id == b.id,
+                        _ => false,
+                    });
+                    if !duplicate {
+                        out.push(hit);
+                    }
+                    return;
+                }
+                for child in map.values() {
+                    visit(child, out);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    visit(child, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    visit(value, out);
+}
+
+/// Cap long Home shelves and drop spare `Vec` capacity so the rows kept for
+/// the page are no larger than their contents.
+fn bound_shelves(shelves: &mut [BrowseShelf]) {
+    for shelf in shelves {
+        shelf.items.truncate(DISCOVERY_SHELF_ITEMS);
+        shelf.items.shrink_to_fit();
+    }
+}
+
 /// Recursively collect titled shelves from a home/explore response.
 fn collect_browse_shelves(value: &Value, out: &mut Vec<BrowseShelf>) {
     match value {
@@ -1478,7 +1686,17 @@ fn parse_browse_shelf(shelf: &Value) -> Option<BrowseShelf> {
     if items.is_empty() {
         return None;
     }
-    Some(BrowseShelf { title, items })
+    let endpoint = shelf.pointer("/header/musicCarouselShelfBasicHeaderRenderer/moreContentButton/buttonRenderer/navigationEndpoint/browseEndpoint");
+    let more = endpoint.and_then(|endpoint| {
+        Some(BrowseEndpoint {
+            browse_id: endpoint.get("browseId")?.as_str()?.to_string(),
+            params: endpoint
+                .get("params")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    });
+    Some(BrowseShelf { title, items, more })
 }
 
 fn shelf_title(shelf: &Value) -> Option<String> {
@@ -1496,7 +1714,7 @@ fn parse_browse_item(item: &Value) -> Option<SearchHit> {
         return parse_two_row_item(renderer);
     }
     if let Some(renderer) = item.get("musicResponsiveListItemRenderer") {
-        return parse_item(renderer).map(SearchHit::Track);
+        return parse_search_hit(renderer).or_else(|| parse_item(renderer).map(SearchHit::Track));
     }
     None
 }
@@ -1505,7 +1723,10 @@ fn parse_browse_item(item: &Value) -> Option<SearchHit> {
 /// renders song shelves such as "Your daily discover" this way. Songs carry
 /// a watch endpoint instead of a browse endpoint.
 fn parse_two_row_item(renderer: &Value) -> Option<SearchHit> {
-    if renderer.pointer("/navigationEndpoint/browseEndpoint").is_some() {
+    if renderer
+        .pointer("/navigationEndpoint/browseEndpoint")
+        .is_some()
+    {
         return parse_playlist(renderer).map(SearchHit::Collection);
     }
     let id = item_video_id(renderer)?;
@@ -1532,10 +1753,8 @@ fn collect_navigation_grids<'a>(value: &'a Value, out: &mut Vec<(String, Vec<&'a
     match value {
         Value::Object(map) => {
             if let Some(grid) = map.get("gridRenderer") {
-                let title = runs_text(
-                    grid.pointer("/header/gridHeaderRenderer/title"),
-                )
-                .unwrap_or_default();
+                let title =
+                    runs_text(grid.pointer("/header/gridHeaderRenderer/title")).unwrap_or_default();
                 let buttons: Vec<&Value> = grid
                     .get("items")
                     .and_then(Value::as_array)
@@ -1576,6 +1795,7 @@ fn parse_category_button(renderer: &Value, kind: PlaylistKind) -> Option<Playlis
         title,
         subtitle: kind_label(kind).to_string(),
         track_count: None,
+        thumbnail_url: None,
         kind,
     })
 }
@@ -1633,6 +1853,7 @@ fn parse_playlist(renderer: &Value) -> Option<Playlist> {
         title,
         subtitle,
         track_count,
+        thumbnail_url: renderer_small_thumb(renderer),
         kind,
     })
 }
@@ -1723,11 +1944,7 @@ fn runs_text(node: Option<&Value>) -> Option<String> {
         .iter()
         .filter_map(|r| r.get("text").and_then(|t| t.as_str()))
         .collect();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn parse_track_count(subtitle: &str) -> Option<usize> {
@@ -1782,11 +1999,7 @@ fn parse_item(renderer: &Value) -> Option<Track> {
 
     // Search rows prepend a media-type badge ("Song", "Video", …) to the artist
     // column; drop it so the artist is parsed correctly.
-    if fields
-        .first()
-        .map(|f| is_type_label(f))
-        .unwrap_or(false)
-    {
+    if fields.first().map(|f| is_type_label(f)).unwrap_or(false) {
         fields.remove(0);
     }
 
@@ -1905,18 +2118,16 @@ fn parse_panel_track(renderer: &Value) -> Option<Track> {
 /// Only rows listing inside *your* playlists have it.
 fn row_set_video_id(renderer: &Value) -> Option<String> {
     let items = renderer.pointer("/menu/menuRenderer/items")?.as_array()?;
-    items
-        .iter()
-        .find_map(|item| {
-            item.pointer(
-                "/menuServiceItemRenderer/serviceEndpoint/playlistEditEndpoint/actions/0/setVideoId",
-            )
-            .or_else(|| {
-                item.pointer("/menuServiceItemRenderer/playlistEditEndpoint/actions/0/setVideoId")
-            })
-            .and_then(Value::as_str)
-            .map(str::to_string)
+    items.iter().find_map(|item| {
+        item.pointer(
+            "/menuServiceItemRenderer/serviceEndpoint/playlistEditEndpoint/actions/0/setVideoId",
+        )
+        .or_else(|| {
+            item.pointer("/menuServiceItemRenderer/playlistEditEndpoint/actions/0/setVideoId")
         })
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    })
 }
 
 /// Video id for a responsive row. Playlist/album rows carry
@@ -1941,11 +2152,42 @@ fn item_video_id(renderer: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Pick a small collection cover for the 32-pixel discovery cards.
+fn renderer_small_thumb(renderer: &Value) -> Option<String> {
+    let thumbs = renderer
+        .pointer("/thumbnail/thumbnails")
+        .or_else(|| {
+            renderer.pointer("/thumbnailRenderer/musicThumbnailRenderer/thumbnail/thumbnails")
+        })?
+        .as_array()?;
+    thumbs
+        .iter()
+        .filter_map(|thumb| {
+            let url = thumb.get("url")?.as_str()?;
+            if url.is_empty() {
+                return None;
+            }
+            let width = thumb.get("width").and_then(Value::as_u64).unwrap_or(0);
+            let rank = if width >= 96 {
+                (0, width)
+            } else if width > 0 {
+                (1, u64::MAX - width)
+            } else {
+                (2, 0)
+            };
+            Some((rank, url))
+        })
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, url)| url.to_string())
+}
+
 /// Largest thumbnail URL carried by a list renderer, when present.
 fn renderer_thumb(renderer: &Value) -> Option<String> {
     let thumbs = renderer
         .pointer("/thumbnail/thumbnails")
-        .or_else(|| renderer.pointer("/thumbnailRenderer/musicThumbnailRenderer/thumbnail/thumbnails"))?
+        .or_else(|| {
+            renderer.pointer("/thumbnailRenderer/musicThumbnailRenderer/thumbnail/thumbnails")
+        })?
         .as_array()?;
     let mut best: Option<(&str, u64)> = None;
     for t in thumbs {
@@ -1984,10 +2226,22 @@ fn is_type_label(s: &str) -> bool {
 /// than an artist or album name.
 fn is_stat_label(s: &str) -> bool {
     let low = s.to_lowercase();
-    for word in ["plays", "views", "songs", "subscribers", "audience", "listeners"] {
+    for word in [
+        "plays",
+        "views",
+        "songs",
+        "subscribers",
+        "audience",
+        "listeners",
+    ] {
         if let Some(prefix) = low.strip_suffix(word) {
             let prefix = prefix.trim();
-            if prefix.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            if prefix
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+            {
                 return true;
             }
         }
@@ -2007,6 +2261,79 @@ fn is_duration(s: &str) -> bool {
 mod browse_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn discovery_collection_prefers_a_small_thumbnail_without_changing_track_art() {
+        let renderer = json!({"thumbnailRenderer": {"musicThumbnailRenderer": {"thumbnail": {
+            "thumbnails": [
+                {"url": "small", "width": 60},
+                {"url": "card", "width": 120},
+                {"url": "large", "width": 544}
+            ]
+        }}}});
+        assert_eq!(renderer_small_thumb(&renderer).as_deref(), Some("card"));
+        assert_eq!(renderer_thumb(&renderer).as_deref(), Some("large"));
+        let small_only = json!({"thumbnail": {"thumbnails": [
+            {"url":"tiny", "width":40}, {"url":"small", "width":60}
+        ]}});
+        assert_eq!(renderer_small_thumb(&small_only).as_deref(), Some("small"));
+    }
+
+    #[test]
+    fn old_cached_shelves_without_new_optional_fields_still_load() {
+        let value = json!({"title":"Mixed", "items":[{"Collection": {
+            "id":"VLPL1", "title":"Mix", "subtitle":"", "track_count":null, "kind":"Playlist"
+        }}]});
+        let shelf: BrowseShelf = serde_json::from_value(value).expect("older cached shelf");
+        assert!(shelf.more.is_none());
+        assert!(shelf.items[0].collection().unwrap().thumbnail_url.is_none());
+    }
+
+    #[test]
+    fn discovery_preserves_filter_parameters_and_more_endpoint() {
+        let chips = json!({"chips": [
+            {"chipCloudChipRenderer": {"text": {"runs": [{"text": "Relax"}]},
+                "navigationEndpoint": {"browseEndpoint": {"browseId": "FEmusic_home", "params": "opaque-filter"}}}},
+            {"chipCloudChipRenderer": {"text": {"runs": [{"text": "Albums"}]},
+                "navigationEndpoint": {"browseEndpoint": {"browseId": "other", "params": "not-home"}}}}
+        ]});
+        let filters = home_filter_items(&chips);
+        assert_eq!(filters.len(), 1);
+        assert_eq!(
+            filters[0].collection().unwrap().id,
+            "home-filter:opaque-filter"
+        );
+        let shelf = json!({
+            "header": {"musicCarouselShelfBasicHeaderRenderer": {
+                "title": {"runs": [{"text": "Mixed for you"}]},
+                "moreContentButton": {"buttonRenderer": {"navigationEndpoint": {"browseEndpoint": {"browseId": "FEmusic_mixed_for_you", "params": "opaque-more"}}}}
+            }},
+            "contents": [{"musicTwoRowItemRenderer": {
+                "title": {"runs": [{"text": "My Mix 2"}]},
+                "subtitle": {"runs": [{"text": "Artist"}]},
+                "thumbnailRenderer": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails": [{"url": "https://example.invalid/mix.jpg", "width": 120}]}}},
+                "navigationEndpoint": {"browseEndpoint": {"browseId": "VLPLmix", "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_PLAYLIST"}}}}
+            }}]
+        });
+        let parsed = parse_browse_shelf(&shelf).expect("shelf");
+        assert_eq!(parsed.title, "Mixed for you");
+        assert_eq!(parsed.items[0].collection().unwrap().id, "VLPLmix");
+        assert_eq!(
+            parsed.items[0]
+                .collection()
+                .unwrap()
+                .thumbnail_url
+                .as_deref(),
+            Some("https://example.invalid/mix.jpg")
+        );
+        let more = parsed.more.unwrap();
+        assert_eq!(more.browse_id, "FEmusic_mixed_for_you");
+        assert_eq!(more.params.as_deref(), Some("opaque-more"));
+        let mut items = Vec::new();
+        collect_discovery_items(&shelf, &mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].collection().unwrap().title, "My Mix 2");
+    }
 
     #[test]
     fn reads_removal_token_from_playlist_service_endpoint() {
@@ -2031,17 +2358,22 @@ mod browse_tests {
         // Equal video IDs can have different membership IDs. Do not mix
         // them up when the playlist contains the same song more than once.
         let mut duplicate = row.clone();
-        duplicate["menu"]["menuRenderer"]["items"][0]["menuServiceItemRenderer"]
-            ["serviceEndpoint"]["playlistEditEndpoint"]["actions"][0]["setVideoId"] =
-            json!("membership-3");
-        assert_eq!(parse_item(&duplicate).unwrap().set_video_id.as_deref(), Some("membership-3"));
+        duplicate["menu"]["menuRenderer"]["items"][0]["menuServiceItemRenderer"]["serviceEndpoint"]
+            ["playlistEditEndpoint"]["actions"][0]["setVideoId"] = json!("membership-3");
+        assert_eq!(
+            parse_item(&duplicate).unwrap().set_video_id.as_deref(),
+            Some("membership-3")
+        );
         assert_eq!(row_set_video_id(&json!({})), None);
         let legacy = json!({"menu": {"menuRenderer": {"items": [{
             "menuServiceItemRenderer": {"playlistEditEndpoint": {
                 "actions": [{"setVideoId": "legacy-membership"}]
             }}
         }]}}});
-        assert_eq!(row_set_video_id(&legacy).as_deref(), Some("legacy-membership"));
+        assert_eq!(
+            row_set_video_id(&legacy).as_deref(),
+            Some("legacy-membership")
+        );
     }
 
     #[test]

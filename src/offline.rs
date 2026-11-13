@@ -164,7 +164,8 @@ impl Registry {
     }
 
     pub fn insert(&mut self, entry: Entry) {
-        self.by_path.insert(PathBuf::from(&entry.path), entry.id.clone());
+        self.by_path
+            .insert(PathBuf::from(&entry.path), entry.id.clone());
         self.entries.insert(entry.id.clone(), entry);
         self.save();
     }
@@ -240,9 +241,7 @@ fn derive_metadata(path: &Path, root: &Path) -> (String, String, Option<String>)
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Untitled".to_string());
     // Drop a leading track number: "01 - Title", "01. Title", "01_Title".
-    let title = track_number_re()
-        .replace(&stem, "")
-        .into_owned();
+    let title = track_number_re().replace(&stem, "").into_owned();
 
     // Levels below the root: `Artist/Album` for a two-deep file.
     let dirs: Vec<String> = path
@@ -294,26 +293,25 @@ fn sidecar_art_from(path: &Path, images: &[PathBuf]) -> Option<String> {
             .map(|s| s.to_string_lossy().to_lowercase())
             .unwrap_or_default();
         // Same stem as the audio, or the conventional folder cover names.
-        (file_stem == stem
-            || matches!(file_stem.as_str(), "cover" | "folder" | "album" | "front"))
-        .then(|| image.display().to_string())
+        (file_stem == stem || matches!(file_stem.as_str(), "cover" | "folder" | "album" | "front"))
+            .then(|| image.display().to_string())
     })
 }
 
 /// Recursively collect audio files under `dir`, indexing each directory's
 /// images once. Both lists are filled in one traversal.
-fn collect(
-    dir: &Path,
-    out: &mut Vec<PathBuf>,
-    art: &mut HashMap<PathBuf, Vec<PathBuf>>,
-) {
+fn collect(dir: &Path, out: &mut Vec<PathBuf>, art: &mut HashMap<PathBuf, Vec<PathBuf>>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     let mut paths: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| !p.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(false))
+        .filter(|p| {
+            !p.file_name()
+                .map(|n| n.to_string_lossy().starts_with('.'))
+                .unwrap_or(false)
+        })
         .collect();
     // Sorted so folders and files render in a stable order.
     paths.sort();
@@ -380,6 +378,7 @@ pub fn folders(tracks: &[Track], music_dir: &Path) -> Vec<Playlist> {
         title: "All tracks".to_string(),
         subtitle: format!("{} files", tracks.len()),
         track_count: Some(tracks.len()),
+        thumbnail_url: None,
         kind: PlaylistKind::Playlist,
     }];
     for name in names {
@@ -399,6 +398,7 @@ pub fn folders(tracks: &[Track], music_dir: &Path) -> Vec<Playlist> {
             title: name,
             subtitle: format!("{} files", count),
             track_count: Some(count),
+            thumbnail_url: None,
             kind: PlaylistKind::Playlist,
         });
     }
@@ -457,29 +457,32 @@ fn sanitise(text: &str) -> String {
 /// ffmpeg when the Python tag library isn't installed, so embedding still
 /// works; if it fails after the audio is on disk, the caller retries without it
 /// rather than lose the song.
-fn ytdlp(
-    url: &str,
-    template: &str,
-    embed: bool,
-    progress: &dyn Fn(u8),
-) -> anyhow::Result<()> {
+fn ytdlp(url: &str, template: &str, embed: bool, progress: &dyn Fn(u8)) -> anyhow::Result<()> {
     let mut cmd = std::process::Command::new("yt-dlp");
     // bestaudio/best selects the best audio stream available; -x converts it
     // to mp3. -f and bestaudio/best are separate arguments for clarity.
-    cmd.args(["-f", "bestaudio/best", "-x", "--audio-format", "mp3", "--audio-quality", "0"])
-        .args(["--no-playlist", "--no-warnings"])
-        // Machine-readable progress, one line per update, so the row can show
-        // a live percentage instead of an indefinite "Downloading…". The prefix
-        // before the colon names the template; only the text after is printed,
-        // hence the `PCT` marker.
-        .args([
-            "--newline",
-            "--progress-template",
-            "download:PCT %(progress._percent_str)s",
-        ])
-        .arg("-o")
-        .arg(template)
-        .arg(url);
+    cmd.args([
+        "-f",
+        "bestaudio/best",
+        "-x",
+        "--audio-format",
+        "mp3",
+        "--audio-quality",
+        "0",
+    ])
+    .args(["--no-playlist", "--no-warnings"])
+    // Machine-readable progress, one line per update, so the row can show
+    // a live percentage instead of an indefinite "Downloading…". The prefix
+    // before the colon names the template; only the text after is printed,
+    // hence the `PCT` marker.
+    .args([
+        "--newline",
+        "--progress-template",
+        "download:PCT %(progress._percent_str)s",
+    ])
+    .arg("-o")
+    .arg(template)
+    .arg(url);
     if embed {
         cmd.arg("--embed-thumbnail");
     }
@@ -727,10 +730,8 @@ mod tests {
 
     #[test]
     fn download_collision_gets_a_unique_name_instead_of_adopting_it() {
-        let root = std::env::temp_dir().join(format!(
-            "ytmtui-download-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ytmtui-download-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let base = root.join("Song.mp3");
@@ -808,7 +809,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         for a in 0..20 {
             for al in 0..5 {
-                let dir = root.join(format!("Artist {a:02}")).join(format!("Album {al:02}"));
+                let dir = root
+                    .join(format!("Artist {a:02}"))
+                    .join(format!("Album {al:02}"));
                 std::fs::create_dir_all(&dir).unwrap();
                 for t in 0..20 {
                     std::fs::write(dir.join(format!("{t:02} - Track {t}.mp3")), b"").unwrap();

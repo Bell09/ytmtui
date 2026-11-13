@@ -1,31 +1,35 @@
-mod models;
 mod api;
+mod app;
+mod art;
+mod auth;
 mod auto_queue;
+mod browser;
+mod ipc;
+mod keymap;
+mod lastfm;
+mod lyrics;
+mod models;
+mod mpris;
+mod offline;
 mod player;
 mod session;
-mod app;
-mod ui;
-mod keymap;
-mod auth;
-mod browser;
-mod lastfm;
 mod theme;
-mod art;
-mod mpris;
-mod ipc;
-mod lyrics;
-mod offline;
+mod ui;
 
-use std::{env, io, io::Write, time::{Duration, Instant}};
+use app::{App, InputMode};
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
-use app::{App, InputMode};
 use keymap::{Action, Context};
 use models::Page;
+use ratatui::{Terminal, backend::CrosstermBackend};
+use std::{
+    env, io,
+    io::Write,
+    time::{Duration, Instant},
+};
 
 fn print_help() {
     println!("ytmtui — a full-featured YouTube Music TUI client");
@@ -345,7 +349,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Action::PreviousRow => app.previous(),
                     Action::Activate => app.activate_selected().await,
                     Action::Back => {
-                        if app.now_playing {
+                        if app.sidebar_focused {
+                            app.sidebar_focused = false;
+                        } else if app.now_playing {
                             app.now_playing = false;
                         } else if app.current_page == Page::Browse {
                             app.leave_browse();
@@ -374,8 +380,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Action::CycleSearchFilter(forward) => {
                         if app.current_page == Page::Search {
                             app.cycle_search_filter(forward);
+                        } else {
+                            app.toggle_sidebar_focus();
                         }
                     }
+                    Action::DiscoveryItem(forward) => app.discovery_item_step(forward),
+                    Action::PlayDiscoveryShelf => app.play_discovery_shelf(),
                     Action::ScrollPage(delta) => {
                         if app.lyrics_open || app.now_playing {
                             app.scroll_lyrics(i32::from(delta) * 10);

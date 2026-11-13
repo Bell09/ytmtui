@@ -1,5 +1,5 @@
-use crate::models::{BrowseRow, BrowseShelf, Page, Playlist, PlaylistKind, SearchHit, Track};
 use crate::api::{SearchFilter, SearchResults, YtmApi};
+use crate::models::{BrowseRow, BrowseShelf, Page, Playlist, PlaylistKind, SearchHit, Track};
 use crate::player::{Player, Timeline};
 use crate::session::{SessionRef, SessionState};
 use serde::{Deserialize, Serialize};
@@ -121,6 +121,22 @@ type LikeRefreshResult = Result<Vec<Track>, String>;
 /// save or the reason there isn't one.
 type DownloadResult = (String, Result<crate::offline::Entry, String>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryPage {
+    Home,
+    Explore,
+}
+
+type DiscoveryResult = (u64, DiscoveryPage, Result<Vec<BrowseShelf>, String>);
+
+/// Decoded 32x16 covers kept for Home/Explore cards (about 2 KB each).
+const DISCOVERY_ART_CACHE: usize = 24;
+/// Cards per frame that may show a cover. Kept below the cache size so the
+/// visible covers can never evict each other and refetch in a loop on very
+/// wide terminals; extra cards show a placeholder instead.
+pub const DISCOVERY_ART_VISIBLE_MAX: usize = 16;
+const _: () = assert!(DISCOVERY_ART_VISIBLE_MAX < DISCOVERY_ART_CACHE);
+
 /// Background home-feed refresh for the browse picker.
 type BrowseResult = Result<Vec<BrowseShelf>, String>;
 
@@ -128,6 +144,11 @@ type BrowseResult = Result<Vec<BrowseShelf>, String>;
 /// the rows to restore if it fails and the generation guard that keeps a
 /// reply from replacing a page the user has since left.
 enum PageFetch {
+    More {
+        title: String,
+        previous_index: usize,
+        result: Result<Vec<SearchHit>, String>,
+    },
     Category {
         title: String,
         previous: Vec<BrowseRow>,
@@ -146,7 +167,10 @@ type PageFetchResult = (u64, PageFetch);
 type OfflineScanResult = (u64, Vec<Track>);
 
 /// Resolved next-track stream (URL plus headers), or why it failed.
-type PrefetchResult = (String, Result<crate::player::Stream, crate::player::ExtractError>);
+type PrefetchResult = (
+    String,
+    Result<crate::player::Stream, crate::player::ExtractError>,
+);
 
 /// Finished Auto Queue recommendation request: sequence number and result.
 type AutoQueueFetch = (u64, Result<Vec<Track>, String>);
@@ -178,8 +202,7 @@ fn resume_allows(pending: Option<(f64, Instant)>, position: f64) -> bool {
     match pending {
         None => true,
         Some((expected, armed_at)) => {
-            position + POSITION_EPSILON >= expected
-                || armed_at.elapsed() >= RESUME_PENDING_TIMEOUT
+            position + POSITION_EPSILON >= expected || armed_at.elapsed() >= RESUME_PENDING_TIMEOUT
         }
     }
 }
@@ -277,6 +300,24 @@ pub struct App {
     /// "For you" browse rows: section headers plus items, flattened. The
     /// cursor only lands on `BrowseRow::Item`.
     pub browse_rows: Vec<BrowseRow>,
+    /// Home and Explore use the existing browse rows and collection actions.
+    pub discovery_page: Option<DiscoveryPage>,
+    pub sidebar_focused: bool,
+    discovery_back: Option<(Vec<BrowseRow>, usize)>,
+    /// A Home filter is loading; its rows will replace (and stash) the
+    /// current ones when they arrive, so nothing is cloned up front.
+    discovery_filtering: bool,
+    pub sidebar_index: usize,
+    discovery_generation: u64,
+    discovery_handle: Option<tokio::task::JoinHandle<()>>,
+    pub discovery_art: std::collections::HashMap<String, Option<image::RgbaImage>>,
+    discovery_art_order: std::collections::VecDeque<String>,
+    discovery_art_pending: Option<String>,
+    discovery_art_handle: Option<tokio::task::JoinHandle<()>>,
+    discovery_art_tx: tokio::sync::mpsc::UnboundedSender<(String, Option<image::RgbaImage>)>,
+    discovery_art_rx: tokio::sync::mpsc::UnboundedReceiver<(String, Option<image::RgbaImage>)>,
+    discovery_tx: tokio::sync::mpsc::UnboundedSender<DiscoveryResult>,
+    discovery_rx: tokio::sync::mpsc::UnboundedReceiver<DiscoveryResult>,
     pub browse_loaded: bool,
     /// Root shelves by section; `None` if the feed lacked that section.
     pub browse_shelves: Vec<Option<BrowseShelf>>,
@@ -574,11 +615,12 @@ impl App {
         let (preview_tx, preview_rx) = tokio::sync::mpsc::unbounded_channel();
         let (library_tx, library_rx) = tokio::sync::mpsc::unbounded_channel();
         let (search_tx, search_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (create_playlist_tx, create_playlist_rx) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (create_playlist_tx, create_playlist_rx) = tokio::sync::mpsc::unbounded_channel();
         let (collection_tx, collection_rx) = tokio::sync::mpsc::unbounded_channel();
         let (timeline_tx, timeline_rx) = tokio::sync::mpsc::unbounded_channel();
         let (browse_refresh_tx, browse_refresh_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (discovery_tx, discovery_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (discovery_art_tx, discovery_art_rx) = tokio::sync::mpsc::unbounded_channel();
         let (page_fetch_tx, page_fetch_rx) = tokio::sync::mpsc::unbounded_channel();
         let (offline_scan_tx, offline_scan_rx) = tokio::sync::mpsc::unbounded_channel();
         let (prefetch_tx, prefetch_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -626,7 +668,8 @@ impl App {
         {
             let api = api.clone();
             tokio::spawn(async move {
-                while let Some((playlist_id, playlist_name, track, index)) = rm_cmd_rx.recv().await {
+                while let Some((playlist_id, playlist_name, track, index)) = rm_cmd_rx.recv().await
+                {
                     let result = if playlist_id == LIKED_PLAYLIST {
                         // Dropping a row from Liked Music *is* an unlike,
                         // so it goes through the rating endpoint instead.
@@ -638,7 +681,8 @@ impl App {
                             // rows without the token have no authority
                             // to edit and are refused without a call.
                             Some(token) => {
-                                api.remove_from_playlist(&playlist_id, &track.id, token).await
+                                api.remove_from_playlist(&playlist_id, &track.id, token)
+                                    .await
                             }
                             None => Err(anyhow::anyhow!(
                                 "row has no setVideoId — this playlist may not be yours"
@@ -736,6 +780,21 @@ impl App {
             playlist_return_page: Page::Library,
             playlist_return_index: 0,
             browse_rows: Vec::new(),
+            discovery_page: None,
+            sidebar_focused: false,
+            discovery_back: None,
+            discovery_filtering: false,
+            sidebar_index: 2,
+            discovery_generation: 0,
+            discovery_handle: None,
+            discovery_art: std::collections::HashMap::new(),
+            discovery_art_order: std::collections::VecDeque::new(),
+            discovery_art_pending: None,
+            discovery_art_handle: None,
+            discovery_art_tx,
+            discovery_art_rx,
+            discovery_tx,
+            discovery_rx,
             browse_loaded: false,
             browse_shelves: vec![None; BROWSE_SECTIONS.len()],
             browse_section: None,
@@ -798,9 +857,7 @@ impl App {
             last_extract_error: None,
             prefetch_tx,
             prefetch_rx,
-            auto_queue: crate::auto_queue::AutoQueue::new(
-                crate::auto_queue::enabled_from_config(),
-            ),
+            auto_queue: crate::auto_queue::AutoQueue::new(crate::auto_queue::enabled_from_config()),
             auto_queue_tx,
             auto_queue_rx,
             lastfm,
@@ -1017,6 +1074,7 @@ impl App {
         self.poll_theme();
         self.poll_library();
         self.poll_browse_refresh();
+        self.poll_discovery();
         self.poll_page_fetch();
         self.poll_offline_scan();
         self.poll_preview();
@@ -1106,7 +1164,8 @@ impl App {
         while let Ok((playlist_id, playlist_name, track, index, result)) = self.rm_rx.try_recv() {
             match result {
                 Ok(()) => {
-                    self.status_message = format!("Removed '{}' from {}", track.title, playlist_name);
+                    self.status_message =
+                        format!("Removed '{}' from {}", track.title, playlist_name);
                 }
                 Err(e) => {
                     if self.current_page == Page::Playlist
@@ -1117,14 +1176,20 @@ impl App {
                     {
                         let at = index.min(self.playlist_tracks.len());
                         self.playlist_tracks.insert(at, track.clone());
-                        self.status_message =
-                            format!("Failed to remove '{}' from {} — {e}", track.title, playlist_name);
+                        self.status_message = format!(
+                            "Failed to remove '{}' from {} — {e}",
+                            track.title, playlist_name
+                        );
                     } else {
                         self.status_message = format!("Failed to remove '{}' — {e}", track.title);
                     }
                     // The playback bar's heart reads the liked state off
                     // this track; a failed unlike must restore it.
-                    if self.current_track.as_ref().is_some_and(|t| t.id == track.id) {
+                    if self
+                        .current_track
+                        .as_ref()
+                        .is_some_and(|t| t.id == track.id)
+                    {
                         self.current_track = Some(track);
                     }
                 }
@@ -1141,7 +1206,10 @@ impl App {
         if let Some(generation) = due {
             self.like_refresh_at = None;
             let on_open = self.current_page == Page::Playlist
-                && self.current_playlist.as_ref().is_some_and(|p| p.id == LIKED_PLAYLIST);
+                && self
+                    .current_playlist
+                    .as_ref()
+                    .is_some_and(|p| p.id == LIKED_PLAYLIST);
             if generation == self.like_generation
                 && (on_open || self.preview_for.as_deref() == Some(LIKED_PLAYLIST))
             {
@@ -1462,6 +1530,17 @@ impl App {
     }
 
     pub fn next(&mut self) {
+        if self.sidebar_focused {
+            self.sidebar_index = (self.sidebar_index + 1) % 3;
+            return;
+        }
+        if self.current_page == Page::Browse
+            && self.discovery_page.is_some()
+            && self.browse_back.is_none()
+        {
+            self.discovery_shelf_step(true);
+            return;
+        }
         if self.current_page == Page::Browse {
             self.browse_step(true);
             return;
@@ -1474,6 +1553,17 @@ impl App {
     }
 
     pub fn previous(&mut self) {
+        if self.sidebar_focused {
+            self.sidebar_index = (self.sidebar_index + 2) % 3;
+            return;
+        }
+        if self.current_page == Page::Browse
+            && self.discovery_page.is_some()
+            && self.browse_back.is_none()
+        {
+            self.discovery_shelf_step(false);
+            return;
+        }
         if self.current_page == Page::Browse {
             self.browse_step(false);
             return;
@@ -1704,9 +1794,10 @@ impl App {
         // removed one slides into it, the last row just closes up.
         let len = self.playlist_tracks.len();
         self.selected_index = self.selected_index.min(len.saturating_sub(1));
-        self.status_message =
-            format!("Removing '{}' from {}...", track.title, playlist.title);
-        let _ = self.rm_cmd_tx.send((playlist.id.clone(), playlist.title.clone(), track, index));
+        self.status_message = format!("Removing '{}' from {}...", track.title, playlist.title);
+        let _ = self
+            .rm_cmd_tx
+            .send((playlist.id.clone(), playlist.title.clone(), track, index));
     }
 
     /// The currently selected search collection, if any.
@@ -1838,10 +1929,7 @@ impl App {
         let api = self.api.clone();
         let tx = self.create_playlist_tx.clone();
         tokio::spawn(async move {
-            let result = api
-                .create_playlist(&title)
-                .await
-                .map_err(|e| e.to_string());
+            let result = api.create_playlist(&title).await.map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
     }
@@ -1909,6 +1997,296 @@ impl App {
             let result = api.library_playlists().await.map_err(|e| e.to_string());
             let _ = tx.send((generation, result));
         });
+    }
+
+    pub fn toggle_sidebar_focus(&mut self) {
+        // The sidebar is hidden in the maximized Now Playing view; focus
+        // there would swallow the first Esc and arrow keys invisibly.
+        if self.now_playing {
+            return;
+        }
+        self.sidebar_focused = !self.sidebar_focused;
+        if self.sidebar_focused {
+            self.sidebar_index = match self.discovery_page {
+                Some(DiscoveryPage::Home) if self.current_page == Page::Browse => 0,
+                Some(DiscoveryPage::Explore) if self.current_page == Page::Browse => 1,
+                _ => 2,
+            };
+            self.status_message = "Sidebar: ↑↓ select, Enter open, Tab return".into();
+        }
+    }
+
+    pub fn activate_sidebar(&mut self) {
+        self.cancel_discovery();
+        self.discovery_filtering = false;
+        self.sidebar_focused = false;
+        if self.sidebar_index == 2 {
+            self.discovery_generation = self.discovery_generation.wrapping_add(1);
+            if self.discovery_page.is_some() {
+                self.release_discovery_memory();
+            }
+            self.discovery_page = None;
+            self.current_page = Page::Library;
+            self.selected_index = 0;
+            self.sync_preview();
+            return;
+        }
+        let page = if self.sidebar_index == 0 {
+            DiscoveryPage::Home
+        } else {
+            DiscoveryPage::Explore
+        };
+        self.discovery_generation = self.discovery_generation.wrapping_add(1);
+        let generation = self.discovery_generation;
+        if self.current_page != Page::Browse {
+            self.browse_return_page = self.current_page;
+            self.browse_return_index = self.selected_index;
+        }
+        self.current_page = Page::Browse;
+        self.discovery_page = Some(page);
+        self.discovery_back = None;
+        self.browse_back = None;
+        self.browse_section = None;
+        self.browse_rows = Vec::new();
+        self.selected_index = 0;
+        self.invalidate_page_fetch();
+        if self.offline || !self.api.is_authenticated() {
+            self.status_message = if self.offline {
+                "Go online to browse"
+            } else {
+                "Sign in to browse"
+            }
+            .into();
+            return;
+        }
+        self.status_message = "Loading discovery…".into();
+        let api = self.api.clone();
+        let tx = self.discovery_tx.clone();
+        self.discovery_handle = Some(tokio::spawn(async move {
+            let result = match page {
+                DiscoveryPage::Home => api.discovery_home().await,
+                DiscoveryPage::Explore => api.discovery_explore().await,
+            }
+            .map_err(|e| e.to_string());
+            let _ = tx.send((generation, page, result));
+        }));
+    }
+
+    fn cancel_discovery(&mut self) {
+        if let Some(handle) = self.discovery_handle.take() {
+            handle.abort();
+        }
+    }
+
+    /// Release the discovery-only feed and covers when leaving the page.
+    fn release_discovery_memory(&mut self) {
+        // A blocking decode cannot be aborted once started. Keep its guard
+        // until completion so rapid navigation cannot start more decodes.
+        self.discovery_art = std::collections::HashMap::new();
+        self.discovery_art_order = std::collections::VecDeque::new();
+        self.browse_rows = Vec::new();
+        self.discovery_back = None;
+        self.discovery_filtering = false;
+        self.browse_back = None;
+    }
+
+    /// Whether a cover fetch may start now. The drawing code asks first so
+    /// it allocates nothing per frame while a fetch is running or offline.
+    pub fn discovery_art_idle(&self) -> bool {
+        !self.offline && self.discovery_art_pending.is_none()
+    }
+
+    /// Whether a cover is already cached (a failed fetch counts as cached,
+    /// so it is not retried every frame).
+    pub fn discovery_art_cached(&self, url: &str) -> bool {
+        self.discovery_art.contains_key(url)
+    }
+
+    /// Fetch one cover at a time and retain at most `DISCOVERY_ART_CACHE`.
+    pub fn request_discovery_art(&mut self, url: Option<&str>) {
+        let Some(url) = url else {
+            return;
+        };
+        if !self.discovery_art_idle()
+            || !(url.starts_with("https://") || url.starts_with("http://"))
+            || self.discovery_art.contains_key(url)
+        {
+            return;
+        }
+        let url = url.to_owned();
+        self.discovery_art_pending = Some(url.clone());
+        let tx = self.discovery_art_tx.clone();
+        let client = self.api.thumbnail_client();
+        self.discovery_art_handle = Some(tokio::spawn(async move {
+            let art = crate::art::fetch_discovery_thumbnail(&client, &url).await;
+            let _ = tx.send((url, art));
+        }));
+    }
+
+    fn poll_discovery(&mut self) {
+        while let Ok((url, art)) = self.discovery_art_rx.try_recv() {
+            if self.discovery_art_pending.as_deref() != Some(&url) {
+                continue;
+            }
+            self.discovery_art_pending = None;
+            self.discovery_art_handle = None;
+            if self.discovery_page.is_none() {
+                continue;
+            }
+            if !self.discovery_art.contains_key(&url) {
+                if self.discovery_art_order.len() >= DISCOVERY_ART_CACHE
+                    && let Some(old) = self.discovery_art_order.pop_front()
+                {
+                    self.discovery_art.remove(&old);
+                }
+                self.discovery_art_order.push_back(url.clone());
+                self.discovery_art.insert(url, art);
+            }
+        }
+        while let Ok((generation, page, result)) = self.discovery_rx.try_recv() {
+            if generation != self.discovery_generation {
+                continue;
+            }
+            self.discovery_handle = None;
+            if self.discovery_page != Some(page) || self.current_page != Page::Browse {
+                continue;
+            }
+            match result {
+                Ok(shelves) => {
+                    let wanted: usize = shelves.iter().map(|s| s.items.len() + 2).sum();
+                    let mut rows = Vec::with_capacity(wanted + 4);
+                    if page == DiscoveryPage::Explore {
+                        rows.push(BrowseRow::Header("Explore".into()));
+                        for (id, title) in [
+                            ("releases", "New releases"),
+                            ("charts", "Charts"),
+                            ("moods", "Moods & genres"),
+                        ] {
+                            rows.push(BrowseRow::Item(SearchHit::Collection(Playlist {
+                                id: format!("explore-shortcut:{id}"),
+                                title: title.into(),
+                                subtitle: "Explore".into(),
+                                track_count: None,
+                                thumbnail_url: None,
+                                kind: PlaylistKind::Mood,
+                            })));
+                        }
+                    }
+                    for shelf in shelves {
+                        if shelf.items.is_empty() {
+                            continue;
+                        }
+                        let title = shelf.title;
+                        rows.push(BrowseRow::Header(title.clone()));
+                        rows.extend(shelf.items.into_iter().map(BrowseRow::Item));
+                        if let Some(endpoint) = shelf.more {
+                            let id = format!(
+                                "discovery-more:{}:{}",
+                                urlencoding::encode(&endpoint.browse_id),
+                                urlencoding::encode(endpoint.params.as_deref().unwrap_or(""))
+                            );
+                            rows.push(BrowseRow::Item(SearchHit::Collection(Playlist {
+                                id,
+                                title: "More…".into(),
+                                subtitle: title,
+                                track_count: None,
+                                thumbnail_url: None,
+                                kind: PlaylistKind::Playlist,
+                            })));
+                        }
+                    }
+                    rows.shrink_to_fit();
+                    if std::mem::take(&mut self.discovery_filtering)
+                        && self.discovery_back.is_none()
+                    {
+                        // Keep the unfiltered Home for Esc by moving it, not
+                        // cloning it.
+                        let previous = std::mem::replace(&mut self.browse_rows, rows);
+                        self.discovery_back = Some((previous, self.selected_index));
+                    } else {
+                        self.browse_rows = rows;
+                    }
+                    self.selected_index = self.first_browse_item();
+                    self.status_message = if self.browse_rows.is_empty() {
+                        "No discovery sections returned"
+                    } else {
+                        "↑↓ shelf · [ ] item · Enter open"
+                    }
+                    .into();
+                }
+                Err(e) => {
+                    self.discovery_filtering = false;
+                    self.status_message = format!("Discovery unavailable: {e}");
+                }
+            }
+        }
+    }
+
+    fn discovery_shelf_step(&mut self, forward: bool) {
+        let groups: Vec<usize> = self
+            .browse_rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, row)| matches!(row, BrowseRow::Header(_)).then_some(i + 1))
+            .filter(|&i| {
+                i < self.browse_rows.len() && matches!(self.browse_rows[i], BrowseRow::Item(_))
+            })
+            .collect();
+        if groups.is_empty() {
+            return;
+        }
+        let current = groups
+            .partition_point(|&start| start <= self.selected_index)
+            .saturating_sub(1);
+        let next = if forward {
+            (current + 1).min(groups.len() - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        self.selected_index = groups[next];
+    }
+
+    /// Start the loaded songs of the focused shelf from the first song.
+    pub fn play_discovery_shelf(&mut self) {
+        if self.current_page != Page::Browse
+            || self.discovery_page.is_none()
+            || !self.discovery_is_root()
+            || self.sidebar_focused
+        {
+            return;
+        }
+        let tracks = self.browse_track_list();
+        let Some(first) = tracks.first().cloned() else {
+            self.status_message = "No songs in this shelf".into();
+            return;
+        };
+        self.queue = tracks;
+        self.queue_index = 0;
+        self.rebuild_shuffle_order(None);
+        self.play_track(first);
+    }
+
+    pub fn discovery_is_root(&self) -> bool {
+        self.browse_back.is_none()
+    }
+
+    pub fn discovery_item_step(&mut self, forward: bool) {
+        if self.current_page != Page::Browse
+            || self.discovery_page.is_none()
+            || self.browse_back.is_some()
+            || self.sidebar_focused
+        {
+            return;
+        }
+        let i = self.selected_index;
+        let next = if forward {
+            i.saturating_add(1)
+        } else {
+            i.saturating_sub(1)
+        };
+        if matches!(self.browse_rows.get(next), Some(BrowseRow::Item(_))) {
+            self.selected_index = next;
+        }
     }
 
     /// Open the personalised browse page. Cached shelves paint at once; a
@@ -2134,6 +2512,10 @@ impl App {
     /// sections first when needed. Used by the 1–5 shortcuts. A cold feed is
     /// fetched in the background; the section is selected when it lands.
     pub async fn open_browse_section(&mut self, section: usize) {
+        self.cancel_discovery();
+        self.discovery_page = None;
+        self.discovery_back = None;
+        self.sidebar_focused = false;
         let section = section.min(BROWSE_SECTIONS.len() - 1);
         self.input_mode = InputMode::Normal;
         // A section shortcut supersedes a picker still waiting on the feed.
@@ -2211,6 +2593,7 @@ impl App {
     /// Esc on the browse page: category history first, then wherever the
     /// browse page was opened from.
     pub fn leave_browse(&mut self) {
+        self.cancel_discovery();
         // Leaving discards a category or artist fetch that is still running.
         self.invalidate_page_fetch();
         self.browse_load_requested = false;
@@ -2219,7 +2602,23 @@ impl App {
             self.browse_rows = rows;
             self.selected_index = index;
             self.status_message = "Browse".to_string();
+        } else if std::mem::take(&mut self.discovery_filtering) {
+            // Esc while a filter is still loading cancels it and stays on the
+            // Home that is still on screen. This must win over restoring the
+            // back stack: a load can start from an already-filtered Home.
+            self.discovery_generation = self.discovery_generation.wrapping_add(1);
+            self.status_message = "Home".into();
+        } else if let Some((rows, index)) = self.discovery_back.take() {
+            self.discovery_generation = self.discovery_generation.wrapping_add(1);
+            self.browse_rows = rows;
+            self.selected_index = index;
+            self.status_message = "Home".into();
         } else {
+            self.discovery_generation = self.discovery_generation.wrapping_add(1);
+            if self.discovery_page.is_some() {
+                self.release_discovery_memory();
+            }
+            self.discovery_page = None;
             self.current_page = self.browse_return_page;
             self.selected_index = self.browse_return_index;
             self.sync_preview();
@@ -2233,16 +2632,92 @@ impl App {
         match item {
             SearchHit::Track(track) => {
                 let tracks = self.browse_track_list();
-                let index = tracks
-                    .iter()
-                    .position(|t| t.id == track.id)
-                    .unwrap_or(0);
+                let index = tracks.iter().position(|t| t.id == track.id).unwrap_or(0);
                 self.queue = tracks;
                 self.queue_index = index;
                 self.rebuild_shuffle_order(None);
                 self.play_track(track);
             }
             SearchHit::Collection(playlist) => {
+                if let Some(endpoint) = playlist.id.strip_prefix("discovery-more:") {
+                    let Some((browse_id, params)) = endpoint.split_once(':') else {
+                        return;
+                    };
+                    let (Ok(browse_id), Ok(params)) =
+                        (urlencoding::decode(browse_id), urlencoding::decode(params))
+                    else {
+                        return;
+                    };
+                    let browse_id = browse_id.into_owned();
+                    let params = params.into_owned();
+                    let previous_index = self.selected_index;
+                    let title = playlist.subtitle.clone();
+                    let generation = self.page_fetch_generation;
+                    let api = self.api.clone();
+                    let tx = self.page_fetch_tx.clone();
+                    self.status_message = format!("Loading {title}…");
+                    tokio::spawn(async move {
+                        let result = api
+                            .discovery_more(&browse_id, Some(&params))
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send((
+                            generation,
+                            PageFetch::More {
+                                title,
+                                previous_index,
+                                result,
+                            },
+                        ));
+                    });
+                    return;
+                }
+                if self.discovery_page == Some(DiscoveryPage::Home)
+                    && let Some(params) = playlist.id.strip_prefix("home-filter:")
+                {
+                    let params = params.to_owned();
+                    self.cancel_discovery();
+                    self.discovery_filtering = true;
+                    self.discovery_generation = self.discovery_generation.wrapping_add(1);
+                    let generation = self.discovery_generation;
+                    let api = self.api.clone();
+                    let tx = self.discovery_tx.clone();
+                    self.status_message = format!("Loading {}…", playlist.title);
+                    self.discovery_handle = Some(tokio::spawn(async move {
+                        let result = api
+                            .discovery_home_filter(&params)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send((generation, DiscoveryPage::Home, result));
+                    }));
+                    return;
+                }
+                if self.discovery_page == Some(DiscoveryPage::Explore)
+                    && let Some(shortcut) = playlist.id.strip_prefix("explore-shortcut:")
+                {
+                    let target = self.browse_rows.iter().enumerate().find_map(|(i, row)| {
+                        let BrowseRow::Header(title) = row else {
+                            return None;
+                        };
+                        let title = title.to_lowercase();
+                        let matches = match shortcut {
+                            "releases" => {
+                                title.contains("new albums") || title.contains("new releases")
+                            }
+                            "charts" => title.contains("charts"),
+                            "moods" => title.contains("mood") || title.contains("genre"),
+                            _ => false,
+                        };
+                        (matches && matches!(self.browse_rows.get(i + 1), Some(BrowseRow::Item(_))))
+                            .then_some(i + 1)
+                    });
+                    if let Some(index) = target {
+                        self.selected_index = index;
+                    } else {
+                        self.status_message = format!("{} unavailable", playlist.title);
+                    }
+                    return;
+                }
                 let Some((browse_id, params)) = crate::api::category_parts(&playlist.id) else {
                     self.open_collection(playlist).await;
                     return;
@@ -2400,11 +2875,10 @@ impl App {
             self.status_message = "Scanning music folder...".to_string();
         }
         tokio::spawn(async move {
-            let tracks = tokio::task::spawn_blocking(move || {
-                crate::offline::scan(&music_dir, &registry)
-            })
-            .await
-            .unwrap_or_default();
+            let tracks =
+                tokio::task::spawn_blocking(move || crate::offline::scan(&music_dir, &registry))
+                    .await
+                    .unwrap_or_default();
             let _ = tx.send((generation, tracks));
         });
     }
@@ -2436,7 +2910,10 @@ impl App {
                 self.music_dir.display()
             )
         } else {
-            format!("Offline · {} files · Enter to open", self.offline_tracks.len())
+            format!(
+                "Offline · {} files · Enter to open",
+                self.offline_tracks.len()
+            )
         };
         self.sync_preview();
     }
@@ -2499,17 +2976,12 @@ impl App {
                 crate::lyrics::fetch_for_track(&api, &lyrics_id, &title, &artist, duration).await
             });
             let pid = id.clone();
-            let result = crate::offline::download(
-                &url,
-                &dir,
-                &track,
-                owner.as_deref(),
-                move |pct| {
+            let result =
+                crate::offline::download(&url, &dir, &track, owner.as_deref(), move |pct| {
                     let _ = ptx.send((pid.clone(), pct));
-                },
-            )
-            .await
-            .map_err(|e| e.to_string());
+                })
+                .await
+                .map_err(|e| e.to_string());
             let audio = result.as_ref().ok().map(|entry| PathBuf::from(&entry.path));
             let _ = tx.send((id, result));
             match audio {
@@ -2524,6 +2996,10 @@ impl App {
     }
 
     pub async fn activate_selected(&mut self) {
+        if self.sidebar_focused {
+            self.activate_sidebar();
+            return;
+        }
         // A new Enter press supersedes any category/artist page still in
         // flight; its reply must not pull the user somewhere else later.
         self.invalidate_page_fetch();
@@ -2609,10 +3085,7 @@ impl App {
         let api = self.api.clone();
         let tx = self.collection_tx.clone();
         tokio::spawn(async move {
-            let result = api
-                .playlist_tracks(&id)
-                .await
-                .map_err(|e| e.to_string());
+            let result = api.playlist_tracks(&id).await.map_err(|e| e.to_string());
             let _ = tx.send((generation, id, result));
         });
     }
@@ -2644,11 +3117,7 @@ impl App {
                                     .iter()
                                     .position(|t| t.set_video_id.as_deref() == Some(token.as_str()))
                             })
-                            .or_else(|| {
-                                self.playlist_tracks
-                                    .iter()
-                                    .position(|t| t.id == video)
-                            })
+                            .or_else(|| self.playlist_tracks.iter().position(|t| t.id == video))
                         {
                             self.selected_index = position;
                         }
@@ -2661,7 +3130,8 @@ impl App {
                         .as_ref()
                         .map(|p| p.title.clone())
                         .unwrap_or_default();
-                    self.status_message = format!("{} · {} tracks", title, self.playlist_tracks.len());
+                    self.status_message =
+                        format!("{} · {} tracks", title, self.playlist_tracks.len());
                 }
                 Ok(_) => {
                     if self.playlist_tracks.is_empty() {
@@ -2672,7 +3142,8 @@ impl App {
                             .unwrap_or_default();
                         self.status_message = format!("'{}' is empty", title);
                     } else {
-                        self.status_message = "Refresh returned no rows — keeping cached".to_string();
+                        self.status_message =
+                            "Refresh returned no rows — keeping cached".to_string();
                     }
                 }
                 Err(e) => {
@@ -2726,6 +3197,37 @@ impl App {
                 continue;
             }
             match fetch {
+                PageFetch::More {
+                    title,
+                    previous_index,
+                    result,
+                } => {
+                    // The rows on screen are the ones the request came from;
+                    // anything else means the user has moved on.
+                    if self.current_page != Page::Browse
+                        || self.discovery_page.is_none()
+                        || self.browse_back.is_some()
+                    {
+                        continue;
+                    }
+                    match result {
+                        Ok(items) if !items.is_empty() => {
+                            let count = items.len();
+                            let mut rows = Vec::with_capacity(count + 1);
+                            rows.push(BrowseRow::Header(title.clone()));
+                            rows.extend(items.into_iter().map(BrowseRow::Item));
+                            // Move the current rows into the back stack.
+                            self.browse_back =
+                                Some((std::mem::take(&mut self.browse_rows), previous_index));
+                            self.set_browse_rows(rows);
+                            self.status_message = format!("{title} · {count} items");
+                        }
+                        Ok(_) => self.status_message = format!("Nothing found in {title}"),
+                        Err(error) => {
+                            self.status_message = format!("Failed to load {title}: {error}")
+                        }
+                    }
+                }
                 PageFetch::Category {
                     title,
                     previous,
@@ -2864,7 +3366,11 @@ impl App {
         } else {
             "buffer♪ng".to_string()
         };
-        let prefetched = if retry { None } else { self.take_prefetch(&t.id) };
+        let prefetched = if retry {
+            None
+        } else {
+            self.take_prefetch(&t.id)
+        };
         let result = if let Some(position) = start {
             self.player
                 .play_at(&t.id, prefetched.as_ref(), position, paused)
@@ -2959,9 +3465,11 @@ impl App {
         if crate::offline::is_local(&track.id) {
             return;
         }
-        if self.prefetch.as_ref().is_some_and(|(id, _, at)| {
-            id == &track.id && at.elapsed() < PREFETCH_TTL
-        }) {
+        if self
+            .prefetch
+            .as_ref()
+            .is_some_and(|(id, _, at)| id == &track.id && at.elapsed() < PREFETCH_TTL)
+        {
             return;
         }
         if self.prefetch_inflight.is_some()
@@ -2977,16 +3485,14 @@ impl App {
         let tx = self.prefetch_tx.clone();
         tokio::spawn(async move {
             let id = video.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                crate::player::resolve_stream(&video)
-            })
-            .await
-            .unwrap_or_else(|e| {
-                Err(crate::player::ExtractError::Failed {
-                    message: format!("Extraction task failed: {e}"),
-                    transient: false,
-                })
-            });
+            let result = tokio::task::spawn_blocking(move || crate::player::resolve_stream(&video))
+                .await
+                .unwrap_or_else(|e| {
+                    Err(crate::player::ExtractError::Failed {
+                        message: format!("Extraction task failed: {e}"),
+                        transient: false,
+                    })
+                });
             let _ = tx.send((id, result));
         });
     }
@@ -3075,11 +3581,8 @@ impl App {
     /// Duplicates already present are kept, never removed.
     fn extend_auto_queue(&mut self, tracks: Vec<Track>) -> usize {
         let before = self.queue.len();
-        let added = crate::auto_queue::append_unique(
-            &mut self.queue,
-            tracks,
-            crate::auto_queue::ADD_LIMIT,
-        );
+        let added =
+            crate::auto_queue::append_unique(&mut self.queue, tracks, crate::auto_queue::ADD_LIMIT);
         if added == 0 {
             return 0;
         }
@@ -3143,10 +3646,7 @@ impl App {
     pub fn toggle_auto_queue(&mut self) {
         let enabled = !self.auto_queue.enabled();
         self.auto_queue.set_enabled(enabled);
-        self.status_message = format!(
-            "Auto Queue: {}",
-            if enabled { "on" } else { "off" }
-        );
+        self.status_message = format!("Auto Queue: {}", if enabled { "on" } else { "off" });
     }
 
     /// Advance the Last.fm state machine with this tick's playback state.
@@ -3383,6 +3883,9 @@ impl App {
     /// `m`: swap the library/content view for a large cover and lyrics.
     pub fn toggle_now_playing(&mut self) {
         self.now_playing = !self.now_playing;
+        // The sidebar is not drawn while maximized, so drop any focus before
+        // it can intercept the next Esc.
+        self.sidebar_focused = false;
         if self.now_playing {
             self.lyrics_scroll = None;
             self.lyrics_offset = 0;
@@ -3456,7 +3959,11 @@ impl App {
         let want = track.like != Some(true);
         // Instant feedback — the request confirms (or reverts) behind it.
         // The heart applies only when the press names the playing song.
-        if self.current_track.as_ref().is_some_and(|t| t.id == track.id) {
+        if self
+            .current_track
+            .as_ref()
+            .is_some_and(|t| t.id == track.id)
+        {
             if let Some(t) = self.current_track.as_mut() {
                 t.like = Some(want);
             }
@@ -3479,9 +3986,7 @@ impl App {
             .or_insert((generation, track.clone()));
         self.like_refresh_at = Some((Instant::now() + Duration::from_secs(9), generation));
         // Queued, not spawned: presses apply one at a time in order.
-        let _ = self
-            .like_cmd_tx
-            .send((track.id.clone(), want, generation));
+        let _ = self.like_cmd_tx.send((track.id.clone(), want, generation));
     }
 
     /// Live-update the liked-songs list on screen for an `L` press:
@@ -3491,7 +3996,10 @@ impl App {
     fn like_view_edit(&mut self, track: &Track, want: bool) {
         let vid = track.id.as_str();
         let on_open = self.current_page == Page::Playlist
-            && self.current_playlist.as_ref().is_some_and(|p| p.id == LIKED_PLAYLIST);
+            && self
+                .current_playlist
+                .as_ref()
+                .is_some_and(|p| p.id == LIKED_PLAYLIST);
         let on_preview = self.current_page == Page::Library
             && self.preview_for.as_deref() == Some(LIKED_PLAYLIST);
         if !on_open && !on_preview {
@@ -3506,8 +4014,9 @@ impl App {
                     if i < self.selected_index {
                         self.selected_index -= 1;
                     } else if i == self.selected_index {
-                        self.selected_index =
-                            self.selected_index.min(self.playlist_tracks.len().saturating_sub(1));
+                        self.selected_index = self
+                            .selected_index
+                            .min(self.playlist_tracks.len().saturating_sub(1));
                     }
                 }
                 // Listed and staying listed: the server owns the ordering —
@@ -3516,8 +4025,8 @@ impl App {
                     self.playlist_tracks.insert(0, track.clone());
                     // Every row below shifted down one — carry the
                     // selection along so it stays on the same track.
-                    self.selected_index = (self.selected_index + 1)
-                        .min(self.playlist_tracks.len().saturating_sub(1));
+                    self.selected_index =
+                        (self.selected_index + 1).min(self.playlist_tracks.len().saturating_sub(1));
                 }
                 _ => {}
             }
@@ -3550,7 +4059,10 @@ impl App {
             }
         }
         if self.current_page == Page::Playlist
-            && self.current_playlist.as_ref().is_some_and(|p| p.id == LIKED_PLAYLIST)
+            && self
+                .current_playlist
+                .as_ref()
+                .is_some_and(|p| p.id == LIKED_PLAYLIST)
         {
             let selected = self
                 .playlist_tracks
@@ -3563,7 +4075,8 @@ impl App {
                     .iter()
                     .position(|t| t.id == sid)
                     .unwrap_or_else(|| {
-                        self.selected_index.min(self.playlist_tracks.len().saturating_sub(1))
+                        self.selected_index
+                            .min(self.playlist_tracks.len().saturating_sub(1))
                     });
             }
         }
@@ -4350,12 +4863,7 @@ fn shuffle_previous(order: &[usize], current: usize) -> Option<usize> {
 /// Format seconds the way track durations are written (`M:SS` / `H:MM:SS`).
 fn format_duration(secs: u64) -> String {
     if secs >= 3600 {
-        format!(
-            "{}:{:02}:{:02}",
-            secs / 3600,
-            (secs % 3600) / 60,
-            secs % 60
-        )
+        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
     } else {
         format!("{}:{:02}", secs / 60, secs % 60)
     }
@@ -4419,10 +4927,7 @@ mod browse_section_tests {
             Some(2)
         );
         assert_eq!(browse_section_for_title("My subscriptions"), Some(3));
-        assert_eq!(
-            browse_section_for_title("Forgotten favorites"),
-            Some(4)
-        );
+        assert_eq!(browse_section_for_title("Forgotten favorites"), Some(4));
         assert_eq!(browse_section_for_title("From the community"), Some(5));
         // Moods and genres merge into one slot.
         assert_eq!(browse_section_for_title("Moods"), Some(6));
@@ -4489,13 +4994,7 @@ mod playback_clock_tests {
 
     fn at(base: f64, state: PlaybackState, age: Option<Duration>) -> f64 {
         let now = Instant::now();
-        interpolate_position(
-            state,
-            base,
-            age.map(|age| now - age),
-            now,
-            600,
-        )
+        interpolate_position(state, base, age.map(|age| now - age), now, 600)
     }
 
     #[test]
@@ -4511,7 +5010,11 @@ mod playback_clock_tests {
 
     #[test]
     fn normal_playback_interpolates_from_authoritative_sample() {
-        let position = at(42.0, PlaybackState::Playing, Some(Duration::from_millis(250)));
+        let position = at(
+            42.0,
+            PlaybackState::Playing,
+            Some(Duration::from_millis(250)),
+        );
         assert!((position - 42.25).abs() < 0.01, "got {position}");
     }
 
@@ -4527,7 +5030,11 @@ mod playback_clock_tests {
     #[test]
     fn pause_freezes_and_resume_waits_for_a_new_sample() {
         assert_eq!(
-            at(42.0, PlaybackState::Paused, Some(Duration::from_millis(100))),
+            at(
+                42.0,
+                PlaybackState::Paused,
+                Some(Duration::from_millis(100))
+            ),
             42.0
         );
         // Resuming does not fabricate a sample: with the pre-pause sample now
@@ -4540,11 +5047,28 @@ mod playback_clock_tests {
 
     #[test]
     fn track_switch_resets_to_zero_and_seek_is_immediate() {
-        assert_eq!(at(0.0, PlaybackState::Buffering, Some(Duration::from_secs(1))), 0.0);
-        let seek = at(100.0, PlaybackState::Playing, Some(Duration::from_millis(50)));
+        assert_eq!(
+            at(0.0, PlaybackState::Buffering, Some(Duration::from_secs(1))),
+            0.0
+        );
+        let seek = at(
+            100.0,
+            PlaybackState::Playing,
+            Some(Duration::from_millis(50)),
+        );
         assert!((seek - 100.05).abs() < 0.01, "got {seek}");
-        assert_eq!(at(590.0, PlaybackState::Playing, Some(Duration::from_secs(1))), 590.0);
-        assert_eq!(at(599.9, PlaybackState::Playing, Some(Duration::from_millis(500))), 600.0);
+        assert_eq!(
+            at(590.0, PlaybackState::Playing, Some(Duration::from_secs(1))),
+            590.0
+        );
+        assert_eq!(
+            at(
+                599.9,
+                PlaybackState::Playing,
+                Some(Duration::from_millis(500))
+            ),
+            600.0
+        );
     }
 }
 
@@ -4594,7 +5118,6 @@ mod shuffle_tests {
         }
         assert!(!order.contains(&5));
     }
-
 }
 
 #[cfg(test)]
@@ -4839,6 +5362,7 @@ mod regression_tests {
             title: "Liked Music".into(),
             subtitle: String::new(),
             track_count: None,
+            thumbnail_url: None,
             kind: PlaylistKind::Playlist,
         });
         app.playlist_tracks.clear();
@@ -4853,5 +5377,420 @@ mod regression_tests {
         assert_eq!(app.playlist_tracks[0].id, original.id);
         assert_eq!(app.playlist_tracks[0].like, Some(true));
         assert_eq!(app.current_track.as_ref().unwrap().id, "first");
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    fn item(id: &str) -> BrowseRow {
+        BrowseRow::Item(SearchHit::Collection(Playlist {
+            id: id.into(),
+            title: id.into(),
+            subtitle: "Artists".into(),
+            track_count: None,
+            thumbnail_url: None,
+            kind: PlaylistKind::Playlist,
+        }))
+    }
+
+    fn discovery_app() -> App {
+        let mut app = App::new();
+        app.current_page = Page::Browse;
+        app.discovery_page = Some(DiscoveryPage::Home);
+        app.browse_rows = vec![
+            BrowseRow::Header("Mixed for you".into()),
+            item("Mix 1"),
+            item("Mix 2"),
+            BrowseRow::Header("New releases".into()),
+            item("Release"),
+        ];
+        app.selected_index = 1;
+        app
+    }
+
+    #[tokio::test]
+    async fn discovery_navigation_preserves_shelf_boundaries_and_opens_a_mix() {
+        let mut app = discovery_app();
+        app.discovery_item_step(true);
+        assert_eq!(app.selected_index, 2);
+        app.discovery_item_step(true);
+        assert_eq!(app.selected_index, 2);
+        app.next();
+        assert_eq!(app.selected_index, 4);
+        app.previous();
+        assert_eq!(app.selected_index, 1);
+        app.discovery_item_step(true);
+        app.activate_selected().await;
+        assert_eq!(app.current_page, Page::Playlist);
+        assert_eq!(app.current_playlist.as_ref().unwrap().id, "Mix 2");
+        assert_eq!(app.playlist_return_page, Page::Browse);
+        assert_eq!(app.playlist_return_index, 2);
+    }
+
+    #[tokio::test]
+    async fn entering_a_home_filter_starts_loading_and_can_be_cancelled() {
+        let mut app = discovery_app();
+        app.browse_rows[1] = BrowseRow::Item(SearchHit::Collection(Playlist {
+            id: "home-filter:opaque-filter".into(),
+            title: "Relax".into(),
+            subtitle: "Filter".into(),
+            track_count: None,
+            thumbnail_url: None,
+            kind: PlaylistKind::Mood,
+        }));
+        app.selected_index = 1;
+        app.activate_selected().await;
+        assert!(app.discovery_filtering);
+        assert_eq!(app.discovery_page, Some(DiscoveryPage::Home));
+        assert_eq!(app.status_message, "Loading Relax…");
+        app.leave_browse();
+        assert!(!app.discovery_filtering);
+        assert_eq!(app.current_page, Page::Browse);
+        assert_eq!(app.discovery_page, Some(DiscoveryPage::Home));
+    }
+
+    #[tokio::test]
+    async fn older_discovery_result_cannot_replace_the_new_page() {
+        let mut app = discovery_app();
+        app.discovery_generation = 2;
+        app.discovery_page = Some(DiscoveryPage::Explore);
+        app.discovery_tx
+            .send((
+                1,
+                DiscoveryPage::Home,
+                Ok(vec![BrowseShelf {
+                    title: "Old".into(),
+                    items: vec![],
+                    more: None,
+                }]),
+            ))
+            .unwrap();
+        app.poll_discovery();
+        assert!(
+            matches!(&app.browse_rows[0], BrowseRow::Header(title) if title == "Mixed for you")
+        );
+        app.sidebar_focused = true;
+        app.sidebar_index = 2;
+        app.activate_selected().await;
+        assert_eq!(app.current_page, Page::Library);
+        assert!(!app.sidebar_focused);
+    }
+
+    #[tokio::test]
+    async fn more_results_restore_the_selected_home_row_on_back() {
+        let mut app = discovery_app();
+        app.selected_index = 2;
+        app.page_fetch_tx
+            .send((
+                app.page_fetch_generation,
+                PageFetch::More {
+                    title: "Mixed for you".into(),
+                    previous_index: 2,
+                    result: Ok(vec![SearchHit::Collection(Playlist {
+                        id: "Mix 3".into(),
+                        title: "Mix 3".into(),
+                        subtitle: String::new(),
+                        track_count: None,
+                        thumbnail_url: None,
+                        kind: PlaylistKind::Playlist,
+                    })]),
+                },
+            ))
+            .unwrap();
+        app.poll_page_fetch();
+        assert!(
+            matches!(&app.browse_rows[1], BrowseRow::Item(SearchHit::Collection(p)) if p.id == "Mix 3")
+        );
+        assert!(!app.discovery_is_root());
+        app.leave_browse();
+        assert!(app.discovery_is_root());
+        assert_eq!(app.selected_index, 2);
+        assert!(
+            matches!(&app.browse_rows[2], BrowseRow::Item(SearchHit::Collection(p)) if p.id == "Mix 2")
+        );
+    }
+
+    #[tokio::test]
+    async fn explore_shortcut_jumps_to_a_real_section() {
+        let mut app = discovery_app();
+        app.discovery_page = Some(DiscoveryPage::Explore);
+        app.browse_rows = vec![
+            BrowseRow::Header("Explore".into()),
+            item("explore-shortcut:releases"),
+            BrowseRow::Header("New albums & singles".into()),
+            item("Album"),
+        ];
+        app.selected_index = 1;
+        app.activate_selected().await;
+        assert_eq!(app.selected_index, 3);
+        assert_eq!(app.current_page, Page::Browse);
+    }
+
+    #[tokio::test]
+    async fn leaving_a_filtered_home_restores_the_previous_shelf() {
+        let mut app = discovery_app();
+        app.selected_index = 2;
+        app.discovery_back = Some((app.browse_rows.clone(), 2));
+        app.browse_rows = vec![BrowseRow::Header("Relax".into()), item("relax mix")];
+        app.selected_index = 1;
+        app.leave_browse();
+        assert_eq!(app.current_page, Page::Browse);
+        assert_eq!(app.discovery_page, Some(DiscoveryPage::Home));
+        assert_eq!(app.selected_index, 2);
+        assert!(
+            matches!(&app.browse_rows[2], BrowseRow::Item(SearchHit::Collection(p)) if p.id == "Mix 2")
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_to_library_cancels_an_outstanding_feed() {
+        let mut app = discovery_app();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort_handle = task.abort_handle();
+        app.discovery_handle = Some(task);
+        app.sidebar_index = 2;
+        app.activate_sidebar();
+        tokio::task::yield_now().await;
+        assert!(abort_handle.is_finished());
+        assert_eq!(app.current_page, Page::Library);
+    }
+
+    #[tokio::test]
+    async fn play_all_starts_first_song_and_queues_its_shelf() {
+        let mut app = discovery_app();
+        let (player, commands) = crate::player::player_tests::recording_player();
+        app.player = player;
+        let track = |id: &str| Track {
+            id: format!("local:{id}"),
+            title: id.into(),
+            artist: "Artist".into(),
+            album: None,
+            duration: None,
+            thumbnail_url: None,
+            like: None,
+            downloaded: true,
+            set_video_id: None,
+        };
+        app.browse_rows = vec![
+            BrowseRow::Header("Daily discover".into()),
+            BrowseRow::Item(SearchHit::Track(track("one"))),
+            BrowseRow::Item(SearchHit::Track(track("two"))),
+            BrowseRow::Header("Other shelf".into()),
+            BrowseRow::Item(SearchHit::Track(track("other"))),
+        ];
+        app.selected_index = 2;
+        app.play_discovery_shelf();
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|t| t.title.as_str())
+                .collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+        assert_eq!(app.queue_index, 0);
+        assert_eq!(app.current_track.as_ref().unwrap().title, "one");
+        let clear = commands
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let command = commands
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(clear.contains("playlist-clear"), "{clear}");
+        assert!(
+            command.contains("loadfile") && command.contains("replace"),
+            "{command}"
+        );
+    }
+
+    #[tokio::test]
+    async fn play_all_ignores_a_shelf_without_songs() {
+        let mut app = discovery_app();
+        app.play_discovery_shelf();
+        assert_eq!(app.status_message, "No songs in this shelf");
+        assert!(app.queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn leaving_keeps_one_cover_guard_and_discards_its_late_result() {
+        let mut app = discovery_app();
+        let url = "https://example.invalid/cover".to_string();
+        app.discovery_art
+            .insert(url.clone(), Some(image::RgbaImage::new(32, 16)));
+        app.discovery_art_order.push_back(url.clone());
+        app.discovery_art_pending = Some(url.clone());
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let tx = app.discovery_art_tx.clone();
+        let result_url = url.clone();
+        app.discovery_art_handle = Some(tokio::spawn(async move {
+            let _ = wait.await;
+            let _ = tx.send((result_url, Some(image::RgbaImage::new(32, 16))));
+        }));
+        app.discovery_back = Some((app.browse_rows.clone(), app.selected_index));
+        app.sidebar_index = 2;
+        app.activate_sidebar();
+        assert_eq!(app.current_page, Page::Library);
+        assert!(app.browse_rows.is_empty());
+        assert_eq!(app.browse_rows.capacity(), 0);
+        assert!(app.discovery_back.is_none());
+        assert!(app.discovery_art.is_empty());
+        assert_eq!(app.discovery_art.capacity(), 0);
+        app.request_discovery_art(Some("https://example.invalid/next"));
+        assert_eq!(app.discovery_art_pending.as_deref(), Some(url.as_str()));
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while app.discovery_art_pending.is_some() {
+                app.poll_discovery();
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(app.discovery_art.is_empty());
+        assert!(app.discovery_art_handle.is_none());
+    }
+
+    #[tokio::test]
+    async fn filter_result_moves_the_unfiltered_home_into_the_back_stack() {
+        let mut app = discovery_app();
+        app.selected_index = 2;
+        app.discovery_filtering = true;
+        app.discovery_generation = 7;
+        app.discovery_tx
+            .send((
+                7,
+                DiscoveryPage::Home,
+                Ok(vec![BrowseShelf {
+                    title: "Relax".into(),
+                    items: vec![SearchHit::Collection(Playlist {
+                        id: "relax mix".into(),
+                        title: "relax mix".into(),
+                        subtitle: String::new(),
+                        track_count: None,
+                        thumbnail_url: None,
+                        kind: PlaylistKind::Playlist,
+                    })],
+                    more: None,
+                }]),
+            ))
+            .unwrap();
+        app.poll_discovery();
+        assert!(!app.discovery_filtering);
+        assert_eq!(app.browse_rows.len(), 2);
+        let (back, index) = app.discovery_back.as_ref().expect("unfiltered rows kept");
+        assert_eq!((back.len(), *index), (5, 2));
+        // Rows are sized to their contents, not to a growth step.
+        assert_eq!(app.browse_rows.capacity(), app.browse_rows.len());
+    }
+
+    #[tokio::test]
+    async fn esc_while_a_filter_loads_cancels_it_and_stays_on_home() {
+        let mut app = discovery_app();
+        app.discovery_filtering = true;
+        app.leave_browse();
+        assert!(!app.discovery_filtering);
+        assert_eq!(app.current_page, Page::Browse);
+        assert_eq!(app.discovery_page, Some(DiscoveryPage::Home));
+        assert_eq!(app.browse_rows.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn esc_cancels_a_second_filter_without_dropping_the_filtered_home() {
+        let mut app = discovery_app();
+        app.discovery_back = Some((app.browse_rows.clone(), 2));
+        app.browse_rows = vec![BrowseRow::Header("Relax".into()), item("relax mix")];
+        app.selected_index = 1;
+        app.discovery_filtering = true;
+        app.leave_browse();
+        assert!(!app.discovery_filtering);
+        assert_eq!(app.current_page, Page::Browse);
+        assert_eq!(app.discovery_page, Some(DiscoveryPage::Home));
+        assert_eq!(app.browse_rows.len(), 2);
+        assert_eq!(app.selected_index, 1);
+        assert!(
+            app.discovery_back.is_some(),
+            "unfiltered Home is still one Esc away"
+        );
+    }
+
+    #[tokio::test]
+    async fn maximized_view_drops_sidebar_focus() {
+        let mut app = discovery_app();
+        app.toggle_sidebar_focus();
+        assert!(app.sidebar_focused);
+        app.toggle_now_playing();
+        assert!(!app.sidebar_focused);
+        app.toggle_sidebar_focus();
+        assert!(!app.sidebar_focused, "focus is ignored while maximized");
+        app.toggle_now_playing();
+    }
+
+    #[tokio::test]
+    async fn failed_filter_keeps_home_and_does_not_leave_a_stale_flag() {
+        let mut app = discovery_app();
+        app.discovery_filtering = true;
+        app.discovery_generation = 3;
+        app.discovery_tx
+            .send((3, DiscoveryPage::Home, Err("offline".into())))
+            .unwrap();
+        app.poll_discovery();
+        assert!(!app.discovery_filtering);
+        assert!(app.discovery_back.is_none());
+        assert_eq!(app.browse_rows.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn stale_more_result_is_ignored_after_drilling_in() {
+        let mut app = discovery_app();
+        app.browse_back = Some((Vec::new(), 0));
+        let before = app.browse_rows.len();
+        app.page_fetch_tx
+            .send((
+                app.page_fetch_generation,
+                PageFetch::More {
+                    title: "x".into(),
+                    previous_index: 1,
+                    result: Ok(vec![]),
+                },
+            ))
+            .unwrap();
+        app.poll_page_fetch();
+        assert_eq!(app.browse_rows.len(), before);
+    }
+
+    #[tokio::test]
+    async fn art_requests_do_nothing_when_busy_cached_or_not_http() {
+        let mut app = discovery_app();
+        app.request_discovery_art(None);
+        app.request_discovery_art(Some("file:///etc/passwd"));
+        assert!(app.discovery_art_pending.is_none());
+        app.discovery_art
+            .insert("https://example.invalid/a".into(), None);
+        app.request_discovery_art(Some("https://example.invalid/a"));
+        assert!(app.discovery_art_pending.is_none());
+        assert!(app.discovery_art_cached("https://example.invalid/a"));
+        app.discovery_art_pending = Some("https://example.invalid/busy".into());
+        assert!(!app.discovery_art_idle());
+    }
+
+    #[tokio::test]
+    async fn library_navigation_keeps_ordinary_browse_rows() {
+        let mut app = discovery_app();
+        app.discovery_page = None;
+        app.sidebar_index = 2;
+        app.activate_sidebar();
+        assert_eq!(app.browse_rows.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn empty_discovery_feed_is_safe_to_navigate() {
+        let mut app = discovery_app();
+        app.browse_rows.clear();
+        app.selected_index = 0;
+        app.next();
+        app.previous();
+        app.discovery_item_step(true);
+        assert_eq!(app.selected_index, 0);
     }
 }
