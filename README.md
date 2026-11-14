@@ -203,7 +203,6 @@ Album art is rendered as **true high-resolution images** on terminals that suppo
 | **Kitty**    | ✅          | ✅ (≥ 0.40)              |
 | **WezTerm**  | ✅          | ✅                        |
 | **Ghostty**  | ✅          | ✅                        |
-| **Konsole**  | ✅          | ❌                        |
 
 **Kitty ≥ 0.40** is recommended for the full experience (images + 2× lyrics text in the maximized view).
 
