@@ -316,6 +316,8 @@ screen, picker and text-entry mode. The everyday keys are:
 | Key | Action |
 | :--- | :--- |
 | `↑` / `↓` | Navigate lists |
+| `[` / `]` | Move to the previous / next item in the selected Home or Explore shelf |
+| `P` | Play songs from the selected Home or Explore shelf |
 | `Enter` | Play / open selection |
 | `Space` | Play / Pause |
 | `←` / `→` | Seek -10s / +10s |
