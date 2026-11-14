@@ -129,8 +129,10 @@ pub enum DiscoveryPage {
 
 type DiscoveryResult = (u64, DiscoveryPage, Result<Vec<BrowseShelf>, String>);
 
-/// Decoded 32x16 covers kept for Home/Explore cards (about 2 KB each).
-const DISCOVERY_ART_CACHE: usize = 24;
+/// Decoded 32x16 covers kept for Home/Explore cards (about 2 KB each, so the
+/// full cache holds about 1 MB of pixels plus the URL keys). Large enough to
+/// scroll long feeds, and switch between pages, without downloading again.
+const DISCOVERY_ART_CACHE: usize = 512;
 /// Cards per frame that may show a cover. Kept below the cache size so the
 /// visible covers can never evict each other and refetch in a loop on very
 /// wide terminals; extra cards show a placeholder instead.
@@ -2044,6 +2046,7 @@ impl App {
         }
         self.current_page = Page::Browse;
         self.discovery_page = Some(page);
+        self.forget_failed_discovery_art();
         self.discovery_back = None;
         self.browse_back = None;
         self.browse_section = None;
@@ -2078,16 +2081,26 @@ impl App {
         }
     }
 
-    /// Release the discovery-only feed and covers when leaving the page.
+    /// Release the discovery-only feed when leaving the page. Decoded covers
+    /// stay cached (bounded by `DISCOVERY_ART_CACHE`) so coming back to Home
+    /// or Explore does not download them again.
     fn release_discovery_memory(&mut self) {
         // A blocking decode cannot be aborted once started. Keep its guard
         // until completion so rapid navigation cannot start more decodes.
-        self.discovery_art = std::collections::HashMap::new();
-        self.discovery_art_order = std::collections::VecDeque::new();
         self.browse_rows = Vec::new();
         self.discovery_back = None;
         self.discovery_filtering = false;
         self.browse_back = None;
+    }
+
+    /// Forget covers that failed to load, keeping the decoded ones. A failure
+    /// is remembered only so an open page does not retry it every frame; it
+    /// must not outlive the visit, or one network error would leave a
+    /// placeholder for the rest of the session.
+    fn forget_failed_discovery_art(&mut self) {
+        self.discovery_art.retain(|_, art| art.is_some());
+        self.discovery_art_order
+            .retain(|url| self.discovery_art.contains_key(url));
     }
 
     /// Whether a cover fetch may start now. The drawing code asks first so
@@ -2130,9 +2143,8 @@ impl App {
             }
             self.discovery_art_pending = None;
             self.discovery_art_handle = None;
-            if self.discovery_page.is_none() {
-                continue;
-            }
+            // Cache the result even if the user left Home or Explore while it
+            // was downloading; the next visit then finds it already loaded.
             if !self.discovery_art.contains_key(&url) {
                 if self.discovery_art_order.len() >= DISCOVERY_ART_CACHE
                     && let Some(old) = self.discovery_art_order.pop_front()
@@ -5613,12 +5625,13 @@ mod discovery_tests {
     }
 
     #[tokio::test]
-    async fn leaving_keeps_one_cover_guard_and_discards_its_late_result() {
+    async fn leaving_discovery_keeps_covers_and_caches_the_late_result() {
         let mut app = discovery_app();
-        let url = "https://example.invalid/cover".to_string();
+        let cached = "https://example.invalid/cached".to_string();
         app.discovery_art
-            .insert(url.clone(), Some(image::RgbaImage::new(32, 16)));
-        app.discovery_art_order.push_back(url.clone());
+            .insert(cached.clone(), Some(image::RgbaImage::new(32, 16)));
+        app.discovery_art_order.push_back(cached.clone());
+        let url = "https://example.invalid/cover".to_string();
         app.discovery_art_pending = Some(url.clone());
         let (release, wait) = tokio::sync::oneshot::channel::<()>();
         let tx = app.discovery_art_tx.clone();
@@ -5634,9 +5647,12 @@ mod discovery_tests {
         assert!(app.browse_rows.is_empty());
         assert_eq!(app.browse_rows.capacity(), 0);
         assert!(app.discovery_back.is_none());
-        assert!(app.discovery_art.is_empty());
-        assert_eq!(app.discovery_art.capacity(), 0);
+        // The feed is released but the decoded cover stays cached.
+        assert!(app.discovery_art_cached(&cached));
+        // The in-flight guard survives leaving: neither another cover nor the
+        // same one starts a second fetch.
         app.request_discovery_art(Some("https://example.invalid/next"));
+        app.request_discovery_art(Some(&url));
         assert_eq!(app.discovery_art_pending.as_deref(), Some(url.as_str()));
         release.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -5647,8 +5663,85 @@ mod discovery_tests {
         })
         .await
         .unwrap();
-        assert!(app.discovery_art.is_empty());
+        // The late download is cached although no discovery page is open.
+        assert!(app.discovery_page.is_none());
+        assert!(app.discovery_art_cached(&cached));
+        assert!(app.discovery_art_cached(&url));
+        assert_eq!(app.discovery_art.len(), 2);
+        assert_eq!(app.discovery_art_order, [cached.clone(), url.clone()]);
         assert!(app.discovery_art_handle.is_none());
+        // Both covers are already cached, so a later visit requests nothing.
+        app.request_discovery_art(Some(&cached));
+        app.request_discovery_art(Some(&url));
+        assert!(app.discovery_art_pending.is_none());
+        // A repeated or stray result is ignored instead of cached twice.
+        app.discovery_art_tx
+            .send((url.clone(), Some(image::RgbaImage::new(32, 16))))
+            .unwrap();
+        app.poll_discovery();
+        assert_eq!(app.discovery_art.len(), 2);
+        assert_eq!(app.discovery_art_order.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn esc_out_of_discovery_keeps_decoded_covers() {
+        let mut app = discovery_app();
+        let url = "https://example.invalid/cover".to_string();
+        app.discovery_art
+            .insert(url.clone(), Some(image::RgbaImage::new(32, 16)));
+        app.discovery_art_order.push_back(url.clone());
+        app.leave_browse();
+        assert!(app.discovery_page.is_none());
+        assert!(app.browse_rows.is_empty());
+        assert!(app.discovery_art_cached(&url));
+        assert_eq!(app.discovery_art_order, [url]);
+    }
+
+    #[tokio::test]
+    async fn cover_cache_evicts_the_oldest_at_capacity_and_stays_in_step() {
+        let mut app = discovery_app();
+        let url = |i: usize| format!("https://example.invalid/{i}");
+        let total = DISCOVERY_ART_CACHE + 3;
+        for i in 0..total {
+            app.discovery_art_pending = Some(url(i));
+            app.discovery_art_tx
+                .send((url(i), Some(image::RgbaImage::new(32, 16))))
+                .unwrap();
+            app.poll_discovery();
+        }
+        assert_eq!(app.discovery_art.len(), DISCOVERY_ART_CACHE);
+        assert_eq!(app.discovery_art_order.len(), DISCOVERY_ART_CACHE);
+        for i in 0..3 {
+            assert!(!app.discovery_art_cached(&url(i)), "{i} should be evicted");
+        }
+        assert!(app.discovery_art_cached(&url(3)));
+        assert!(app.discovery_art_cached(&url(total - 1)));
+        assert!(
+            app.discovery_art_order
+                .iter()
+                .all(|cached| app.discovery_art.contains_key(cached))
+        );
+        assert!(app.discovery_art_pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn opening_a_discovery_page_retries_failed_covers_but_keeps_decoded_ones() {
+        let mut app = discovery_app();
+        // Offline, so opening the page never starts a feed request.
+        app.offline = true;
+        let good = "https://example.invalid/good".to_string();
+        let bad = "https://example.invalid/bad".to_string();
+        app.discovery_art
+            .insert(good.clone(), Some(image::RgbaImage::new(32, 16)));
+        app.discovery_art.insert(bad.clone(), None);
+        app.discovery_art_order.push_back(good.clone());
+        app.discovery_art_order.push_back(bad.clone());
+        app.sidebar_index = 1;
+        app.activate_sidebar();
+        assert_eq!(app.discovery_page, Some(DiscoveryPage::Explore));
+        assert!(app.discovery_art_cached(&good));
+        assert!(!app.discovery_art_cached(&bad));
+        assert_eq!(app.discovery_art_order, [good]);
     }
 
     #[tokio::test]
