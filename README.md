@@ -404,6 +404,6 @@ ytmtui tracks <id>       # list tracks of a playlist / album / artist
 
 YTMTUI is licensed under the **MIT License**.
 
-Copyright (c) 2026 YTMTUI contributors
+Copyright (c) 2026 Quim Ashley M. Castillo
 
 See [LICENSE](LICENSE) for details.
